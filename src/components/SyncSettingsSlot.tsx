@@ -1,11 +1,10 @@
 import React, { useState } from 'react'
 import {
-  Cloud, CloudOff, CheckCircle, AlertCircle, Copy, Check, LogOut,
+  Cloud, CloudOff, AlertCircle, Copy, Check, LogOut,
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, configure, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
 import { useAppStore } from '../store/useAppStore'
-import { ipc } from '../lib/ipc'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -216,7 +215,8 @@ function NoFamilyView() {
     setBusy(true)
     setError(null)
     try {
-      const familyId = await createFamily(
+      // F2: createFamily now returns { familyId, inviteCode }
+      const { familyId } = await createFamily(
         {
           babyName:      settings?.baby?.name ?? '아기',
           babyBirthdate: settings?.baby?.birthdate ?? '',
@@ -402,13 +402,15 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-/** online: status + family info + invite code + logout */
+/** online: status + invite code + logout */
 function OnlineView({ detail }: { detail: string }) {
-  const { settings, saveSettings } = useAppStore()
+  const { settings } = useAppStore()
+  const syncStatus = useSyncStatus()
   const [busySignOut, setBusySignOut] = useState(false)
 
-  // Extract invite code from detail or show placeholder
-  // The invite code is stored in Firestore family doc; here we show familyId as fallback
+  // F2: display the actual 6-char invite code (surfaced from syncEngine state),
+  // not the internal familyId UUID which is useless to the user.
+  const inviteCode = syncStatus.inviteCode ?? ''
   const familyId = settings?.familyId ?? ''
 
   const handleSignOut = async () => {
@@ -436,7 +438,8 @@ function OnlineView({ detail }: { detail: string }) {
 
       <div style={{ fontSize: 12, color: 'var(--stone-500)' }}>{detail}</div>
 
-      {familyId && (
+      {/* F2: Show the 6-char invite code with copy button and correct instruction */}
+      {(inviteCode || familyId) && (
         <div style={{
           background: 'var(--cream-100)',
           border: '1px solid var(--stone-200)',
@@ -446,18 +449,18 @@ function OnlineView({ detail }: { detail: string }) {
           flexDirection: 'column',
           gap: 8,
         }}>
-          <div style={{ fontSize: 11, color: 'var(--stone-400)', fontWeight: 500 }}>가족 ID</div>
+          <div style={{ fontSize: 11, color: 'var(--stone-400)', fontWeight: 500 }}>초대 코드</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <code style={{
-              fontSize: 11, color: 'var(--stone-600)',
-              flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              fontSize: 18, fontWeight: 700, color: 'var(--stone-700)',
+              letterSpacing: '0.2em', flex: 1,
             }}>
-              {familyId}
+              {inviteCode || '불러오는 중...'}
             </code>
-            <CopyButton text={familyId} />
+            {inviteCode && <CopyButton text={inviteCode} />}
           </div>
           <div style={{ fontSize: 11, color: 'var(--stone-400)', lineHeight: 1.5 }}>
-            엄마 맥에서 이 ID를 초대코드 입력란에 붙여넣으세요.
+            상대방 기기에서 이 6자리 코드를 "초대코드로 참여" 화면에 입력하세요.
           </div>
         </div>
       )}
