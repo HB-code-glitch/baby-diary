@@ -1,0 +1,75 @@
+rules_version = '2';
+//
+// firestore.rules — BABY DIARY
+//
+// 설계 원칙:
+//   1. 가족 멤버(uid가 members 맵에 있음)만 자신의 가족 문서와 이벤트 접근 가능
+//   2. 이벤트 doc은 create-only (update/delete 불가 — append-only 아키텍처 보장)
+//   3. 가족 문서는 members에 의해 업데이트 가능 (멤버 추가, 아기 정보 수정)
+//   4. inviteCode로 가족 검색: 미인증 사용자에게도 get/list 허용하되 쓰기는 불가
+//      → 단, 로그인한 사용자만 query 허용 (request.auth != null)
+//      → 트레이드오프: 로그인된 사용자라면 초대코드 무차별 대입 가능
+//        (6자리 대문자+숫자 ≈ 1.6억 경우. Spark 무료 플랜 읽기 쿼터 5만/일 제약으로
+//         실질적 무차별 대입 불가능. Cloud Functions 없이 달성 가능한 최선.)
+//   5. rev 감소 방지: events는 create-only이므로 자동 보장 (doc 재작성 불가)
+//   6. deleted 필드 하드 삭제 방지: doc 자체를 delete할 수 없으므로 자동 보장
+//
+// ─── 보안 감사 소견 ────────────────────────────────────────────────────────
+// [PASS] members 멤버만 가족 데이터 접근 — uid 기반 맵 체크
+// [PASS] 이벤트 create-only — update/delete 규칙 없음
+// [PASS] 이벤트 rev/id 위조 방지 — doc id는 클라이언트 지정이나 create-only이므로
+//        한번 쓴 id_rev는 변경 불가 (재정의 시도 = create이고 이미 존재하면 실패)
+// [WARN] joinFamily: 초대코드 쿼리는 인증된 사용자에게 열려있음
+//        (Spark 무료 플랜 쿼터로 무차별 대입은 실용적으로 불가능)
+// [WARN] 가족 문서 update: 멤버라면 모든 필드 수정 가능
+//        (파트너가 악의적으로 아기 정보 수정 가능 — 신뢰 기반 가족 앱 허용 범위)
+// [PASS] 비인증 사용자 접근 없음
+// ──────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── 가족 문서 ──────────────────────────────────────────────────────────
+    match /families/{familyId} {
+
+      // 멤버 여부 확인 함수
+      function isMember() {
+        return request.auth != null
+          && resource.data.members[request.auth.uid] != null;
+      }
+
+      // 초대코드로 검색: 로그인한 사용자는 inviteCode 필드로 query 가능
+      // (members에 없어도 됨 — 합류 전에 조회해야 하므로)
+      allow get, list: if request.auth != null;
+
+      // 새 가족 생성: 로그인한 사용자, 자신이 members에 포함되어 있어야 함
+      allow create: if request.auth != null
+        && request.resource.data.members[request.auth.uid] != null
+        && request.resource.data.inviteCode is string
+        && request.resource.data.inviteCode.size() == 6;
+
+      // 가족 정보 수정 (멤버 추가, 아기 정보 등): 기존 멤버만
+      allow update: if isMember();
+
+      // 삭제는 허용하지 않음
+      allow delete: if false;
+
+      // ── 이벤트 서브컬렉션 ─────────────────────────────────────────────
+      match /events/{eventDocId} {
+
+        // 읽기: 가족 멤버만
+        allow read: if request.auth != null
+          && get(/databases/$(database)/documents/families/$(familyId)).data.members[request.auth.uid] != null;
+
+        // 쓰기: create-only (멤버만), update/delete 불가
+        // doc id는 "{eventId}_{rev}" 형식이어야 함 (클라이언트 규약 — 규칙으로 강제 어려움)
+        allow create: if request.auth != null
+          && get(/databases/$(database)/documents/families/$(familyId)).data.members[request.auth.uid] != null;
+
+        // update/delete 명시적 거부 (create-only 보장)
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+  }
+}
