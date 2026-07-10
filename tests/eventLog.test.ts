@@ -113,4 +113,156 @@ describe('EventLog', () => {
     expect(files[0]).toMatch(/events-2024-01\.jsonl/)
     expect(files[1]).toMatch(/events-2024-02\.jsonl/)
   })
+
+  // ── F1 regression: torn final line (no trailing newline) fuses prevention ──
+
+  it('F1: file ends without trailing newline — new append does NOT fuse with prior line', () => {
+    // Write e1 directly without a trailing newline (simulates crash after write but before
+    // the newline was flushed — the exact scenario F1 prevents).
+    const e1 = makeEvent()
+    const files_before = fs.readdirSync(tmpDir)
+    // First do a normal append so the month file exists
+    log.append(e1)
+
+    const files = fs.readdirSync(tmpDir)
+    expect(files).toHaveLength(1)
+    const filePath = path.join(tmpDir, files[0])
+
+    // Simulate the "no trailing newline" crash: strip the final \n
+    const raw = fs.readFileSync(filePath)
+    expect(raw[raw.length - 1]).toBe(0x0a)  // confirm normal append ends with \n
+    fs.writeFileSync(filePath, raw.slice(0, raw.length - 1))  // remove trailing \n
+
+    // Now append a second valid event via real append path
+    const e2 = makeEvent()
+    const log2 = new EventLog({ dataDir: tmpDir })
+    const result = log2.append(e2)
+    expect(result).toBe(true)
+
+    // Reload fresh — both events must survive (F1 inserted a \n before e2)
+    const log3 = new EventLog({ dataDir: tmpDir })
+    const events = log3.loadAll()
+    expect(events.some(ev => ev.id === e1.id)).toBe(true)
+    expect(events.some(ev => ev.id === e2.id)).toBe(true)
+  })
+
+  it('F1: torn partial JSON final line — new event survives, partial skipped', () => {
+    // Write a COMPLETE event first (with newline), then append a PARTIAL line
+    // WITHOUT a preceding newline — like a crash mid-write of a second event.
+    // Before F1: next append fuses with partial → new event gone on reload.
+    // After F1:  F1 inserts \n before the partial (separating it), and then the
+    //            new event on its own line. On reload: partial is skipped (malformed),
+    //            new event survives.
+    //
+    // NOTE: the partial fragment appended here simulates a byte-torn write where
+    // the newline BETWEEN events was lost (not the newline AFTER the fragment).
+    // To isolate just the F1 scenario we:
+    //   1. write e1 + \n  (complete, via normal append)
+    //   2. manually write a partial line WITHOUT a preceding \n
+    //      (simulates: newline separator got dropped in a crash)
+    //   3. call append(e2) via the real code path
+    //   4. expect e2 to be in loadAll() output; partial to be absent
+
+    const e1 = makeEvent()
+    log.append(e1)
+
+    const files = fs.readdirSync(tmpDir)
+    const filePath = path.join(tmpDir, files[0])
+
+    // The file currently ends with \n (e1 complete). Now write a partial second
+    // entry directly (simulates a partial write that left no preceding \n).
+    // We strip the trailing \n from e1's line first, then add partial bytes:
+    //   file: <e1-json><partial-bytes>   (no \n anywhere after e1)
+    const rawE1 = fs.readFileSync(filePath)
+    const partial = Buffer.from('{"id":"bad","type":"pe')  // intentionally truncated
+    fs.writeFileSync(filePath, Buffer.concat([rawE1.slice(0, rawE1.length - 1), partial]))
+
+    // Now append e2 via real code path — F1 must insert \n before e2 to not fuse
+    const e2 = makeEvent()
+    const log2 = new EventLog({ dataDir: tmpDir })
+    const appended = log2.append(e2)
+    expect(appended).toBe(true)
+
+    // Reload and verify
+    const log3 = new EventLog({ dataDir: tmpDir })
+    const events = log3.loadAll()
+
+    // e2 must survive (was on its own properly separated line after F1 fix)
+    expect(events.some(ev => ev.id === e2.id)).toBe(true)
+    // The partial fragment must NOT appear as a valid event
+    expect(events.some(ev => ev.id === 'bad')).toBe(false)
+  })
+
+  it('F1: append to file missing trailing newline inserts newline first', () => {
+    const e = makeEvent()
+    log.append(e)
+
+    const files = fs.readdirSync(tmpDir)
+    const filePath = path.join(tmpDir, files[0])
+
+    // Manually strip trailing newline to simulate crash
+    const raw = fs.readFileSync(filePath)
+    fs.writeFileSync(filePath, raw.slice(0, raw.length - 1))
+
+    // Append second event — must not corrupt first event
+    const e2 = makeEvent()
+    log.append(e2)
+
+    const log2 = new EventLog({ dataDir: tmpDir })
+    const events = log2.loadAll()
+    expect(events).toHaveLength(2)
+    expect(events.some(ev => ev.id === e.id)).toBe(true)
+    expect(events.some(ev => ev.id === e2.id)).toBe(true)
+  })
+
+  // ── F4 regression: IPC payload validation ──
+
+  it('F4: rejects event with empty id', () => {
+    const e = makeEvent({ id: '' })
+    const result = log.append(e)
+    expect(result).toBe(false)
+    expect(log.loadAll()).toHaveLength(0)
+  })
+
+  it('F4: rejects event with non-positive rev', () => {
+    const e = makeEvent({ rev: 0 })
+    const result = log.append(e)
+    expect(result).toBe(false)
+  })
+
+  it('F4: rejects event with invalid at date', () => {
+    const e = makeEvent({ at: 'not-a-date' })
+    const result = log.append(e)
+    expect(result).toBe(false)
+  })
+
+  it('F4: rejects event with invalid type', () => {
+    const e = makeEvent({ type: 'unknown' as never })
+    const result = log.append(e)
+    expect(result).toBe(false)
+  })
+
+  it('F4: rejects event with non-boolean deleted', () => {
+    const e = { ...makeEvent(), deleted: 'yes' }
+    const result = log.append(e as never)
+    expect(result).toBe(false)
+  })
+
+  it('F4: rejects event with invalid createdAt', () => {
+    const e = makeEvent({ createdAt: 'bad-date' })
+    const result = log.append(e)
+    expect(result).toBe(false)
+  })
+
+  it('F4: rejects event with invalid updatedAt', () => {
+    const e = makeEvent({ updatedAt: 'bad-date' })
+    const result = log.append(e)
+    expect(result).toBe(false)
+  })
+
+  it('F4: accepts a fully valid event', () => {
+    const e = makeEvent()
+    const result = log.append(e)
+    expect(result).toBe(true)
+  })
 })
