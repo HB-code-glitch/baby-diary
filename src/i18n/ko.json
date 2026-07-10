@@ -44,7 +44,12 @@
     "minutesPlaceholder": "분",
     "formulaAmount": "분유량",
     "cancel": "취소",
-    "record": "기록"
+    "record": "기록",
+    "breastSuggestion": "지난번 {{side}} → 이번엔 반대쪽 추천",
+    "timerStart": "타이머 시작",
+    "timerStop": "종료하고 기록",
+    "timerFloating": "수유 중 {{mm}}:{{ss}}",
+    "timerStopFloating": "종료"
   },
   "breast": {
     "left": "왼쪽",
@@ -88,10 +93,28 @@
     "cancel": "취소",
     "confirm": "확인"
   },
+  "quickBtnHint": "단축키 1~5",
   "history": {
     "title": "기록",
     "today": "오늘",
-    "filterAll": "전체"
+    "filterAll": "전체",
+    "viewMonth": "월",
+    "viewWeek": "주",
+    "viewDay": "일",
+    "monthTitle": "{{year}}년 {{month}}월",
+    "weekTitle": "{{m1}}월 {{d1}}일 ~ {{m2}}월 {{d2}}일",
+    "weekTitleSameMonth": "{{month}}월 {{d1}}일 ~ {{d2}}일",
+    "weekdaySun": "일",
+    "weekdayMon": "월",
+    "weekdayTue": "화",
+    "weekdayWed": "수",
+    "weekdayThu": "목",
+    "weekdayFri": "금",
+    "weekdaySat": "토",
+    "diaperIndicator": "기저귀",
+    "feedingIndicator": "수유",
+    "tempHighIndicator": "체온↑",
+    "diaryIndicator": "일기"
   },
   "stats": {
     "title": "통계",

@@ -121,14 +121,30 @@ interface TempPopoverProps {
   anchor: DOMRect
   onConfirm: (celsius: number) => void
   onClose: () => void
+  defaultValue: number
 }
 
-function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
-  const [value, setValue] = useState('37.0')
+function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverProps) {
+  const [value, setValue] = useState(defaultValue.toFixed(1))
   const inputRef = useRef<HTMLInputElement>(null)
   const { t } = useTranslation()
 
-  useEffect(() => { inputRef.current?.focus() }, [])
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [])
+
+  const handleSubmit = () => {
+    const n = parseFloat(value)
+    if (!isNaN(n)) onConfirm(n)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleSubmit() }
+    if (e.key === 'Escape') { e.preventDefault(); onClose() }
+  }
 
   const style: React.CSSProperties = {
     top: anchor.bottom + 8,
@@ -138,7 +154,11 @@ function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
   return (
     <>
       <div className="popover-overlay" onClick={onClose} />
-      <div className="popover" style={style}>
+      <form
+        className="popover"
+        style={style}
+        onSubmit={e => { e.preventDefault(); handleSubmit() }}
+      >
         <div className="label">{t('popover.tempInput')}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <input
@@ -151,24 +171,32 @@ function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
             style={{ width: 100 }}
             value={value}
             onChange={e => setValue(e.target.value)}
+            onKeyDown={handleKeyDown}
           />
           <span style={{ fontSize: 14, color: 'var(--stone-600)', fontWeight: 600 }}>℃</span>
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
-          <button
-            className="btn-primary"
-            onClick={() => {
-              const n = parseFloat(value)
-              if (!isNaN(n)) onConfirm(n)
-            }}
-          >
-            {t('popover.record')}
-          </button>
+          <button type="button" className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
+          <button type="submit" className="btn-primary">{t('popover.record')}</button>
         </div>
-      </div>
+      </form>
     </>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Nursing timer state (module-level so it survives popover open/close)
+// ---------------------------------------------------------------------------
+interface NursingTimerState {
+  running: boolean
+  startedAt: number | null   // Date.now() when timer started
+  elapsed: number            // seconds accumulated before pause (unused — always reset)
+}
+
+const nursingTimer: NursingTimerState = {
+  running: false,
+  startedAt: null,
+  elapsed: 0,
 }
 
 // ---------------------------------------------------------------------------
@@ -176,14 +204,86 @@ function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
 // ---------------------------------------------------------------------------
 interface BreastPopoverProps {
   anchor: DOMRect
-  onConfirm: (side: 'L' | 'R' | 'both', minutes?: number) => void
+  onConfirm: (side: 'L' | 'R' | 'both', minutes?: number, startedAt?: string) => void
   onClose: () => void
+  lastBreastSide: 'L' | 'R' | 'both' | null
+  onTimerChange: () => void  // notify parent to re-render floating pill
 }
 
-function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
-  const [side, setSide] = useState<'L' | 'R' | 'both'>('both')
+function BreastPopover({ anchor, onConfirm, onClose, lastBreastSide, onTimerChange }: BreastPopoverProps) {
+  // Preselect opposite side of last feeding
+  const suggestedSide: 'L' | 'R' | 'both' = lastBreastSide === 'L' ? 'R' : lastBreastSide === 'R' ? 'L' : 'both'
+  const [side, setSide] = useState<'L' | 'R' | 'both'>(suggestedSide)
   const [minutes, setMinutes] = useState('')
+  const [timerDisplay, setTimerDisplay] = useState<string | null>(null)
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const { t } = useTranslation()
+  const minutesRef = useRef<HTMLInputElement>(null)
+
+  // If timer was already running when popover opened, reflect that
+  useEffect(() => {
+    if (nursingTimer.running && nursingTimer.startedAt != null) {
+      const sec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
+      setTimerDisplay(formatElapsed(sec))
+      startDisplayInterval()
+    }
+    return () => {
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const formatElapsed = (totalSec: number) => {
+    const mm = String(Math.floor(totalSec / 60)).padStart(2, '0')
+    const ss = String(totalSec % 60).padStart(2, '0')
+    return `${mm}:${ss}`
+  }
+
+  const startDisplayInterval = () => {
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current)
+    timerIntervalRef.current = setInterval(() => {
+      if (nursingTimer.running && nursingTimer.startedAt != null) {
+        const sec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
+        setTimerDisplay(formatElapsed(sec))
+      }
+    }, 1000)
+  }
+
+  const handleStartTimer = () => {
+    if (!nursingTimer.running) {
+      nursingTimer.running = true
+      nursingTimer.startedAt = Date.now()
+      setTimerDisplay('00:00')
+      startDisplayInterval()
+      onTimerChange()
+    }
+  }
+
+  const handleStopAndRecord = () => {
+    if (nursingTimer.running && nursingTimer.startedAt != null) {
+      const elapsedSec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
+      const elapsedMin = Math.max(1, Math.ceil(elapsedSec / 60))
+      const startedAtISO = new Date(nursingTimer.startedAt).toISOString()
+      nursingTimer.running = false
+      nursingTimer.startedAt = null
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current)
+      onTimerChange()
+      onConfirm(side, elapsedMin, startedAtISO)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); onClose() }
+    if (e.key === 'Enter' && document.activeElement !== minutesRef.current) {
+      e.preventDefault()
+      handleManualRecord()
+    }
+  }
+
+  const handleManualRecord = () => {
+    const m = minutes ? parseInt(minutes, 10) : undefined
+    onConfirm(side, isNaN(m as number) ? undefined : m)
+  }
 
   const style: React.CSSProperties = {
     top: anchor.bottom + 8,
@@ -196,15 +296,31 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
     { value: 'both', label: t('breast.both') },
   ]
 
+  const lastSideLabel = lastBreastSide === 'L' ? t('breast.left') : lastBreastSide === 'R' ? t('breast.right') : null
+
   return (
     <>
       <div className="popover-overlay" onClick={onClose} />
-      <div className="popover" style={style}>
-        <div className="label" style={{ marginBottom: 8 }}>{t('popover.breastFeeding')}</div>
+      <form
+        className="popover"
+        style={style}
+        onSubmit={e => { e.preventDefault(); handleManualRecord() }}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="label" style={{ marginBottom: 4 }}>{t('popover.breastFeeding')}</div>
+
+        {/* Suggestion pill */}
+        {lastSideLabel && (
+          <div className="breast-suggestion-pill" style={{ marginBottom: 8 }}>
+            {t('popover.breastSuggestion', { side: lastSideLabel })}
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
           {SIDES.map(({ value, label }) => (
             <button
               key={value}
+              type="button"
               className={`role-btn${side === value ? ' selected' : ''}`}
               onClick={() => setSide(value)}
             >
@@ -212,9 +328,39 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
             </button>
           ))}
         </div>
+
+        {/* Nursing timer section */}
+        <div style={{ marginBottom: 10 }}>
+          {!nursingTimer.running ? (
+            <button
+              type="button"
+              className="btn-secondary"
+              style={{ width: '100%', marginBottom: 8 }}
+              onClick={handleStartTimer}
+            >
+              {t('popover.timerStart')}
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ flex: 1, fontVariantNumeric: 'tabular-nums', fontWeight: 700, fontSize: 18, color: 'var(--peach-500)', letterSpacing: '0.02em' }}>
+                {timerDisplay ?? '00:00'}
+              </span>
+              <button
+                type="button"
+                className="btn-primary"
+                style={{ background: 'var(--peach-500)' }}
+                onClick={handleStopAndRecord}
+              >
+                {t('popover.timerStop')}
+              </button>
+            </div>
+          )}
+        </div>
+
         <div className="label">{t('popover.feedingDuration')}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <input
+            ref={minutesRef}
             type="number"
             min="1"
             max="120"
@@ -227,18 +373,10 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
           <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('popover.minutesPlaceholder')}</span>
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
-          <button
-            className="btn-primary"
-            onClick={() => {
-              const m = minutes ? parseInt(minutes, 10) : undefined
-              onConfirm(side, isNaN(m as number) ? undefined : m)
-            }}
-          >
-            {t('popover.record')}
-          </button>
+          <button type="button" className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
+          <button type="submit" className="btn-primary">{t('popover.record')}</button>
         </div>
-      </div>
+      </form>
     </>
   )
 }
@@ -250,12 +388,18 @@ interface FormulaPopoverProps {
   anchor: DOMRect
   onConfirm: (ml: number) => void
   onClose: () => void
+  defaultMl: number
 }
 
-function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
-  const [ml, setMl] = useState(120)
+function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopoverProps) {
+  const [ml, setMl] = useState(defaultMl)
   const SHORTCUTS = [60, 80, 100, 120, 150, 180]
   const { t } = useTranslation()
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); onConfirm(ml) }
+    if (e.key === 'Escape') { e.preventDefault(); onClose() }
+  }
 
   const style: React.CSSProperties = {
     top: anchor.bottom + 8,
@@ -265,17 +409,23 @@ function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
   return (
     <>
       <div className="popover-overlay" onClick={onClose} />
-      <div className="popover" style={style}>
+      <form
+        className="popover"
+        style={style}
+        onSubmit={e => { e.preventDefault(); onConfirm(ml) }}
+        onKeyDown={handleKeyDown}
+      >
         <div className="label" style={{ marginBottom: 8 }}>{t('popover.formulaAmount')}</div>
         <div className="stepper" style={{ marginBottom: 10 }}>
-          <button className="stepper-btn" onClick={() => setMl(v => Math.max(0, v - 10))}>−</button>
+          <button type="button" className="stepper-btn" onClick={() => setMl(v => Math.max(0, v - 10))}>−</button>
           <div className="stepper-value">{ml}</div>
           <span style={{ fontSize: 12, color: 'var(--stone-500)', paddingRight: 6 }}>ml</span>
-          <button className="stepper-btn" onClick={() => setMl(v => v + 10)}>+</button>
+          <button type="button" className="stepper-btn" onClick={() => setMl(v => v + 10)}>+</button>
         </div>
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 12 }}>
           {SHORTCUTS.map(v => (
             <button
+              type="button"
               key={v}
               className={`filter-chip${ml === v ? ' active' : ''}`}
               onClick={() => setMl(v)}
@@ -285,11 +435,50 @@ function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
           ))}
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
-          <button className="btn-primary" onClick={() => onConfirm(ml)}>{t('popover.record')}</button>
+          <button type="button" className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
+          <button type="submit" className="btn-primary">{t('popover.record')}</button>
         </div>
-      </div>
+      </form>
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Floating nursing timer pill
+// ---------------------------------------------------------------------------
+interface FloatingTimerPillProps {
+  onStop: () => void
+}
+
+function FloatingTimerPill({ onStop }: FloatingTimerPillProps) {
+  const [display, setDisplay] = useState('00:00')
+  const { t } = useTranslation()
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (nursingTimer.running && nursingTimer.startedAt != null) {
+        const sec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
+        const mm = String(Math.floor(sec / 60)).padStart(2, '0')
+        const ss = String(sec % 60).padStart(2, '0')
+        setDisplay(`${mm}:${ss}`)
+      }
+    }, 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const [mm, ss] = display.split(':')
+
+  return (
+    <div className="floating-timer-pill">
+      <span className="floating-timer-time">{t('popover.timerFloating', { mm, ss })}</span>
+      <button
+        className="floating-timer-stop"
+        onClick={onStop}
+        aria-label={t('popover.timerStopFloating')}
+      >
+        {t('popover.timerStopFloating')}
+      </button>
+    </div>
   )
 }
 
@@ -304,13 +493,40 @@ interface HomePageProps {
 }
 
 export function HomePage({ onNavigate }: HomePageProps) {
-  const { addPee, addPoop, addTemp, addBreast, addFormula, editEvent, softDeleteEvent, todayEvents } = useAppStore()
+  const { addPee, addPoop, addTemp, addBreast, addFormula, editEvent, softDeleteEvent, todayEvents, events } = useAppStore()
   const { showToast } = useToast()
   const { t } = useTranslation()
   const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
   const [timeEditEvent, setTimeEditEvent] = useState<DiaryEvent | null>(null)
+  const [timerTick, setTimerTick] = useState(0)  // force re-render when timer changes
 
   const today = todayEvents()
+
+  // Derive last formula ml and last temp from all events
+  const lastFormulaMl = React.useMemo(() => {
+    const formulas = events.filter(e => !e.deleted && e.type === 'formula')
+    if (formulas.length === 0) return 120
+    const last = formulas.sort((a, b) => b.at.localeCompare(a.at))[0]
+    return (last.data as FormulaData).ml ?? 120
+  }, [events])
+
+  const lastTemp = React.useMemo(() => {
+    const temps = events.filter(e => !e.deleted && e.type === 'temp')
+    if (temps.length === 0) return 36.5
+    const last = temps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    return (last.data as { celsius: number }).celsius ?? 36.5
+  }, [events])
+
+  const lastBreastSide = React.useMemo((): 'L' | 'R' | 'both' | null => {
+    const breasts = events.filter(e => !e.deleted && e.type === 'breast')
+    if (breasts.length === 0) return null
+    const last = breasts.sort((a, b) => b.at.localeCompare(a.at))[0]
+    return (last.data as BreastData).side ?? null
+  }, [events])
+
+  const onTimerChange = useCallback(() => {
+    setTimerTick(t => t + 1)
+  }, [])
 
   // Quick record with undo + time-edit toast
   const quickRecord = useCallback(async (
@@ -326,8 +542,8 @@ export function HomePage({ onNavigate }: HomePageProps) {
     })
   }, [showToast, softDeleteEvent, t])
 
-  const handlePee = () => quickRecord(() => addPee(), t('quickBtn.pee'))
-  const handlePoop = () => quickRecord(() => addPoop(), t('quickBtn.poop'))
+  const handlePee = useCallback(() => quickRecord(() => addPee(), t('quickBtn.pee')), [quickRecord, addPee, t])
+  const handlePoop = useCallback(() => quickRecord(() => addPoop(), t('quickBtn.poop')), [quickRecord, addPoop, t])
 
   const openPopover = (type: ActivePopover, e: React.MouseEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -339,7 +555,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
     await quickRecord(() => addTemp(celsius), `${t('quickBtn.temp')} ${celsius.toFixed(1)}℃`)
   }
 
-  const handleBreastConfirm = async (side: 'L' | 'R' | 'both', minutes?: number) => {
+  const handleBreastConfirm = async (side: 'L' | 'R' | 'both', minutes?: number, startedAt?: string) => {
     setPopover(null)
     const sideLabel = side === 'L'
       ? t('breast.left')
@@ -347,7 +563,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
         ? t('breast.right')
         : t('breast.both')
     const label = `${t('quickBtn.breast')}(${sideLabel})`
-    await quickRecord(() => addBreast(side, minutes), label)
+    await quickRecord(() => addBreast(side, minutes, startedAt), label)
   }
 
   const handleFormulaConfirm = async (ml: number) => {
@@ -362,6 +578,59 @@ export function HomePage({ onNavigate }: HomePageProps) {
     showToast({ message: t('toast.timeEdited') })
   }
 
+  // Floating timer stop handler
+  const handleFloatingTimerStop = useCallback(() => {
+    if (nursingTimer.running && nursingTimer.startedAt != null) {
+      const elapsedSec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
+      const elapsedMin = Math.max(1, Math.ceil(elapsedSec / 60))
+      const startedAtISO = new Date(nursingTimer.startedAt).toISOString()
+      const side: 'L' | 'R' | 'both' = lastBreastSide === 'L' ? 'R' : lastBreastSide === 'R' ? 'L' : 'both'
+      nursingTimer.running = false
+      nursingTimer.startedAt = null
+      setTimerTick(t => t + 1)
+      handleBreastConfirm(side, elapsedMin, startedAtISO)
+    }
+  }, [lastBreastSide]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keyboard shortcuts (1-5) on home page only
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ignore if focus is in an input or textarea
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      // Ignore if modifier keys held
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      // Ignore if a popover is open
+      if (popover) return
+
+      switch (e.key) {
+        case '1': e.preventDefault(); handlePee(); break
+        case '2': e.preventDefault(); handlePoop(); break
+        case '3': {
+          e.preventDefault()
+          // find temp button and fake click
+          const btn = document.querySelector('.quick-btn-temp') as HTMLElement
+          if (btn) btn.click()
+          break
+        }
+        case '4': {
+          e.preventDefault()
+          const btn = document.querySelector('.quick-btn-breast') as HTMLElement
+          if (btn) btn.click()
+          break
+        }
+        case '5': {
+          e.preventDefault()
+          const btn = document.querySelector('.quick-btn-formula') as HTMLElement
+          if (btn) btn.click()
+          break
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [popover, handlePee, handlePoop])
+
   return (
     <div className="page-container">
       {/* Hero header strip */}
@@ -372,41 +641,52 @@ export function HomePage({ onNavigate }: HomePageProps) {
         display: 'grid',
         gridTemplateColumns: 'repeat(5, 1fr)',
         gap: 10,
-        marginBottom: 16,
+        marginBottom: 6,
       }}>
-        <button className="quick-btn quick-btn-pee" onClick={handlePee}>
+        <button className="quick-btn quick-btn-pee" onClick={handlePee} style={{ position: 'relative' }}>
+          <span className="quick-btn-badge">1</span>
           <Droplets size={26} />
           <span>{t('quickBtn.pee')}</span>
         </button>
-        <button className="quick-btn quick-btn-poop" onClick={handlePoop}>
+        <button className="quick-btn quick-btn-poop" onClick={handlePoop} style={{ position: 'relative' }}>
+          <span className="quick-btn-badge">2</span>
           <Wind size={26} />
           <span>{t('quickBtn.poop')}</span>
         </button>
         <button
           className="quick-btn quick-btn-temp"
           onClick={e => openPopover('temp', e)}
+          style={{ position: 'relative' }}
         >
+          <span className="quick-btn-badge">3</span>
           <Thermometer size={26} />
           <span>{t('quickBtn.temp')}</span>
         </button>
         <button
           className="quick-btn quick-btn-breast"
           onClick={e => openPopover('breast', e)}
+          style={{ position: 'relative' }}
         >
+          <span className="quick-btn-badge">4</span>
           <Heart size={26} />
           <span>{t('quickBtn.breast')}</span>
         </button>
         <button
           className="quick-btn quick-btn-formula"
           onClick={e => openPopover('formula', e)}
+          style={{ position: 'relative' }}
         >
+          <span className="quick-btn-badge">5</span>
           <Baby size={26} />
           <span>{t('quickBtn.formula')}</span>
         </button>
       </div>
 
+      {/* Keyboard shortcut hint */}
+      <div className="quick-btn-hint">{t('quickBtnHint')}</div>
+
       {/* Today summary */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 20, marginTop: 10 }}>
         <TodaySummary />
       </div>
 
@@ -420,12 +700,18 @@ export function HomePage({ onNavigate }: HomePageProps) {
         <EventTimeline events={today} showAuthor editable />
       </div>
 
+      {/* Floating nursing timer pill */}
+      {nursingTimer.running && (
+        <FloatingTimerPill key={timerTick} onStop={handleFloatingTimerStop} />
+      )}
+
       {/* Popovers */}
       {popover?.type === 'temp' && (
         <TempPopover
           anchor={popover.anchor}
           onConfirm={handleTempConfirm}
           onClose={() => setPopover(null)}
+          defaultValue={lastTemp}
         />
       )}
       {popover?.type === 'breast' && (
@@ -433,6 +719,8 @@ export function HomePage({ onNavigate }: HomePageProps) {
           anchor={popover.anchor}
           onConfirm={handleBreastConfirm}
           onClose={() => setPopover(null)}
+          lastBreastSide={lastBreastSide}
+          onTimerChange={onTimerChange}
         />
       )}
       {popover?.type === 'formula' && (
@@ -440,6 +728,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           anchor={popover.anchor}
           onConfirm={handleFormulaConfirm}
           onClose={() => setPopover(null)}
+          defaultMl={lastFormulaMl}
         />
       )}
 

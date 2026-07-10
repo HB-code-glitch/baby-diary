@@ -44,7 +44,12 @@
     "minutesPlaceholder": "分",
     "formulaAmount": "ミルクの量",
     "cancel": "キャンセル",
-    "record": "記録"
+    "record": "記録",
+    "breastSuggestion": "前回は{{side}} → 今回は反対側がおすすめ",
+    "timerStart": "タイマー開始",
+    "timerStop": "終了して記録",
+    "timerFloating": "授乳中 {{mm}}:{{ss}}",
+    "timerStopFloating": "終了"
   },
   "breast": {
     "left": "左",
@@ -88,10 +93,28 @@
     "cancel": "キャンセル",
     "confirm": "確認"
   },
+  "quickBtnHint": "ショートカット 1〜5",
   "history": {
     "title": "記録",
     "today": "今日",
-    "filterAll": "すべて"
+    "filterAll": "すべて",
+    "viewMonth": "月",
+    "viewWeek": "週",
+    "viewDay": "日",
+    "monthTitle": "{{year}}年{{month}}月",
+    "weekTitle": "{{m1}}月{{d1}}日〜{{m2}}月{{d2}}日",
+    "weekTitleSameMonth": "{{month}}月{{d1}}日〜{{d2}}日",
+    "weekdaySun": "日",
+    "weekdayMon": "月",
+    "weekdayTue": "火",
+    "weekdayWed": "水",
+    "weekdayThu": "木",
+    "weekdayFri": "金",
+    "weekdaySat": "土",
+    "diaperIndicator": "おむつ",
+    "feedingIndicator": "授乳",
+    "tempHighIndicator": "体温↑",
+    "diaryIndicator": "日記"
   },
   "stats": {
     "title": "グラフ",
