@@ -149,8 +149,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   lastFeeding: () => {
+    const nowIso = new Date().toISOString()
     const feedings = get().events
-      .filter(e => !e.deleted && (e.type === 'breast' || e.type === 'formula'))
+      .filter(e => !e.deleted && (e.type === 'breast' || e.type === 'formula') && e.at <= nowIso)
       .sort((a, b) => b.at.localeCompare(a.at))
     return feedings[0] ?? null
   },

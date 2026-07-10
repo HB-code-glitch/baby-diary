@@ -5,6 +5,8 @@ import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
   isToday, isSameDay, isSameMonth, getDay, parseISO,
 } from 'date-fns'
+import { ko } from 'date-fns/locale'
+import { ja } from 'date-fns/locale'
 import { useAppStore, getDDay } from '../store/useAppStore'
 import { EventTimeline } from '../components/EventTimeline'
 import { EventType, DiaryEvent, FormulaData } from '../../shared/types'
@@ -264,27 +266,27 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
                 {ddayForDay != null && (
                   <span className="cal-week-dday">D+{ddayForDay}</span>
                 )}
-                {isTodayDay && <span className="cal-week-today-badge">TODAY</span>}
+                {isTodayDay && <span className="cal-week-today-badge">{t('history.today')}</span>}
               </div>
 
               {/* Summary chips */}
               <div className="cal-week-chips">
                 {(peeCount > 0 || poopCount > 0) && (
                   <span className="cal-chip cal-chip-sage">
-                    {peeCount > 0 && `소변 ${peeCount}`}
+                    {peeCount > 0 && `${t('event.pee')} ${peeCount}`}
                     {peeCount > 0 && poopCount > 0 && ' · '}
-                    {poopCount > 0 && `대변 ${poopCount}`}
+                    {poopCount > 0 && `${t('event.poop')} ${poopCount}`}
                   </span>
                 )}
                 {(breastCount > 0 || formulaCount > 0) && (
                   <span className="cal-chip cal-chip-peach">
-                    {breastCount > 0 && `모유 ${breastCount}`}
+                    {breastCount > 0 && `${t('event.breast')} ${breastCount}`}
                     {breastCount > 0 && formulaCount > 0 && ' · '}
-                    {formulaCount > 0 && (formulaMl > 0 ? `분유 ${formulaMl}ml` : `분유 ${formulaCount}`)}
+                    {formulaCount > 0 && (formulaMl > 0 ? `${t('event.formula')} ${formulaMl}ml` : `${t('event.formula')} ${formulaCount}`)}
                   </span>
                 )}
                 {hasHighTemp && (
-                  <span className="cal-chip cal-chip-red">체온↑</span>
+                  <span className="cal-chip cal-chip-red">{t('history.tempHighIndicator')}</span>
                 )}
               </div>
 
@@ -317,7 +319,8 @@ interface DayViewProps {
 }
 
 function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDay, onNextDay, onGoToday }: DayViewProps) {
-  const { t } = useTranslation()
+  const { t, i18n: i18nInstance } = useTranslation()
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
 
   const TYPES: { type: EventType; labelKey: string }[] = [
     { type: 'pee',     labelKey: 'event.pee' },
@@ -346,7 +349,7 @@ function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDa
           'cal-nav-title',
           dayNum === 0 ? 'cal-sunday' : dayNum === 6 ? 'cal-saturday' : '',
         ].filter(Boolean).join(' ')}>
-          {format(selectedDate, 'M/d (EEE)', { locale: undefined })}
+          {format(selectedDate, t('date.formatLong'), { locale: dateFnsLocale })}
         </div>
         <button className="btn-secondary cal-nav-arrow" onClick={onNextDay} aria-label="next day">
           <ChevronRight size={16} />
