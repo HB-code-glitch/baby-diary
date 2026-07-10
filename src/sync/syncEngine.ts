@@ -21,15 +21,13 @@ import {
   setDoc,
   getDocs,
   onSnapshot,
-  query,
-  where,
   writeBatch,
   serverTimestamp,
   Unsubscribe,
   DocumentData,
 } from 'firebase/firestore'
 import { Auth, onAuthStateChanged, User } from 'firebase/auth'
-import { DiaryEvent, AppSettings } from '../../shared/types'
+import { DiaryEvent } from '../../shared/types'
 import { ipc } from '../lib/ipc'
 import {
   initFirebase,
@@ -56,6 +54,8 @@ export interface SyncState {
   status: SyncStatus
   detail: string
   pendingCount: number
+  /** 6-char invite code for the current family (available after createFamily or reconnect) */
+  inviteCode?: string
 }
 
 export type StatusCallback = (state: SyncState) => void
@@ -99,8 +99,31 @@ let _statusCallbacks: StatusCallback[] = []
 let _retryTimer: ReturnType<typeof setTimeout> | null = null
 let _started = false
 
+// F5: Bound _seenFromRemote to prevent unbounded memory growth.
+// We keep an insertion-ordered Set and evict the oldest entries when it
+// exceeds the cap so a long-running session never leaks memory.
+const SEEN_FROM_REMOTE_CAP = 5000
+
+class BoundedSet {
+  private _set = new Set<string>()
+
+  has(key: string): boolean {
+    return this._set.has(key)
+  }
+
+  add(key: string): void {
+    if (this._set.has(key)) return
+    this._set.add(key)
+    if (this._set.size > SEEN_FROM_REMOTE_CAP) {
+      // Evict the oldest entry (Sets iterate in insertion order)
+      const oldest = this._set.values().next().value
+      if (oldest !== undefined) this._set.delete(oldest)
+    }
+  }
+}
+
 /** 원격에서 수신한 doc id 추적 (재업로드 방지) */
-const _seenFromRemote = new Set<string>()
+const _seenFromRemote = new BoundedSet()
 
 let _state: SyncState = { status: 'no-config', detail: '', pendingCount: 0 }
 
@@ -225,20 +248,23 @@ export async function signOutSync(): Promise<void> {
 
 /**
  * 가족 생성 (첫 번째 사용자).
+ * F2 + F-RULES: createFamily now also writes to the top-level invites/{code} collection
+ * so that joinFamily can do a direct get() instead of a list() query on families.
  * @param babyInfo 아기 이름 + 생일
  * @param profile  사용자 이름 + 역할
- * @returns familyId (Firestore doc id)
+ * @returns { familyId, inviteCode }
  */
 export async function createFamily(
   babyInfo: { babyName: string; babyBirthdate: string; familyName?: string },
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
-): Promise<string> {
+): Promise<{ familyId: string; inviteCode: string }> {
   if (!_db || !_currentUser) throw new Error('로그인 후 가족을 생성할 수 있습니다')
 
   const inviteCode = generateInviteCode()
   const familyRef = doc(collection(_db, 'families'))
+  const inviteRef = doc(_db, 'invites', inviteCode)
 
-  const familyDoc: FamilyDoc = {
+  const familyDocData: FamilyDoc = {
     name: babyInfo.familyName ?? `${profile.name}의 가족`,
     babyName: babyInfo.babyName,
     babyBirthdate: babyInfo.babyBirthdate,
@@ -249,20 +275,23 @@ export async function createFamily(
     createdAt: serverTimestamp(),
   }
 
-  await setDoc(familyRef, familyDoc)
+  // F-RULES: write family + invite in a single batch so they're always consistent
+  const batch = writeBatch(_db)
+  batch.set(familyRef, familyDocData)
+  batch.set(inviteRef, { familyId: familyRef.id, createdAt: serverTimestamp(), code_check: inviteCode })
+  await batch.commit()
+
   _familyId = familyRef.id
-  return familyRef.id
+  setState({ inviteCode })
+  return { familyId: familyRef.id, inviteCode }
 }
 
 /**
  * 초대코드로 가족 합류.
- * 보안 트레이드오프: Firestore 규칙으로는 "inviteCode가 일치하는 families 문서에
- * 누구나 get/list 가능"한 규칙을 작성하면 코드 무차별 대입에 취약.
- * → 여기서는 클라이언트 쿼리로 찾은 후 본인을 members에 추가하는 방식 채택.
- *   규칙은 "members에 없는 사용자도 inviteCode 필드로 query 허용"으로 완화하고,
- *   실제 쓰기(members 업데이트)는 members에 포함된 사용자만 가능하도록 제한.
- *   (6자리 대문자 코드: 약 1.6억 경우의 수 — Spark 무료 플랜 읽기 쿼터로 무차별
- *    대입 실질적 불가능. Cloud Functions 없이 달성 가능한 최선.)
+ * F2 + F-RULES: Uses the top-level invites/{code} collection for a direct get() lookup
+ * instead of a query on families. This prevents attackers from listing all families.
+ * The attacker still needs the exact code (get() only — no list); brute-forcing 36^6
+ * get()s is bounded by Spark quota (50k reads/day).
  * @returns familyId
  */
 export async function joinFamily(
@@ -271,15 +300,21 @@ export async function joinFamily(
 ): Promise<string> {
   if (!_db || !_currentUser) throw new Error('로그인 후 가족에 참여할 수 있습니다')
 
-  const familiesRef = collection(_db, 'families')
-  const q = query(familiesRef, where('inviteCode', '==', inviteCode.toUpperCase()))
-  const snap = await getDocs(q)
+  // F-RULES: direct get() on invites/{code} — no list needed
+  const code = inviteCode.trim().toUpperCase()
+  const inviteRef = doc(_db, 'invites', code)
+  const inviteSnap = await getDoc(inviteRef)
 
-  if (snap.empty) throw new Error('초대 코드를 찾을 수 없습니다')
+  if (!inviteSnap.exists()) throw new Error('초대 코드를 찾을 수 없습니다')
 
-  const familyDoc = snap.docs[0]
-  const familyId = familyDoc.id
-  const data = familyDoc.data() as FamilyDoc
+  const familyId = (inviteSnap.data() as { familyId: string }).familyId
+
+  // F-RULES: self-join: add only the auth.uid to members (rules verify only members key changes)
+  const familyRef = doc(_db, 'families', familyId)
+  const familySnap = await getDoc(familyRef)
+  if (!familySnap.exists()) throw new Error('가족 문서를 찾을 수 없습니다')
+
+  const data = familySnap.data() as FamilyDoc
 
   // 이미 멤버인 경우
   if (data.members[profile.uid]) {
@@ -287,12 +322,10 @@ export async function joinFamily(
     return familyId
   }
 
-  // members 맵에 본인 추가
-  const updated = {
-    ...data.members,
-    [profile.uid]: { name: profile.name, role: profile.role },
-  }
-  await setDoc(familyDoc.ref, { members: updated }, { merge: true })
+  // members 맵에 본인만 추가 (rules: diff must only affect members key)
+  await setDoc(familyRef, {
+    members: { [profile.uid]: { name: profile.name, role: profile.role } }
+  }, { merge: true })
 
   _familyId = familyId
   return familyId
@@ -389,6 +422,20 @@ async function onUserSignedIn(user: User): Promise<void> {
   setState({ status: 'connecting', detail: '동기화 중...', pendingCount: _pending.length })
 
   try {
+    // F2 + F8: fetch family doc early so we can surface the invite code and detect
+    // not-found familyIds (e.g. a leftover uuid from the old F8 bug).
+    const familyRef = doc(_db, 'families', _familyId)
+    const familySnap = await getDoc(familyRef)
+    if (!familySnap.exists()) {
+      // F8: unknown familyId — treat as no-family, offer create/join
+      _familyId = ''
+      setState({ status: 'signed-out', detail: '가족 연결 필요', pendingCount: _pending.length })
+      return
+    }
+    // F2: expose invite code in state so UI can display it
+    const familyData = familySnap.data() as FamilyDoc
+    setState({ inviteCode: familyData.inviteCode })
+
     await reconcile(user)
     attachSnapshot()
     setState({ status: 'online', detail: `${user.email} 연결됨`, pendingCount: _pending.length })
@@ -496,7 +543,38 @@ function docToEvent(docId: string, data: DocumentData): DiaryEvent {
   return (data.event ?? data) as DiaryEvent
 }
 
-/** 배치 업로드 (≤400개씩) */
+/**
+ * Upload a single event to Firestore. Returns 'ok', 'already-exists', or 'error'.
+ * F6: when a doc with the same id_rev already exists remotely (create-conflict),
+ *     we treat remote as winner and fetch it to apply locally via ipc.appendEvent.
+ */
+async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | 'error'> {
+  if (!_db || !_familyId) return 'error'
+  const docId = makeDocId(event)
+  const ref = doc(_db, 'families', _familyId, 'events', docId)
+  try {
+    const batch = writeBatch(_db)
+    batch.set(ref, { event })
+    await batch.commit()
+    return 'ok'
+  } catch (err) {
+    // Firestore returns ALREADY_EXISTS (code 6) when a create-only doc already exists
+    const code = (err as { code?: number | string }).code
+    if (code === 6 || String(code) === 'already-exists') {
+      return 'already-exists'
+    }
+    return 'error'
+  }
+}
+
+/**
+ * F6 + F7: Batch upload with per-doc fallback.
+ * 1. Try a full batch. On failure fall back to per-doc writes.
+ * 2. Docs that already exist remotely (create-conflict) → remote won: fetch remote,
+ *    apply locally, remove from pending (converged).
+ * 3. Other failing docs are quarantined: kept in pending for retry with backoff.
+ * Returns Set of docIds that were successfully uploaded OR converged remotely.
+ */
 async function batchUpload(events: DiaryEvent[]): Promise<void> {
   if (!_db || !_familyId || events.length === 0) return
 
@@ -510,7 +588,32 @@ async function batchUpload(events: DiaryEvent[]): Promise<void> {
       batch.set(ref, { event })
     }
 
-    await batch.commit()
+    try {
+      await batch.commit()
+    } catch {
+      // F7: batch failed — fall back to per-doc so one poison doc can't block the rest
+      for (const event of chunk) {
+        const result = await uploadOne(event)
+        if (result === 'already-exists') {
+          // F6: remote won — fetch it and apply locally, then converge
+          try {
+            const docId = makeDocId(event)
+            const ref = doc(_db, 'families', _familyId, 'events', docId)
+            const remoteSnap = await getDoc(ref)
+            if (remoteSnap.exists()) {
+              const remoteEvent = docToEvent(remoteSnap.id, remoteSnap.data())
+              _seenFromRemote.add(docId)
+              await ipc.appendEvent(remoteEvent)
+            }
+          } catch {
+            // best-effort; local already has our version, remote won will propagate via snapshot
+          }
+          // remove from pending — converged (remote version wins by id_rev)
+          _pending = _pending.filter(p => makeDocId(p.event) !== makeDocId(event))
+        }
+        // 'error' docs stay in pending and will be retried with backoff
+      }
+    }
   }
 }
 

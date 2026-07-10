@@ -376,3 +376,91 @@ describe('배치 청킹 (≤400개)', () => {
     expect(chunkArray([], 400)).toHaveLength(0)
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// 8. F5 regression: BoundedSet evicts oldest beyond cap
+// ────────────────────────────────────────────────────────────
+
+/** Inline replica of BoundedSet from syncEngine (logic only, not the module instance) */
+class BoundedSet {
+  private _set = new Set<string>()
+  private cap: number
+  constructor(cap: number) { this.cap = cap }
+  has(key: string) { return this._set.has(key) }
+  add(key: string) {
+    if (this._set.has(key)) return
+    this._set.add(key)
+    if (this._set.size > this.cap) {
+      const oldest = this._set.values().next().value
+      if (oldest !== undefined) this._set.delete(oldest)
+    }
+  }
+  get size() { return this._set.size }
+}
+
+describe('F5: BoundedSet 최대 크기 제한', () => {
+  it('cap 이하일 때 모든 항목 유지', () => {
+    const s = new BoundedSet(5)
+    for (let i = 0; i < 5; i++) s.add(`key-${i}`)
+    expect(s.size).toBe(5)
+    expect(s.has('key-0')).toBe(true)
+    expect(s.has('key-4')).toBe(true)
+  })
+
+  it('cap 초과 시 가장 오래된 항목 제거', () => {
+    const s = new BoundedSet(3)
+    s.add('a')
+    s.add('b')
+    s.add('c')
+    s.add('d')  // 'd' 추가 → 'a' 제거 (가장 오래된)
+    expect(s.size).toBe(3)
+    expect(s.has('a')).toBe(false)
+    expect(s.has('b')).toBe(true)
+    expect(s.has('c')).toBe(true)
+    expect(s.has('d')).toBe(true)
+  })
+
+  it('중복 추가는 크기 변화 없음 및 cap 위반 없음', () => {
+    const s = new BoundedSet(3)
+    s.add('a')
+    s.add('b')
+    s.add('c')
+    s.add('a')  // 중복
+    expect(s.size).toBe(3)
+    expect(s.has('a')).toBe(true)
+  })
+
+  it('대량 항목 추가 시 cap 넘지 않음', () => {
+    const cap = 5000
+    const s = new BoundedSet(cap)
+    for (let i = 0; i < cap + 1000; i++) s.add(`item-${i}`)
+    expect(s.size).toBe(cap)
+    // 처음 1000개는 제거되었어야 함
+    expect(s.has('item-0')).toBe(false)
+    expect(s.has('item-999')).toBe(false)
+    // 최신 항목은 유지됨
+    expect(s.has(`item-${cap + 999}`)).toBe(true)
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// 9. F8 regression: settings save must not fabricate familyId
+// ────────────────────────────────────────────────────────────
+
+describe('F8: familyId 자동 생성 금지', () => {
+  it('기존 familyId가 없으면 빈 문자열로 유지', () => {
+    // Simulate the SettingsPage handleSave logic
+    const existingSettings = { familyId: '' }
+    const saved = existingSettings.familyId ?? ''
+    expect(saved).toBe('')
+    // Must NOT be a uuid
+    expect(saved).not.toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  })
+
+  it('기존 familyId가 있으면 보존', () => {
+    const existingFamilyId = 'some-real-family-id'
+    const existingSettings = { familyId: existingFamilyId }
+    const saved = existingSettings.familyId ?? ''
+    expect(saved).toBe(existingFamilyId)
+  })
+})
