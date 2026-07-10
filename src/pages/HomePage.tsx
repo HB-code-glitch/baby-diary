@@ -1,18 +1,23 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { Droplets, Wind, Thermometer, Heart, Baby, Clock } from 'lucide-react'
-import { useAppStore, formatTime } from '../store/useAppStore'
+import { useAppStore, formatTime, getDDay } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
 import { TimeEditModal } from '../components/TimeEditModal'
 import { DiaryEvent, BreastData, FormulaData } from '../../shared/types'
-import { formatDistanceStrict, parseISO, differenceInMinutes } from 'date-fns'
+import { formatDistanceStrict, parseISO, differenceInMinutes, format } from 'date-fns'
 import { ko } from 'date-fns/locale'
 
 // ---------------------------------------------------------------------------
-// Last feeding badge
+// Hero header strip (date + D+N + last feeding badge)
 // ---------------------------------------------------------------------------
-function LastFeedingBadge() {
+interface HomeHeroProps {
+  onNavigateSettings: () => void
+}
+
+function HomeHero({ onNavigateSettings }: HomeHeroProps) {
   const lastFeeding = useAppStore(s => s.lastFeeding())
+  const settings = useAppStore(s => s.settings)
   const [, setTick] = useState(0)
 
   useEffect(() => {
@@ -20,23 +25,49 @@ function LastFeedingBadge() {
     return () => clearInterval(id)
   }, [])
 
-  if (!lastFeeding) return null
+  const dateStr = format(new Date(), 'M월 d일 (EEE)', { locale: ko })
 
-  const minutes = differenceInMinutes(new Date(), parseISO(lastFeeding.at))
-  const hours = Math.floor(minutes / 60)
-  const mins = minutes % 60
+  const birthdate = settings?.baby?.birthdate
+  const dday = birthdate ? getDDay(birthdate) : null
 
-  const label =
-    hours > 0
-      ? `${hours}시간 ${mins}분 전`
-      : `${mins}분 전`
-
-  const type = lastFeeding.type === 'breast' ? '모유' : '분유'
+  let feedingBadge: React.ReactNode
+  if (lastFeeding) {
+    const minutes = differenceInMinutes(new Date(), parseISO(lastFeeding.at))
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    const label = hours > 0 ? `${hours}시간 ${mins}분 전` : `${mins}분 전`
+    const type = lastFeeding.type === 'breast' ? '모유' : '분유'
+    feedingBadge = (
+      <div className="badge-feeding">
+        <Clock size={12} />
+        마지막 {type} 후 {label}
+      </div>
+    )
+  } else {
+    feedingBadge = (
+      <div className="badge-feeding-empty">
+        <Clock size={12} />
+        아직 수유 기록이 없어요
+      </div>
+    )
+  }
 
   return (
-    <div className="badge-feeding">
-      <Clock size={13} />
-      마지막 {type} 후 {label}
+    <div className="home-hero">
+      <div className="home-hero-left">
+        <div className="home-hero-date">{dateStr}</div>
+        {dday != null ? (
+          <div className="home-hero-dday">D+{dday}일</div>
+        ) : (
+          <button
+            className="home-hero-dday-btn"
+            onClick={onNavigateSettings}
+          >
+            생일을 설정해주세요
+          </button>
+        )}
+      </div>
+      {feedingBadge}
     </div>
   )
 }
@@ -52,11 +83,23 @@ function TodaySummary() {
 
   return (
     <div className="summary-pills">
-      <div className="summary-pill">소변 {peeCount}회</div>
-      <div className="summary-pill">대변 {poopCount}회</div>
-      <div className="summary-pill">수유 {feedCount}회</div>
+      <div className="summary-pill">
+        <span className="summary-pill-dot" style={{ background: 'var(--sage-400)' }} />
+        소변 {peeCount}회
+      </div>
+      <div className="summary-pill">
+        <span className="summary-pill-dot" style={{ background: 'var(--sage-500)' }} />
+        대변 {poopCount}회
+      </div>
+      <div className="summary-pill">
+        <span className="summary-pill-dot" style={{ background: 'var(--peach-400)' }} />
+        수유 {feedCount}회
+      </div>
       {formulaMl > 0 && (
-        <div className="summary-pill">분유 총 {formulaMl}ml</div>
+        <div className="summary-pill">
+          <span className="summary-pill-dot" style={{ background: 'var(--peach-300)' }} />
+          분유 총 {formulaMl}ml
+        </div>
       )}
     </div>
   )
@@ -244,7 +287,11 @@ function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
 
 type ActivePopover = 'temp' | 'breast' | 'formula' | null
 
-export function HomePage() {
+interface HomePageProps {
+  onNavigate?: (page: 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings') => void
+}
+
+export function HomePage({ onNavigate }: HomePageProps) {
   const { addPee, addPoop, addTemp, addBreast, addFormula, editEvent, softDeleteEvent, todayEvents } = useAppStore()
   const { showToast } = useToast()
   const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
@@ -299,16 +346,8 @@ export function HomePage() {
 
   return (
     <div className="page-container">
-      {/* Header row */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <div>
-          <div className="page-title">오늘</div>
-          <div style={{ fontSize: 12, color: 'var(--stone-500)', marginTop: 2 }}>
-            {new Date().toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })}
-          </div>
-        </div>
-        <LastFeedingBadge />
-      </div>
+      {/* Hero header strip */}
+      <HomeHero onNavigateSettings={() => onNavigate?.('settings')} />
 
       {/* Quick record buttons */}
       <div style={{
@@ -318,32 +357,32 @@ export function HomePage() {
         marginBottom: 16,
       }}>
         <button className="quick-btn quick-btn-pee" onClick={handlePee}>
-          <Droplets size={24} />
+          <Droplets size={26} />
           <span>소변</span>
         </button>
         <button className="quick-btn quick-btn-poop" onClick={handlePoop}>
-          <Wind size={24} />
+          <Wind size={26} />
           <span>대변</span>
         </button>
         <button
           className="quick-btn quick-btn-temp"
           onClick={e => openPopover('temp', e)}
         >
-          <Thermometer size={24} />
+          <Thermometer size={26} />
           <span>체온</span>
         </button>
         <button
           className="quick-btn quick-btn-breast"
           onClick={e => openPopover('breast', e)}
         >
-          <Heart size={24} />
+          <Heart size={26} />
           <span>모유</span>
         </button>
         <button
           className="quick-btn quick-btn-formula"
           onClick={e => openPopover('formula', e)}
         >
-          <Baby size={24} />
+          <Baby size={26} />
           <span>분유</span>
         </button>
       </div>

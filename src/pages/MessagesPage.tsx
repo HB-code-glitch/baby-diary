@@ -182,17 +182,15 @@ export function MessagesPage() {
       </div>
 
       {messageEvents.length === 0 ? (
-        <div
-          style={{
-            textAlign: 'center', padding: '56px 24px',
-            color: 'var(--stone-400)',
-          }}
-        >
-          <Mail size={36} style={{ margin: '0 auto 14px', opacity: 0.35 }} />
-          <div style={{ fontSize: 14 }}>아직 편지가 없어요.</div>
-          <div style={{ fontSize: 13, marginTop: 4 }}>
-            오늘의 마음을 {babyName}에게 남겨보세요.
-          </div>
+        <div className="empty-state">
+          {/* Envelope with heart illustration */}
+          <svg width="64" height="52" viewBox="0 0 64 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <rect x="8" y="12" width="48" height="32" rx="4" stroke="var(--stone-300)" strokeWidth="1.5"/>
+            <path d="M8 16L32 30L56 16" stroke="var(--stone-300)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M32 22C32 22 28.5 19 27 21C25.5 23 27 25 32 28C37 25 38.5 23 37 21C35.5 19 32 22 32 22Z" stroke="var(--rose-300)" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <div className="empty-state-title">아직 편지가 없어요</div>
+          <div className="empty-state-sub">오늘의 마음을 {babyName}에게 남겨보세요</div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

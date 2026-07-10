@@ -39,8 +39,16 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
 
   if (events.length === 0) {
     return (
-      <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--stone-400)', fontSize: 13 }}>
-        기록이 없습니다
+      <div className="empty-state">
+        {/* Sleeping moon + stars illustration */}
+        <svg width="56" height="48" viewBox="0 0 56 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M22 36C22 27.163 29.163 20 38 20C39.4 20 40.76 20.18 42.06 20.52C40.14 14.42 34.54 10 28 10C19.716 10 13 16.716 13 25C13 33.284 19.716 40 28 40C29.14 40 30.26 39.87 31.32 39.62C25.8 38.3 22 32.58 22 36Z" stroke="var(--stone-300)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          <circle cx="42" cy="9" r="2" stroke="var(--stone-300)" strokeWidth="1.5"/>
+          <circle cx="50" cy="18" r="1.5" stroke="var(--stone-300)" strokeWidth="1.5"/>
+          <circle cx="46" cy="3" r="1" stroke="var(--stone-300)" strokeWidth="1.5"/>
+        </svg>
+        <div className="empty-state-title">아직 오늘 기록이 없어요</div>
+        <div className="empty-state-sub">위 버튼으로 첫 기록을 남겨보세요</div>
       </div>
     )
   }

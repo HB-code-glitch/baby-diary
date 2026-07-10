@@ -172,13 +172,22 @@ export function DiaryPage() {
       </div>
 
       {diaryEvents.length === 0 ? (
-        <div
-          className="card"
-          style={{ textAlign: 'center', padding: '48px 24px', color: 'var(--stone-400)' }}
-        >
-          <BookOpen size={32} style={{ margin: '0 auto 12px', opacity: 0.4 }} />
-          <div style={{ fontSize: 14 }}>아직 일기가 없어요.</div>
-          <div style={{ fontSize: 13, marginTop: 4 }}>소중한 오늘을 기록해보세요.</div>
+        <div className="card">
+          <div className="empty-state">
+            {/* Open book illustration */}
+            <svg width="64" height="52" viewBox="0 0 64 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M32 8V44" stroke="var(--stone-300)" strokeWidth="1.5" strokeLinecap="round"/>
+              <path d="M32 10C32 10 24 6 12 8V42C24 40 32 44 32 44" stroke="var(--stone-300)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M32 10C32 10 40 6 52 8V42C40 40 32 44 32 44" stroke="var(--stone-300)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M17 16C20 15.5 24 15.5 27 16" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
+              <path d="M17 22C20 21.5 24 21.5 27 22" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
+              <path d="M17 28C20 27.5 24 27.5 27 28" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
+              <path d="M37 16C40 15.5 44 15.5 47 16" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
+              <path d="M37 22C40 21.5 44 21.5 47 22" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
+            </svg>
+            <div className="empty-state-title">아직 일기가 없어요</div>
+            <div className="empty-state-sub">소중한 오늘을 기록해보세요</div>
+          </div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

@@ -302,9 +302,9 @@ export function getDDay(birthdate: string): number {
 export function formatEventValue(e: DiaryEvent): string {
   switch (e.type) {
     case 'pee':
-      return '소변'
+      return ''
     case 'poop':
-      return '대변'
+      return ''
     case 'temp': {
       const d = e.data as { celsius: number }
       return `${d.celsius.toFixed(1)}℃`

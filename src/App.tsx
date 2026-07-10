@@ -11,15 +11,15 @@ import { DiaryPage }    from './pages/DiaryPage'
 import { MessagesPage } from './pages/MessagesPage'
 import { SettingsPage } from './pages/SettingsPage'
 
-function PageContent({ page }: { page: Page }) {
+function PageContent({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => void }) {
   switch (page) {
-    case 'home':     return <HomePage />
+    case 'home':     return <HomePage onNavigate={onNavigate} />
     case 'history':  return <HistoryPage />
     case 'stats':    return <StatsPage />
     case 'diary':    return <DiaryPage />
     case 'messages': return <MessagesPage />
     case 'settings': return <SettingsPage />
-    default:         return <HomePage />
+    default:         return <HomePage onNavigate={onNavigate} />
   }
 }
 
@@ -42,7 +42,7 @@ function AppInner() {
     <div className="app-shell">
       <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} />
       <main className="main-content">
-        <PageContent page={currentPage} />
+        <PageContent page={currentPage} onNavigate={setCurrentPage} />
       </main>
     </div>
   )
