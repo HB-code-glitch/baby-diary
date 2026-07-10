@@ -1,0 +1,149 @@
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import * as path from 'path'
+import * as fs from 'fs'
+import { EventLog } from './store/eventLog'
+import { SettingsStore } from './store/settings'
+import { BackupManager } from './store/backup'
+import { DiaryEvent, AppSettings, ExportFormat } from '../shared/types'
+
+const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
+
+let mainWindow: BrowserWindow | null = null
+let eventLog: EventLog
+let settingsStore: SettingsStore
+let backupManager: BackupManager
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    minWidth: 960,
+    minHeight: 640,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    title: 'Baby Diary',
+    show: false,
+  })
+
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173')
+    mainWindow.webContents.openDevTools()
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+  }
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow?.show()
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+function setupIPC(): void {
+  ipcMain.handle('events:list', async () => {
+    return eventLog.loadAll()
+  })
+
+  ipcMain.handle('events:append', async (_, event: DiaryEvent) => {
+    const result = eventLog.append(event)
+    if (result && mainWindow) {
+      mainWindow.webContents.send('event:appended', event)
+    }
+    return result
+  })
+
+  ipcMain.handle('settings:get', async () => {
+    return settingsStore.get()
+  })
+
+  ipcMain.handle('settings:save', async (_, settings: AppSettings) => {
+    settingsStore.save(settings)
+  })
+
+  ipcMain.handle('data:export', async (_, format: ExportFormat) => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      properties: ['openDirectory'],
+      title: '내보낼 폴더 선택',
+    })
+
+    if (canceled || !filePaths[0]) return
+
+    const destDir = filePaths[0]
+    const events = eventLog.loadAll().filter(e => !e.deleted)
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+
+    if (format === 'json') {
+      const filePath = path.join(destDir, `baby-diary-${timestamp}.json`)
+      fs.writeFileSync(filePath, JSON.stringify(events, null, 2), 'utf-8')
+    } else if (format === 'csv') {
+      const filePath = path.join(destDir, `baby-diary-${timestamp}.csv`)
+      const headers = ['id', 'type', 'at', 'data', 'author_uid', 'author_name', 'author_role', 'createdAt', 'updatedAt', 'rev']
+      const rows = events.map(e => [
+        e.id,
+        e.type,
+        e.at,
+        JSON.stringify(e.data),
+        e.author.uid,
+        e.author.name,
+        e.author.role,
+        e.createdAt,
+        e.updatedAt,
+        e.rev,
+      ])
+      const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+      fs.writeFileSync(filePath, csv, 'utf-8')
+    }
+  })
+
+  ipcMain.handle('data:openBackupFolder', async () => {
+    const backupDir = backupManager.getBackupDir()
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true })
+    }
+    shell.openPath(backupDir)
+  })
+
+  ipcMain.handle('data:getInfo', async () => {
+    const userDataPath = app.getPath('userData')
+    const dataDir = path.join(userDataPath, 'data')
+    return {
+      dataDir,
+      backupDir: backupManager.getBackupDir(),
+      documentsBackupDir: backupManager.getDocumentsBackupDir(),
+      eventCount: eventLog.getCount(),
+      lastBackupTime: backupManager.getLastBackupTime(),
+    }
+  })
+}
+
+app.whenReady().then(() => {
+  const userDataPath = app.getPath('userData')
+
+  eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })
+  settingsStore = new SettingsStore(userDataPath)
+  backupManager = new BackupManager(userDataPath)
+
+  eventLog.loadAll()
+
+  setupIPC()
+  createWindow()
+  backupManager.start()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
+  })
+})
+
+app.on('window-all-closed', () => {
+  backupManager.stop()
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
