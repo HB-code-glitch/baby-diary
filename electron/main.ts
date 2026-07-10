@@ -76,7 +76,7 @@ function setupIPC(): void {
   ipcMain.handle('data:export', async (_, format: ExportFormat) => {
     const { canceled, filePaths } = await dialog.showOpenDialog({
       properties: ['openDirectory'],
-      title: '내보낼 폴더 선택',
+      title: '내보낼 폴더 선택 / エクスポート先フォルダを選択',
     })
 
     if (canceled || !filePaths[0]) return
@@ -90,7 +90,19 @@ function setupIPC(): void {
       fs.writeFileSync(filePath, JSON.stringify(events, null, 2), 'utf-8')
     } else if (format === 'csv') {
       const filePath = path.join(destDir, `baby-diary-${timestamp}.csv`)
-      const headers = ['id', 'type', 'at', 'data', 'author_uid', 'author_name', 'author_role', 'createdAt', 'updatedAt', 'rev']
+      // Bilingual headers: Korean/Japanese so both parents can read the export
+      const headers = [
+        'id',
+        'type/種別',
+        'at/日時',
+        'data/データ',
+        'author_uid/記録者ID',
+        'author_name/記録者名',
+        'author_role/役割',
+        'createdAt/作成日時',
+        'updatedAt/更新日時',
+        'rev/リビジョン',
+      ]
       const rows = events.map(e => [
         e.id,
         e.type,
@@ -104,7 +116,7 @@ function setupIPC(): void {
         e.rev,
       ])
       const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
-      fs.writeFileSync(filePath, csv, 'utf-8')
+      fs.writeFileSync(filePath, '﻿' + csv, 'utf-8') // BOM for Excel compatibility
     }
   })
 

@@ -52,6 +52,7 @@ export interface AppSettings {
     messagingSenderId: string
     appId: string
   } | null
+  language?: 'ko' | 'ja'
 }
 
 export interface DataInfo {

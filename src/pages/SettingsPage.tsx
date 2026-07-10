@@ -1,17 +1,23 @@
 import React, { useState, useEffect } from 'react'
-import { FolderOpen, Download, Info } from 'lucide-react'
+import { FolderOpen, Download } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
+import { ja } from 'date-fns/locale'
 import { useAppStore } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { ipc } from '../lib/ipc'
 import { SyncSettingsSlot } from '../components/SyncSettingsSlot'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
+import { useTranslation } from 'react-i18next'
+import { setLanguage, Language } from '../i18n'
 
 export function SettingsPage() {
   const { settings, saveSettings, loadDataInfo, dataInfo } = useAppStore()
   const { showToast } = useToast()
+  const { t, i18n: i18nInstance } = useTranslation()
+
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
 
   // Local form state
   const [babyName,   setBabyName]   = useState(settings?.baby?.name       ?? '')
@@ -48,27 +54,41 @@ export function SettingsPage() {
       },
       familyId: settings?.familyId ?? '',  // F8: never fabricate a familyId — only create/join flow sets this
       firebase:  settings?.firebase  ?? null,
+      language:  (i18nInstance.language as Language) ?? 'ko',
     }
     await saveSettings(updated)
     setSaving(false)
-    showToast({ message: '설정이 저장되었습니다.' })
+    showToast({ message: t('settings.toastSaved') })
+  }
+
+  const handleLanguageChange = async (lang: Language) => {
+    setLanguage(lang)
+    // Persist immediately
+    const updated: AppSettings = {
+      baby:     settings?.baby     ?? { name: '', birthdate: '' },
+      profile:  settings?.profile  ?? { uid: uuidv4(), name: '', role: 'mom' },
+      familyId: settings?.familyId ?? '',
+      firebase:  settings?.firebase  ?? null,
+      language:  lang,
+    }
+    await saveSettings(updated)
   }
 
   const handleExportJson = async () => {
     try {
       await ipc.exportData('json')
-      showToast({ message: 'JSON 파일이 내보내기되었습니다.' })
+      showToast({ message: t('settings.toastExportJson') })
     } catch {
-      showToast({ message: '내보내기에 실패했습니다.' })
+      showToast({ message: t('settings.toastExportFail') })
     }
   }
 
   const handleExportCsv = async () => {
     try {
       await ipc.exportData('csv')
-      showToast({ message: 'CSV 파일이 내보내기되었습니다.' })
+      showToast({ message: t('settings.toastExportCsv') })
     } catch {
-      showToast({ message: '내보내기에 실패했습니다.' })
+      showToast({ message: t('settings.toastExportFail') })
     }
   }
 
@@ -76,32 +96,57 @@ export function SettingsPage() {
     try {
       await ipc.openBackupFolder()
     } catch {
-      showToast({ message: '폴더를 열 수 없습니다.' })
+      showToast({ message: t('settings.toastOpenFolderFail') })
     }
   }
+
+  const currentLang = i18nInstance.language as Language
 
   return (
     <div className="page-container" style={{ maxWidth: 560 }}>
       <div className="page-header">
-        <div className="page-title">설정</div>
+        <div className="page-title">{t('settings.title')}</div>
+      </div>
+
+      {/* Language section — always at top, labels in own language */}
+      <div className="settings-section">
+        <div className="settings-section-title">{t('settings.language')}</div>
+        <div className="card">
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className={`role-btn${currentLang === 'ko' ? ' selected' : ''}`}
+              onClick={() => handleLanguageChange('ko')}
+              lang="ko"
+            >
+              한국어
+            </button>
+            <button
+              className={`role-btn${currentLang === 'ja' ? ' selected' : ''}`}
+              onClick={() => handleLanguageChange('ja')}
+              lang="ja"
+            >
+              日本語
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Baby info */}
       <div className="settings-section">
-        <div className="settings-section-title">아기 정보</div>
+        <div className="settings-section-title">{t('settings.babyInfo')}</div>
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
-            <div className="label">아기 이름</div>
+            <div className="label">{t('settings.babyName')}</div>
             <input
               type="text"
               className="input-field"
-              placeholder="아기 이름"
+              placeholder={t('settings.babyNamePlaceholder')}
               value={babyName}
               onChange={e => setBabyName(e.target.value)}
             />
           </div>
           <div>
-            <div className="label">생일</div>
+            <div className="label">{t('settings.birthdate')}</div>
             <input
               type="date"
               className="input-field"
@@ -114,32 +159,32 @@ export function SettingsPage() {
 
       {/* My profile */}
       <div className="settings-section">
-        <div className="settings-section-title">내 프로필</div>
+        <div className="settings-section-title">{t('settings.myProfile')}</div>
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div>
-            <div className="label">이름</div>
+            <div className="label">{t('settings.myName')}</div>
             <input
               type="text"
               className="input-field"
-              placeholder="이름"
+              placeholder={t('settings.myNamePlaceholder')}
               value={myName}
               onChange={e => setMyName(e.target.value)}
             />
           </div>
           <div>
-            <div className="label">역할</div>
+            <div className="label">{t('settings.role')}</div>
             <div style={{ display: 'flex', gap: 8 }}>
               <button
                 className={`role-btn${myRole === 'mom' ? ' selected' : ''}`}
                 onClick={() => setMyRole('mom')}
               >
-                엄마
+                {t('settings.roleMom')}
               </button>
               <button
                 className={`role-btn${myRole === 'dad' ? ' selected' : ''}`}
                 onClick={() => setMyRole('dad')}
               >
-                아빠
+                {t('settings.roleDad')}
               </button>
             </div>
           </div>
@@ -154,45 +199,45 @@ export function SettingsPage() {
           disabled={saving}
           style={{ width: '100%', padding: '11px' }}
         >
-          {saving ? '저장 중...' : '설정 저장'}
+          {saving ? t('settings.saving') : t('settings.save')}
         </button>
       </div>
 
       {/* Data section */}
       <div className="settings-section">
-        <div className="settings-section-title">데이터</div>
+        <div className="settings-section-title">{t('settings.dataSection')}</div>
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
           {dataInfo && (
             <>
               <div className="settings-row">
-                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>총 기록 수</span>
+                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.totalRecords')}</span>
                 <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-800)' }}>
-                  {dataInfo.eventCount}개
+                  {t('settings.recordUnit', { count: dataInfo.eventCount })}
                 </span>
               </div>
               <div className="settings-row">
-                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>마지막 백업</span>
+                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.lastBackup')}</span>
                 <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>
                   {dataInfo.lastBackupTime
-                    ? format(parseISO(dataInfo.lastBackupTime), 'M월 d일 HH:mm', { locale: ko })
-                    : '없음'}
+                    ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
+                    : t('settings.noBackup')}
                 </span>
               </div>
             </>
           )}
           <div className="settings-row">
-            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>백업 폴더</span>
+            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.backupFolder')}</span>
             <button
               className="btn-secondary"
               style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
               onClick={handleOpenBackup}
             >
               <FolderOpen size={13} />
-              열기
+              {t('settings.openFolder')}
             </button>
           </div>
           <div className="settings-row" style={{ flexWrap: 'wrap', gap: 8 }}>
-            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>데이터 내보내기</span>
+            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.exportData')}</span>
             <div style={{ display: 'flex', gap: 6 }}>
               <button
                 className="btn-secondary"
@@ -217,7 +262,7 @@ export function SettingsPage() {
 
       {/* Sync section */}
       <div className="settings-section">
-        <div className="settings-section-title">가족 동기화</div>
+        <div className="settings-section-title">{t('settings.syncSection')}</div>
         <SyncSettingsSlot />
       </div>
     </div>

@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { format, parseISO } from 'date-fns'
 import { X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 
 interface TimeEditModalProps {
   currentAt: string
@@ -9,6 +10,7 @@ interface TimeEditModalProps {
 }
 
 export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalProps) {
+  const { t } = useTranslation()
   // datetime-local input needs 'YYYY-MM-DDTHH:mm'
   const [value, setValue] = useState(
     format(parseISO(currentAt), "yyyy-MM-dd'T'HH:mm")
@@ -40,7 +42,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
         onClick={e => e.stopPropagation()}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--stone-800)' }}>시간 수정</span>
+          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--stone-800)' }}>{t('timeEdit.title')}</span>
           <button
             onClick={onClose}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--stone-500)', padding: 2 }}
@@ -49,7 +51,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
           </button>
         </div>
 
-        <div className="label">기록 시간</div>
+        <div className="label">{t('timeEdit.label')}</div>
         <input
           type="datetime-local"
           className="input-field"
@@ -59,8 +61,8 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
         />
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>취소</button>
-          <button className="btn-primary" onClick={handleConfirm}>확인</button>
+          <button className="btn-secondary" onClick={onClose}>{t('timeEdit.cancel')}</button>
+          <button className="btn-primary" onClick={handleConfirm}>{t('timeEdit.confirm')}</button>
         </div>
       </div>
     </div>

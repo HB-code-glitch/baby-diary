@@ -6,6 +6,7 @@ import { formatEventValue, formatTime } from '../store/useAppStore'
 import { TimeEditModal } from './TimeEditModal'
 import { useAppStore } from '../store/useAppStore'
 import { useToast } from './Toast'
+import { useTranslation } from 'react-i18next'
 
 interface EventTimelineProps {
   events: DiaryEvent[]
@@ -17,20 +18,21 @@ interface EventTimelineProps {
 export function EventTimeline({ events, showAuthor = true, editable = true }: EventTimelineProps) {
   const { editEvent, softDeleteEvent } = useAppStore()
   const { showToast } = useToast()
+  const { t } = useTranslation()
   const [editingAt, setEditingAt] = useState<DiaryEvent | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   const handleTimeEdit = async (event: DiaryEvent, newAt: string) => {
     await editEvent(event, { at: newAt })
     setEditingAt(null)
-    showToast({ message: '시간이 수정되었습니다.' })
+    showToast({ message: t('toast.timeEdited') })
   }
 
   const handleDelete = async (event: DiaryEvent) => {
     if (confirmDelete === event.id) {
       await softDeleteEvent(event)
       setConfirmDelete(null)
-      showToast({ message: '삭제되었습니다.' })
+      showToast({ message: t('toast.deleted') })
     } else {
       setConfirmDelete(event.id)
       setTimeout(() => setConfirmDelete(null), 3000)
@@ -47,8 +49,8 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
           <circle cx="50" cy="18" r="1.5" stroke="var(--stone-300)" strokeWidth="1.5"/>
           <circle cx="46" cy="3" r="1" stroke="var(--stone-300)" strokeWidth="1.5"/>
         </svg>
-        <div className="empty-state-title">아직 오늘 기록이 없어요</div>
-        <div className="empty-state-sub">위 버튼으로 첫 기록을 남겨보세요</div>
+        <div className="empty-state-title">{t('timeline.emptyTitle')}</div>
+        <div className="empty-state-sub">{t('timeline.emptySub')}</div>
       </div>
     )
   }
@@ -74,7 +76,7 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
               </span>
               {showAuthor && event.author?.name && (
                 <span style={{ fontSize: 11, color: 'var(--stone-400)' }}>
-                  {event.author.role === 'mom' ? '엄마' : '아빠'} {event.author.name}
+                  {t(`role.${event.author.role}`)} {event.author.name}
                 </span>
               )}
             </div>
@@ -88,7 +90,7 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
                   background: 'none', border: 'none', cursor: 'pointer',
                   padding: '4px', color: 'var(--stone-400)', borderRadius: 5,
                 }}
-                title="시간 수정"
+                title={t('timeline.editTime')}
               >
                 <Pencil size={13} />
               </button>
@@ -101,7 +103,7 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
                   color: confirmDelete === event.id ? '#c44' : 'var(--stone-400)',
                   borderRadius: 5,
                 }}
-                title={confirmDelete === event.id ? '한 번 더 눌러 삭제' : '삭제'}
+                title={confirmDelete === event.id ? t('timeline.confirmDelete') : t('timeline.delete')}
               >
                 <Trash2 size={13} />
               </button>

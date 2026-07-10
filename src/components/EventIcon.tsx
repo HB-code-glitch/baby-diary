@@ -1,6 +1,7 @@
 import React from 'react'
 import { Droplets, Wind, Thermometer, Heart, Baby, BookOpen, Mail } from 'lucide-react'
 import { EventType } from '../../shared/types'
+import i18n from '../i18n'
 
 interface EventIconProps {
   type: EventType
@@ -42,14 +43,15 @@ export function EventIcon({ type, size = 15 }: EventIconProps) {
 }
 
 export function eventLabel(type: EventType): string {
-  const LABELS: Record<EventType, string> = {
-    pee:     '소변',
-    poop:    '대변',
-    temp:    '체온',
-    breast:  '모유',
-    formula: '분유',
-    diary:   '일기',
-    message: '아기에게',
+  const t = i18n.t.bind(i18n)
+  const KEY_MAP: Record<EventType, string> = {
+    pee:     'event.pee',
+    poop:    'event.poop',
+    temp:    'event.temp',
+    breast:  'event.breast',
+    formula: 'event.formula',
+    diary:   'event.diary',
+    message: 'event.message',
   }
-  return LABELS[type] ?? type
+  return t(KEY_MAP[type] ?? type)
 }

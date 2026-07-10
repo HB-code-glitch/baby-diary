@@ -1,27 +1,31 @@
 import React, { useState } from 'react'
 import { ChevronLeft, ChevronRight, CalendarDays } from 'lucide-react'
-import { format, addDays, subDays, isToday, parseISO } from 'date-fns'
+import { format, addDays, subDays, isToday } from 'date-fns'
 import { ko } from 'date-fns/locale'
+import { ja } from 'date-fns/locale'
 import { useAppStore } from '../store/useAppStore'
 import { EventTimeline } from '../components/EventTimeline'
 import { EventType } from '../../shared/types'
-import { eventLabel } from '../components/EventIcon'
-
-const TYPES: { type: EventType; label: string }[] = [
-  { type: 'pee',     label: '소변' },
-  { type: 'poop',    label: '대변' },
-  { type: 'temp',    label: '체온' },
-  { type: 'breast',  label: '모유' },
-  { type: 'formula', label: '분유' },
-  { type: 'diary',   label: '일기' },
-  { type: 'message', label: '아기에게' },
-]
+import { useTranslation } from 'react-i18next'
 
 export function HistoryPage() {
   const eventsForDay = useAppStore(s => s.eventsForDay)
   const [selectedDate, setSelectedDate] = useState(new Date())
   const [filterType, setFilterType] = useState<EventType | null>(null)
   const [showDatePicker, setShowDatePicker] = useState(false)
+  const { t, i18n: i18nInstance } = useTranslation()
+
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+
+  const TYPES: { type: EventType; labelKey: string }[] = [
+    { type: 'pee',     labelKey: 'event.pee' },
+    { type: 'poop',    labelKey: 'event.poop' },
+    { type: 'temp',    labelKey: 'event.temp' },
+    { type: 'breast',  labelKey: 'event.breast' },
+    { type: 'formula', labelKey: 'event.formula' },
+    { type: 'diary',   labelKey: 'event.diary' },
+    { type: 'message', labelKey: 'event.message' },
+  ]
 
   const allEvents = eventsForDay(selectedDate)
   const filtered = filterType ? allEvents.filter(e => e.type === filterType) : allEvents
@@ -33,7 +37,7 @@ export function HistoryPage() {
   return (
     <div className="page-container">
       <div className="page-header">
-        <div className="page-title">기록</div>
+        <div className="page-title">{t('history.title')}</div>
       </div>
 
       {/* Date navigation */}
@@ -49,7 +53,7 @@ export function HistoryPage() {
             onClick={() => setShowDatePicker(p => !p)}
           >
             <CalendarDays size={14} />
-            {format(selectedDate, 'M월 d일 (EEEEE)', { locale: ko })}
+            {format(selectedDate, t('date.formatShort'), { locale: dateFnsLocale })}
           </button>
           {showDatePicker && (
             <>
@@ -94,7 +98,7 @@ export function HistoryPage() {
         </button>
 
         {!isToday(selectedDate) && (
-          <button className="btn-secondary" onClick={goToday}>오늘</button>
+          <button className="btn-secondary" onClick={goToday}>{t('history.today')}</button>
         )}
       </div>
 
@@ -104,15 +108,15 @@ export function HistoryPage() {
           className={`filter-chip${filterType === null ? ' active' : ''}`}
           onClick={() => setFilterType(null)}
         >
-          전체
+          {t('history.filterAll')}
         </button>
-        {TYPES.map(({ type, label }) => (
+        {TYPES.map(({ type, labelKey }) => (
           <button
             key={type}
             className={`filter-chip${filterType === type ? ' active' : ''}`}
-            onClick={() => setFilterType(t => t === type ? null : type)}
+            onClick={() => setFilterType(tp => tp === type ? null : type)}
           >
-            {label}
+            {t(labelKey)}
           </button>
         ))}
       </div>

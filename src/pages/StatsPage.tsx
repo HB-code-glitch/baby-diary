@@ -3,10 +3,12 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, Legend
 } from 'recharts'
-import { subDays, format, parseISO, startOfDay, isSameDay } from 'date-fns'
+import { subDays, format, parseISO, isSameDay } from 'date-fns'
 import { ko } from 'date-fns/locale'
+import { ja } from 'date-fns/locale'
 import { useAppStore } from '../store/useAppStore'
 import { DiaryEvent, FormulaData, TempData } from '../../shared/types'
+import { useTranslation } from 'react-i18next'
 
 type Range = 7 | 30
 
@@ -20,7 +22,7 @@ interface DayStats {
   avgTemp: number | null
 }
 
-function buildDayStats(events: DiaryEvent[], days: number): DayStats[] {
+function buildDayStats(events: DiaryEvent[], days: number, dateFnsLocale: typeof ko): DayStats[] {
   const result: DayStats[] = []
   for (let i = days - 1; i >= 0; i--) {
     const day = subDays(new Date(), i)
@@ -39,7 +41,7 @@ function buildDayStats(events: DiaryEvent[], days: number): DayStats[] {
 
     result.push({
       date:   format(day, 'yyyy-MM-dd'),
-      label:  days <= 7 ? format(day, 'M/d (EEEEE)', { locale: ko }) : format(day, 'M/d'),
+      label:  days <= 7 ? format(day, 'M/d (EEEEE)', { locale: dateFnsLocale }) : format(day, 'M/d'),
       formulaMl,
       feedingCount,
       peeCount,
@@ -61,8 +63,11 @@ const TOOLTIP_STYLE = {
 export function StatsPage() {
   const events = useAppStore(s => s.events)
   const [range, setRange] = useState<Range>(7)
+  const { t, i18n: i18nInstance } = useTranslation()
 
-  const data = useMemo(() => buildDayStats(events, range), [events, range])
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+
+  const data = useMemo(() => buildDayStats(events, range, dateFnsLocale), [events, range, dateFnsLocale])
 
   const hasTempData = data.some(d => d.avgTemp != null)
   const tempData    = data.filter(d => d.avgTemp != null)
@@ -71,19 +76,19 @@ export function StatsPage() {
     <div className="page-container">
       <div className="page-header">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div className="page-title">통계</div>
+          <div className="page-title">{t('stats.title')}</div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button
               className={`filter-chip${range === 7 ? ' active' : ''}`}
               onClick={() => setRange(7)}
             >
-              7일
+              {t('stats.days7')}
             </button>
             <button
               className={`filter-chip${range === 30 ? ' active' : ''}`}
               onClick={() => setRange(30)}
             >
-              30일
+              {t('stats.days30')}
             </button>
           </div>
         </div>
@@ -93,15 +98,18 @@ export function StatsPage() {
         {/* Formula total */}
         <div className="card">
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
-            분유량 (ml/일)
+            {t('stats.formulaTitle')}
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--stone-200)" />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <YAxis tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [`${v}ml`, '분유']} />
-              <Bar dataKey="formulaMl" fill="var(--peach-300)" radius={[3,3,0,0]} name="분유" />
+              <Tooltip
+                contentStyle={TOOLTIP_STYLE}
+                formatter={(v: number) => [t('stats.mlUnit', { value: v }), t('stats.formulaTooltip')]}
+              />
+              <Bar dataKey="formulaMl" fill="var(--peach-300)" radius={[3,3,0,0]} name={t('stats.formulaTooltip')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -109,15 +117,18 @@ export function StatsPage() {
         {/* Feeding count */}
         <div className="card">
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
-            수유 횟수
+            {t('stats.feedingTitle')}
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--stone-200)" />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [`${v}회`, '수유']} />
-              <Bar dataKey="feedingCount" fill="var(--peach-200)" radius={[3,3,0,0]} name="수유" />
+              <Tooltip
+                contentStyle={TOOLTIP_STYLE}
+                formatter={(v: number) => [t('stats.countUnit', { count: v }), t('stats.feedingTooltip')]}
+              />
+              <Bar dataKey="feedingCount" fill="var(--peach-200)" radius={[3,3,0,0]} name={t('stats.feedingTooltip')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -125,7 +136,7 @@ export function StatsPage() {
         {/* Diaper counts */}
         <div className="card">
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
-            기저귀 횟수
+            {t('stats.diaperTitle')}
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
@@ -134,8 +145,8 @@ export function StatsPage() {
               <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <Tooltip contentStyle={TOOLTIP_STYLE} />
               <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="peeCount"  stackId="a" fill="var(--sage-200)"  radius={[0,0,0,0]} name="소변" />
-              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[3,3,0,0]} name="대변" />
+              <Bar dataKey="peeCount"  stackId="a" fill="var(--sage-200)"  radius={[0,0,0,0]} name={t('stats.peeLabel')} />
+              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[3,3,0,0]} name={t('stats.poopLabel')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -144,7 +155,7 @@ export function StatsPage() {
         {hasTempData && (
           <div className="card">
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
-              체온 (℃)
+              {t('stats.tempTitle')}
             </div>
             <ResponsiveContainer width="100%" height={180}>
               <LineChart data={tempData} margin={{ top: 4, right: 0, left: -20, bottom: 0 }}>
@@ -153,7 +164,7 @@ export function StatsPage() {
                 <YAxis domain={[36, 40]} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => [`${v}℃`, '평균 체온']}
+                  formatter={(v: number) => [`${v}℃`, t('stats.tempTooltip')]}
                 />
                 <ReferenceLine
                   y={37.5}
@@ -167,7 +178,7 @@ export function StatsPage() {
                   stroke="var(--amber-500)"
                   strokeWidth={2}
                   dot={{ fill: 'var(--amber-500)', r: 4 }}
-                  name="체온"
+                  name={t('stats.tempLineLabel')}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -176,7 +187,7 @@ export function StatsPage() {
 
         {!hasTempData && (
           <div className="card" style={{ textAlign: 'center', color: 'var(--stone-400)', fontSize: 13, padding: '24px' }}>
-            이 기간에 체온 기록이 없습니다
+            {t('stats.noTempData')}
           </div>
         )}
       </div>

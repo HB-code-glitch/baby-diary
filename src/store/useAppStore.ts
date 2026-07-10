@@ -4,6 +4,7 @@ import { ipc } from '../lib/ipc'
 import { enqueue } from '../sync/syncEngine'
 import { v4 as uuidv4 } from 'uuid'
 import { format, isToday, parseISO, startOfDay, isSameDay } from 'date-fns'
+import i18n from '../i18n'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -20,7 +21,7 @@ function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): Diary
     data: {} as DiaryEvent['data'],
     author: {
       uid:  settings?.profile?.uid  ?? 'local',
-      name: settings?.profile?.name ?? '나',
+      name: settings?.profile?.name ?? '',
       role: settings?.profile?.role ?? 'mom',
     },
     createdAt: t,
@@ -300,6 +301,7 @@ export function getDDay(birthdate: string): number {
 
 // Format event value for timeline display
 export function formatEventValue(e: DiaryEvent): string {
+  const t = i18n.t.bind(i18n)
   switch (e.type) {
     case 'pee':
       return ''
@@ -311,8 +313,15 @@ export function formatEventValue(e: DiaryEvent): string {
     }
     case 'breast': {
       const d = e.data as { side: string; minutes?: number }
-      const side = d.side === 'L' ? '왼쪽' : d.side === 'R' ? '오른쪽' : '양쪽'
-      return `${side}${d.minutes != null ? ` ${d.minutes}분` : ''}`
+      const side = d.side === 'L'
+        ? t('breast.left')
+        : d.side === 'R'
+          ? t('breast.right')
+          : t('breast.both')
+      if (d.minutes != null) {
+        return t('eventValue.breastSideMinutes', { side, minutes: d.minutes })
+      }
+      return t('eventValue.breastSide', { side })
     }
     case 'formula': {
       const d = e.data as { ml: number }

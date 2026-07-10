@@ -1,4 +1,4 @@
-/**
+﻿/**
  * src/sync/syncEngine.ts
  * 클라우드 동기화 엔진.
  *
@@ -83,6 +83,10 @@ const PENDING_KEY = 'babydiary.pendingUploads'
 const BATCH_SIZE = 400  // Firestore 배치 최대 500보다 여유있게
 const MAX_BACKOFF_MS = 5 * 60 * 1000  // 5분
 const BASE_BACKOFF_MS = 3_000
+
+/** Sentinel detail string emitted when signed-in but no family linked.
+ *  SyncSettingsSlot checks this constant (not Korean text) to branch UI. */
+export const DETAIL_FAMILY_NEEDED = 'FAMILY_NEEDED'
 
 // ────────────────────────────────────────────────────────────
 // 내부 상태
@@ -207,31 +211,31 @@ export function configure(cfg: FirebaseConfig | null, familyId: string): void {
   _familyId = familyId
 
   if (!cfg) {
-    setState({ status: 'no-config', detail: 'Firebase 설정 없음 — 로컬 모드', pendingCount: 0 })
+    setState({ status: 'no-config', detail: 'no firebase config', pendingCount: 0 })
     return
   }
 
   const result = initFirebase(cfg)
   if (!result) {
-    setState({ status: 'no-config', detail: 'Firebase 초기화 실패', pendingCount: 0 })
+    setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: 0 })
     return
   }
 
   _db = result.db
   _auth = result.auth
-  setState({ status: 'signed-out', detail: '로그인 필요', pendingCount: _pending.length })
+  setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
 }
 
 /** 회원가입 (신규 사용자) */
 export async function signUp(email: string, password: string): Promise<User> {
-  if (!_auth) throw new Error('Firebase 미설정')
+  if (!_auth) throw new Error('Firebase not configured')
   const cred = await fbSignUp(_auth, email, password)
   return cred.user
 }
 
 /** 로그인 */
 export async function signIn(email: string, password: string): Promise<User> {
-  if (!_auth) throw new Error('Firebase 미설정')
+  if (!_auth) throw new Error('Firebase not configured')
   const cred = await fbSignIn(_auth, email, password)
   return cred.user
 }
@@ -243,7 +247,7 @@ export async function signOutSync(): Promise<void> {
   _currentUser = null
   _unsubSnapshot?.()
   _unsubSnapshot = null
-  setState({ status: 'signed-out', detail: '로그아웃됨', pendingCount: _pending.length })
+  setState({ status: 'signed-out', detail: 'signed out', pendingCount: _pending.length })
 }
 
 /**
@@ -258,14 +262,14 @@ export async function createFamily(
   babyInfo: { babyName: string; babyBirthdate: string; familyName?: string },
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
 ): Promise<{ familyId: string; inviteCode: string }> {
-  if (!_db || !_currentUser) throw new Error('로그인 후 가족을 생성할 수 있습니다')
+  if (!_db || !_currentUser) throw new Error('must be signed in to create family')
 
   const inviteCode = generateInviteCode()
   const familyRef = doc(collection(_db, 'families'))
   const inviteRef = doc(_db, 'invites', inviteCode)
 
   const familyDocData: FamilyDoc = {
-    name: babyInfo.familyName ?? `${profile.name}의 가족`,
+    name: babyInfo.familyName ?? `${profile.name}'s family`,
     babyName: babyInfo.babyName,
     babyBirthdate: babyInfo.babyBirthdate,
     members: {
@@ -298,14 +302,14 @@ export async function joinFamily(
   inviteCode: string,
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
 ): Promise<string> {
-  if (!_db || !_currentUser) throw new Error('로그인 후 가족에 참여할 수 있습니다')
+  if (!_db || !_currentUser) throw new Error('must be signed in to join family')
 
   // F-RULES: direct get() on invites/{code} — no list needed
   const code = inviteCode.trim().toUpperCase()
   const inviteRef = doc(_db, 'invites', code)
   const inviteSnap = await getDoc(inviteRef)
 
-  if (!inviteSnap.exists()) throw new Error('초대 코드를 찾을 수 없습니다')
+  if (!inviteSnap.exists()) throw new Error('invite code not found')
 
   const familyId = (inviteSnap.data() as { familyId: string }).familyId
 
@@ -361,7 +365,7 @@ export function start(): void {
   _started = true
 
   if (!_auth || !_config) {
-    setState({ status: 'no-config', detail: 'Firebase 설정 없음 — 로컬 모드', pendingCount: 0 })
+    setState({ status: 'no-config', detail: 'no firebase config', pendingCount: 0 })
     return
   }
 
@@ -370,7 +374,7 @@ export function start(): void {
     if (user) {
       void onUserSignedIn(user)
     } else {
-      setState({ status: 'signed-out', detail: '로그인 필요', pendingCount: _pending.length })
+      setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
       _unsubSnapshot?.()
       _unsubSnapshot = null
     }
@@ -392,7 +396,7 @@ export function stop(): void {
   _db = null
   _auth = null
   _currentUser = null
-  setState({ status: 'off', detail: '동기화 중단됨', pendingCount: _pending.length })
+  setState({ status: 'off', detail: 'sync stopped', pendingCount: _pending.length })
 }
 
 /** 현재 동기화 상태 반환 */
@@ -415,11 +419,11 @@ export function subscribeStatus(cb: StatusCallback): () => void {
 
 async function onUserSignedIn(user: User): Promise<void> {
   if (!_db || !_familyId) {
-    setState({ status: 'signed-out', detail: '가족 연결 필요', pendingCount: _pending.length })
+    setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: _pending.length })
     return
   }
 
-  setState({ status: 'connecting', detail: '동기화 중...', pendingCount: _pending.length })
+  setState({ status: 'connecting', detail: 'connecting...', pendingCount: _pending.length })
 
   try {
     // F2 + F8: fetch family doc early so we can surface the invite code and detect
@@ -429,7 +433,7 @@ async function onUserSignedIn(user: User): Promise<void> {
     if (!familySnap.exists()) {
       // F8: unknown familyId — treat as no-family, offer create/join
       _familyId = ''
-      setState({ status: 'signed-out', detail: '가족 연결 필요', pendingCount: _pending.length })
+      setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: _pending.length })
       return
     }
     // F2: expose invite code in state so UI can display it
@@ -438,11 +442,11 @@ async function onUserSignedIn(user: User): Promise<void> {
 
     await reconcile(user)
     attachSnapshot()
-    setState({ status: 'online', detail: `${user.email} 연결됨`, pendingCount: _pending.length })
+    setState({ status: 'online', detail: `${user.email} connected`, pendingCount: _pending.length })
     void drainQueue()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    setState({ status: 'error', detail: `연결 오류: ${msg}`, pendingCount: _pending.length })
+    setState({ status: 'error', detail: `connection error: ${msg}`, pendingCount: _pending.length })
     scheduleRetry()
   }
 }
@@ -463,11 +467,11 @@ async function reconcile(user: User): Promise<void> {
   const familyRef = doc(_db, 'families', _familyId)
   const familySnap = await getDoc(familyRef)
   if (!familySnap.exists()) {
-    throw new Error('가족 문서를 찾을 수 없습니다. 가족 생성 또는 코드 입력이 필요합니다.')
+    throw new Error('family document not found')
   }
   const familyData = familySnap.data() as FamilyDoc
   if (!familyData.members[user.uid]) {
-    throw new Error('이 가족의 멤버가 아닙니다.')
+    throw new Error('not a member of this family')
   }
 
   // 로컬 이벤트 목록 (최신 rev per id)
@@ -531,7 +535,7 @@ function attachSnapshot(): void {
       })
     },
     err => {
-      setState({ status: 'error', detail: `스냅샷 오류: ${err.message}`, pendingCount: _pending.length })
+      setState({ status: 'error', detail: `snapshot error: ${err.message}`, pendingCount: _pending.length })
       scheduleRetry()
     }
   )
@@ -634,7 +638,7 @@ async function drainQueue(): Promise<void> {
     _pending = _pending.filter(p => !uploadedIds.has(makeDocId(p.event)))
     savePending(_pending)
     syncPendingCount()
-    setState({ status: 'online', detail: _currentUser?.email ? `${_currentUser.email} 연결됨` : '연결됨', pendingCount: _pending.length })
+    setState({ status: 'online', detail: _currentUser?.email ? `${_currentUser.email} connected` : 'connected', pendingCount: _pending.length })
   } catch {
     // 실패: 지수 백오프로 재시도 시간 설정
     _pending = _pending.map(p => {
@@ -666,3 +670,5 @@ function scheduleRetry(): void {
     }
   }, delay)
 }
+
+

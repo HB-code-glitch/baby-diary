@@ -4,9 +4,11 @@ import {
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, configure, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
+import { DETAIL_FAMILY_NEEDED } from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
+import { useTranslation } from 'react-i18next'
 
 // ────────────────────────────────────────────────────────────
 // Sub-views
@@ -18,6 +20,7 @@ function NoConfigView() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const { settings, saveSettings } = useAppStore()
+  const { t } = useTranslation()
 
   const handleSave = async () => {
     setError(null)
@@ -25,14 +28,14 @@ function NoConfigView() {
     try {
       parsed = JSON.parse(raw.trim())
     } catch {
-      setError('JSON 형식이 올바르지 않습니다. Firebase 콘솔에서 복사한 설정을 그대로 붙여넣어 주세요.')
+      setError(t('sync.errorInvalidJson'))
       return
     }
 
     const required = ['apiKey', 'authDomain', 'projectId', 'storageBucket', 'messagingSenderId', 'appId']
     const missing = required.filter(k => !parsed[k])
     if (missing.length > 0) {
-      setError(`필수 항목이 없습니다: ${missing.join(', ')}`)
+      setError(t('sync.errorMissingFields', { fields: missing.join(', ') }))
       return
     }
 
@@ -50,11 +53,12 @@ function NoConfigView() {
           messagingSenderId: parsed.messagingSenderId,
           appId:             parsed.appId,
         },
+        language: settings?.language,
       }
       await saveSettings(updated)
       configure(updated.firebase, updated.familyId)
     } catch (e) {
-      setError('설정 저장 중 오류가 발생했습니다.')
+      setError(t('sync.errorSaveFailed'))
     } finally {
       setSaving(false)
     }
@@ -64,11 +68,11 @@ function NoConfigView() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <Cloud size={16} style={{ color: 'var(--stone-400)' }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>Firebase 설정</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>{t('sync.noConfigTitle')}</span>
       </div>
       <p style={{ fontSize: 12, color: 'var(--stone-500)', margin: 0, lineHeight: 1.6 }}>
-        Firebase 콘솔 → 프로젝트 설정 → 내 앱 → 웹 앱 구성 JSON을 아래에 붙여넣으세요.
-        설정 방법은 <code style={{ fontSize: 11, background: 'var(--stone-200)', borderRadius: 4, padding: '1px 4px' }}>FIREBASE_SETUP.md</code> 파일을 참고하세요.
+        {t('sync.noConfigDesc')}
+        {' '}<code style={{ fontSize: 11, background: 'var(--stone-200)', borderRadius: 4, padding: '1px 4px' }}>FIREBASE_SETUP.md</code>
       </p>
       <textarea
         value={raw}
@@ -101,7 +105,7 @@ function NoConfigView() {
         disabled={saving || !raw.trim()}
         style={{ alignSelf: 'flex-end', padding: '8px 20px', fontSize: 13 }}
       >
-        {saving ? '저장 중...' : '저장'}
+        {saving ? t('sync.saving') : t('sync.save')}
       </button>
     </div>
   )
@@ -114,6 +118,7 @@ function SignedOutView() {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { t } = useTranslation()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -128,11 +133,11 @@ function SignedOutView() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('user-not-found') || msg.includes('wrong-password') || msg.includes('invalid-credential')) {
-        setError('이메일 또는 비밀번호가 올바르지 않습니다.')
+        setError(t('sync.errorWrongCredentials'))
       } else if (msg.includes('email-already-in-use')) {
-        setError('이미 사용 중인 이메일입니다.')
+        setError(t('sync.errorEmailInUse'))
       } else if (msg.includes('weak-password')) {
-        setError('비밀번호는 6자 이상이어야 합니다.')
+        setError(t('sync.errorWeakPassword'))
       } else {
         setError(msg)
       }
@@ -146,7 +151,7 @@ function SignedOutView() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <CloudOff size={16} style={{ color: 'var(--stone-400)' }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>
-          {mode === 'login' ? '로그인' : '회원가입'}
+          {mode === 'login' ? t('sync.login') : t('sync.signup')}
         </span>
       </div>
 
@@ -154,7 +159,7 @@ function SignedOutView() {
         <input
           type="email"
           className="input-field"
-          placeholder="이메일"
+          placeholder={t('sync.emailPlaceholder')}
           value={email}
           onChange={e => setEmail(e.target.value)}
           required
@@ -163,7 +168,7 @@ function SignedOutView() {
         <input
           type="password"
           className="input-field"
-          placeholder={mode === 'signup' ? '비밀번호 (6자 이상)' : '비밀번호'}
+          placeholder={mode === 'signup' ? t('sync.passwordSignupPlaceholder') : t('sync.passwordPlaceholder')}
           value={password}
           onChange={e => setPassword(e.target.value)}
           required
@@ -181,7 +186,7 @@ function SignedOutView() {
           disabled={busy}
           style={{ padding: '9px', fontSize: 13 }}
         >
-          {busy ? '처리 중...' : mode === 'login' ? '로그인' : '회원가입'}
+          {busy ? t('sync.processing') : mode === 'login' ? t('sync.login') : t('sync.signup')}
         </button>
       </form>
 
@@ -193,7 +198,7 @@ function SignedOutView() {
           alignSelf: 'center', padding: 0,
         }}
       >
-        {mode === 'login' ? '계정이 없으신가요? 회원가입' : '이미 계정이 있으신가요? 로그인'}
+        {mode === 'login' ? t('sync.switchToSignup') : t('sync.switchToLogin')}
       </button>
     </div>
   )
@@ -206,9 +211,10 @@ function NoFamilyView() {
   const [inviteCode, setInviteCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { t } = useTranslation()
 
   const uid = settings?.profile?.uid ?? ''
-  const name = settings?.profile?.name || '나'
+  const name = settings?.profile?.name || ''
   const role = settings?.profile?.role ?? 'mom'
 
   const handleCreate = async () => {
@@ -218,9 +224,9 @@ function NoFamilyView() {
       // F2: createFamily now returns { familyId, inviteCode }
       const { familyId } = await createFamily(
         {
-          babyName:      settings?.baby?.name ?? '아기',
+          babyName:      settings?.baby?.name ?? '',
           babyBirthdate: settings?.baby?.birthdate ?? '',
-          familyName:    `${name}의 가족`,
+          familyName:    `${name}の家族`,
         },
         { uid, name, role }
       )
@@ -238,7 +244,7 @@ function NoFamilyView() {
 
   const handleJoin = async () => {
     if (inviteCode.trim().length !== 6) {
-      setError('6자리 초대 코드를 입력해 주세요.')
+      setError(t('sync.errorInviteCodeLength'))
       return
     }
     setBusy(true)
@@ -259,9 +265,9 @@ function NoFamilyView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>가족 연결</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>{t('sync.familyConnect')}</div>
       <p style={{ fontSize: 12, color: 'var(--stone-500)', margin: 0 }}>
-        처음 시작하면 가족을 만들고, 상대방은 초대코드로 참여합니다.
+        {t('sync.familyConnectDesc')}
       </p>
 
       {mode === 'none' && (
@@ -277,9 +283,9 @@ function NoFamilyView() {
             }}
           >
             <Users size={20} style={{ color: 'var(--peach-400)' }} />
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>가족 만들기</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>{t('sync.createFamily')}</span>
             <span style={{ fontSize: 11, color: 'var(--stone-400)', textAlign: 'center' }}>
-              처음 시작하는 경우
+              {t('sync.createFamilyDesc')}
             </span>
           </button>
           <button
@@ -293,9 +299,9 @@ function NoFamilyView() {
             }}
           >
             <UserPlus size={20} style={{ color: 'var(--sage-400)' }} />
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>초대코드로 참여</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>{t('sync.joinFamily')}</span>
             <span style={{ fontSize: 11, color: 'var(--stone-400)', textAlign: 'center' }}>
-              상대방에게 코드를 받은 경우
+              {t('sync.joinFamilyDesc')}
             </span>
           </button>
         </div>
@@ -304,7 +310,7 @@ function NoFamilyView() {
       {mode === 'create' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <p style={{ fontSize: 12, color: 'var(--stone-500)', margin: 0 }}>
-            설정의 아기 정보와 내 이름을 사용해 가족을 만듭니다.
+            {t('sync.createFamilyNote')}
           </p>
           {error && (
             <div style={{ fontSize: 12, color: 'var(--rose-500)', display: 'flex', gap: 6 }}>
@@ -319,14 +325,14 @@ function NoFamilyView() {
               disabled={busy}
               style={{ flex: 1, padding: '9px', fontSize: 13 }}
             >
-              {busy ? '생성 중...' : '가족 만들기'}
+              {busy ? t('sync.creating') : t('sync.createFamily')}
             </button>
             <button
               className="btn-secondary"
               onClick={() => { setMode('none'); setError(null) }}
               style={{ padding: '9px 14px', fontSize: 13 }}
             >
-              취소
+              {t('sync.cancel')}
             </button>
           </div>
         </div>
@@ -337,7 +343,7 @@ function NoFamilyView() {
           <input
             type="text"
             className="input-field"
-            placeholder="6자리 초대 코드"
+            placeholder={t('sync.inviteCodePlaceholder')}
             value={inviteCode}
             onChange={e => setInviteCode(e.target.value.toUpperCase())}
             maxLength={6}
@@ -356,14 +362,14 @@ function NoFamilyView() {
               disabled={busy || inviteCode.trim().length !== 6}
               style={{ flex: 1, padding: '9px', fontSize: 13 }}
             >
-              {busy ? '참여 중...' : '참여'}
+              {busy ? t('sync.joining') : t('sync.join')}
             </button>
             <button
               className="btn-secondary"
               onClick={() => { setMode('none'); setError(null); setInviteCode('') }}
               style={{ padding: '9px 14px', fontSize: 13 }}
             >
-              취소
+              {t('sync.cancel')}
             </button>
           </div>
         </div>
@@ -375,6 +381,7 @@ function NoFamilyView() {
 /** CopyButton helper */
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
+  const { t } = useTranslation()
 
   const handleCopy = () => {
     navigator.clipboard.writeText(text).then(() => {
@@ -388,7 +395,7 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      title="복사"
+      title={t('sync.copy')}
       style={{
         background: 'var(--stone-100)', border: '1px solid var(--stone-200)',
         borderRadius: 6, padding: '3px 8px', cursor: 'pointer',
@@ -397,7 +404,7 @@ function CopyButton({ text }: { text: string }) {
       }}
     >
       {copied ? <Check size={12} style={{ color: 'var(--sage-500)' }} /> : <Copy size={12} />}
-      {copied ? '복사됨' : '복사'}
+      {copied ? t('sync.copied') : t('sync.copy')}
     </button>
   )
 }
@@ -407,6 +414,7 @@ function OnlineView({ detail }: { detail: string }) {
   const { settings } = useAppStore()
   const syncStatus = useSyncStatus()
   const [busySignOut, setBusySignOut] = useState(false)
+  const { t } = useTranslation()
 
   // F2: display the actual 6-char invite code (surfaced from syncEngine state),
   // not the internal familyId UUID which is useless to the user.
@@ -433,7 +441,7 @@ function OnlineView({ detail }: { detail: string }) {
           flexShrink: 0,
           animation: 'pulse 2s infinite',
         }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--sage-500)' }}>동기화 중</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--sage-500)' }}>{t('sync.syncing')}</span>
       </div>
 
       <div style={{ fontSize: 12, color: 'var(--stone-500)' }}>{detail}</div>
@@ -449,18 +457,18 @@ function OnlineView({ detail }: { detail: string }) {
           flexDirection: 'column',
           gap: 8,
         }}>
-          <div style={{ fontSize: 11, color: 'var(--stone-400)', fontWeight: 500 }}>초대 코드</div>
+          <div style={{ fontSize: 11, color: 'var(--stone-400)', fontWeight: 500 }}>{t('sync.inviteCodeLabel')}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <code style={{
               fontSize: 18, fontWeight: 700, color: 'var(--stone-700)',
               letterSpacing: '0.2em', flex: 1,
             }}>
-              {inviteCode || '불러오는 중...'}
+              {inviteCode || t('sync.inviteCodeLoading')}
             </code>
             {inviteCode && <CopyButton text={inviteCode} />}
           </div>
           <div style={{ fontSize: 11, color: 'var(--stone-400)', lineHeight: 1.5 }}>
-            상대방 기기에서 이 6자리 코드를 "초대코드로 참여" 화면에 입력하세요.
+            {t('sync.inviteCodeInstruction')}
           </div>
         </div>
       )}
@@ -472,7 +480,7 @@ function OnlineView({ detail }: { detail: string }) {
         style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '7px 14px', alignSelf: 'flex-start' }}
       >
         <LogOut size={13} />
-        {busySignOut ? '로그아웃 중...' : '로그아웃'}
+        {busySignOut ? t('sync.signingOut') : t('sync.signOut')}
       </button>
 
       <style>{`
@@ -488,6 +496,7 @@ function OnlineView({ detail }: { detail: string }) {
 /** error view */
 function ErrorView({ detail }: { detail: string }) {
   const { settings } = useAppStore()
+  const { t } = useTranslation()
 
   const handleRetry = () => {
     const cfg = settings?.firebase ?? null
@@ -503,7 +512,7 @@ function ErrorView({ detail }: { detail: string }) {
           background: 'var(--rose-400)',
           flexShrink: 0,
         }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--rose-500)' }}>동기화 오류</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--rose-500)' }}>{t('sync.syncError')}</span>
       </div>
       <div style={{ fontSize: 12, color: 'var(--stone-500)', lineHeight: 1.6 }}>{detail}</div>
       <button
@@ -512,7 +521,7 @@ function ErrorView({ detail }: { detail: string }) {
         style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '7px 14px', alignSelf: 'flex-start' }}
       >
         <RefreshCw size={13} />
-        재시도
+        {t('sync.retry')}
       </button>
     </div>
   )
@@ -525,6 +534,7 @@ function ErrorView({ detail }: { detail: string }) {
 export function SyncSettingsSlot() {
   const { status, detail } = useSyncStatus()
   const { settings } = useAppStore()
+  const { t } = useTranslation()
 
   // Determine effective status considering family linking
   // If online but no familyId, show no-family view
@@ -539,8 +549,8 @@ export function SyncSettingsSlot() {
 
     case 'signed-out':
       // Engine sets signed-out both for "not logged in" and "logged in but no family".
-      // Detect the latter via the detail message.
-      if (detail === '가족 연결 필요') {
+      // Detect the latter via the internal sentinel constant from syncEngine.
+      if (detail === DETAIL_FAMILY_NEEDED) {
         content = <NoFamilyView />
       } else {
         content = <SignedOutView />
@@ -551,7 +561,7 @@ export function SyncSettingsSlot() {
       content = (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--stone-500)', fontSize: 13 }}>
           <Cloud size={16} style={{ color: 'var(--stone-400)', animation: 'spin 1.2s linear infinite' }} />
-          연결 중...
+          {t('sync.connecting')}
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )
@@ -576,7 +586,7 @@ export function SyncSettingsSlot() {
         content = <NoConfigView />
       } else {
         content = (
-          <div style={{ fontSize: 12, color: 'var(--stone-400)' }}>동기화 꺼짐</div>
+          <div style={{ fontSize: 12, color: 'var(--stone-400)' }}>{t('sync.syncOff')}</div>
         )
       }
       break

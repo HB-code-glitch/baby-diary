@@ -1,22 +1,23 @@
 import React from 'react'
 import { Home, List, BarChart2, BookOpen, Mail, Settings } from 'lucide-react'
 import { useAppStore, getDDay } from '../store/useAppStore'
+import { useTranslation } from 'react-i18next'
 
 export type Page = 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings'
 
 interface NavItem {
   id: Page
-  label: string
+  labelKey: string
   icon: React.ElementType
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home',     label: '오늘',     icon: Home },
-  { id: 'history',  label: '기록',     icon: List },
-  { id: 'stats',    label: '통계',     icon: BarChart2 },
-  { id: 'diary',    label: '일기',     icon: BookOpen },
-  { id: 'messages', label: '아기에게', icon: Mail },
-  { id: 'settings', label: '설정',     icon: Settings },
+  { id: 'home',     labelKey: 'nav.home',     icon: Home },
+  { id: 'history',  labelKey: 'nav.history',  icon: List },
+  { id: 'stats',    labelKey: 'nav.stats',    icon: BarChart2 },
+  { id: 'diary',    labelKey: 'nav.diary',    icon: BookOpen },
+  { id: 'messages', labelKey: 'nav.messages', icon: Mail },
+  { id: 'settings', labelKey: 'nav.settings', icon: Settings },
 ]
 
 interface SidebarProps {
@@ -26,8 +27,9 @@ interface SidebarProps {
 
 export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const settings = useAppStore(s => s.settings)
+  const { t } = useTranslation()
 
-  const babyName = settings?.baby?.name || '아기'
+  const babyName = settings?.baby?.name || t('sidebar.defaultBabyName')
   const birthdate = settings?.baby?.birthdate
   const dday = birthdate ? getDDay(birthdate) : null
 
@@ -37,21 +39,21 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         <div className="sidebar-logo">Baby Diary</div>
         <div className="sidebar-baby-name">{babyName}</div>
         {dday != null ? (
-          <div className="sidebar-dday">D+{dday}일</div>
+          <div className="sidebar-dday">{t('dday', { days: dday })}</div>
         ) : (
-          <div className="sidebar-dday" style={{ opacity: 0.5 }}>생일을 설정해주세요</div>
+          <div className="sidebar-dday" style={{ opacity: 0.5 }}>{t('sidebar.birthdatePlaceholder')}</div>
         )}
       </div>
 
       <div className="sidebar-nav">
-        {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
+        {NAV_ITEMS.map(({ id, labelKey, icon: Icon }) => (
           <button
             key={id}
             className={`nav-item${currentPage === id ? ' active' : ''}`}
             onClick={() => onNavigate(id)}
           >
             <Icon />
-            <span>{label}</span>
+            <span>{t(labelKey)}</span>
           </button>
         ))}
       </div>

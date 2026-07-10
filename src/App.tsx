@@ -3,6 +3,7 @@ import { ToastProvider } from './components/Toast'
 import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
 import { useSyncLifecycle } from './sync/useSync'
+import { setLanguage } from './i18n'
 
 import { HomePage }     from './pages/HomePage'
 import { HistoryPage }  from './pages/HistoryPage'
@@ -25,6 +26,7 @@ function PageContent({ page, onNavigate }: { page: Page; onNavigate: (p: Page) =
 
 function AppInner() {
   const init = useAppStore(s => s.init)
+  const settings = useAppStore(s => s.settings)
   const [currentPage, setCurrentPage] = useState<Page>('home')
 
   // Start sync engine on mount; stop on unmount.
@@ -37,6 +39,13 @@ function AppInner() {
       init()
     }
   }, [init])
+
+  // Sync language from persisted settings whenever settings change
+  useEffect(() => {
+    if (settings?.language) {
+      setLanguage(settings.language)
+    }
+  }, [settings?.language])
 
   return (
     <div className="app-shell">

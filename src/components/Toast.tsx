@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 
 interface ToastItem {
   id: string
@@ -21,6 +22,7 @@ export function useToast() {
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const { t } = useTranslation()
 
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
@@ -53,7 +55,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                   removeToast(toast.id)
                 }}
               >
-                시간 수정
+                {t('toast.editTime')}
               </button>
             )}
             {toast.onUndo && (
@@ -64,7 +66,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                   removeToast(toast.id)
                 }}
               >
-                {toast.undoLabel ?? '실행취소'}
+                {toast.undoLabel ?? t('toast.undo')}
               </button>
             )}
             <button

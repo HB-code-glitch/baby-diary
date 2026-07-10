@@ -2,10 +2,12 @@ import React, { useState, useMemo } from 'react'
 import { Plus, Pencil, Trash2, X, BookOpen } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
+import { ja } from 'date-fns/locale'
 import { useAppStore } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { DiaryEvent, DiaryData } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
+import { useTranslation } from 'react-i18next'
 
 // ---------------------------------------------------------------------------
 // Diary entry editor
@@ -22,6 +24,7 @@ function DiaryEditor({ initial, onSave, onClose }: EditorProps) {
   const [title, setTitle]  = useState(data?.title ?? '')
   const [text, setText]    = useState(data?.text  ?? '')
   const [saving, setSaving] = useState(false)
+  const { t } = useTranslation()
 
   const handleSave = async () => {
     if (!text.trim()) return
@@ -46,7 +49,7 @@ function DiaryEditor({ initial, onSave, onClose }: EditorProps) {
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--stone-800)' }}>
-            {initial ? '일기 수정' : '일기 쓰기'}
+            {initial ? t('diary.editTitle') : t('diary.write')}
           </span>
           <button
             onClick={onClose}
@@ -57,21 +60,21 @@ function DiaryEditor({ initial, onSave, onClose }: EditorProps) {
         </div>
 
         <div>
-          <div className="label">제목 (선택)</div>
+          <div className="label">{t('diary.titleLabel')}</div>
           <input
             type="text"
             className="input-field"
-            placeholder="오늘의 제목..."
+            placeholder={t('diary.titlePlaceholder')}
             value={title}
             onChange={e => setTitle(e.target.value)}
           />
         </div>
 
         <div>
-          <div className="label">내용</div>
+          <div className="label">{t('diary.contentLabel')}</div>
           <textarea
             className="textarea-field"
-            placeholder="오늘 있었던 일을 기록해요..."
+            placeholder={t('diary.contentPlaceholder')}
             style={{ minHeight: 160 }}
             value={text}
             onChange={e => setText(e.target.value)}
@@ -79,14 +82,14 @@ function DiaryEditor({ initial, onSave, onClose }: EditorProps) {
         </div>
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>취소</button>
+          <button className="btn-secondary" onClick={onClose}>{t('diary.cancel')}</button>
           <button
             className="btn-primary"
             onClick={handleSave}
             disabled={saving || !text.trim()}
             style={{ opacity: !text.trim() ? 0.5 : 1 }}
           >
-            {saving ? '저장 중...' : '저장'}
+            {saving ? t('diary.saving') : t('diary.save')}
           </button>
         </div>
       </div>
@@ -103,6 +106,9 @@ export function DiaryPage() {
   const settings  = useAppStore(s => s.settings)
   const { addEvent, editEvent, softDeleteEvent } = useAppStore()
   const { showToast } = useToast()
+  const { t, i18n: i18nInstance } = useTranslation()
+
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
 
   const [editorOpen, setEditorOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<DiaryEvent | null>(null)
@@ -116,28 +122,28 @@ export function DiaryPage() {
   )
 
   const handleSave = async (title: string, text: string) => {
-    const t = new Date().toISOString()
+    const time = new Date().toISOString()
     if (editTarget) {
       await editEvent(editTarget, { data: { title, text } as DiaryData })
-      showToast({ message: '일기가 수정되었습니다.' })
+      showToast({ message: t('diary.toastEdited') })
     } else {
       const event: DiaryEvent = {
         id: uuidv4(),
         type: 'diary',
-        at: t,
+        at: time,
         data: { title, text } as DiaryData,
         author: {
           uid:  settings?.profile?.uid  ?? 'local',
-          name: settings?.profile?.name ?? '나',
+          name: settings?.profile?.name ?? '',
           role: settings?.profile?.role ?? 'mom',
         },
-        createdAt: t,
-        updatedAt: t,
+        createdAt: time,
+        updatedAt: time,
         rev: 1,
         deleted: false,
       }
       await addEvent(event)
-      showToast({ message: '일기가 저장되었습니다.' })
+      showToast({ message: t('diary.toastSaved') })
     }
   }
 
@@ -145,7 +151,7 @@ export function DiaryPage() {
     if (confirmDelete === event.id) {
       await softDeleteEvent(event)
       setConfirmDelete(null)
-      showToast({ message: '일기가 삭제되었습니다.' })
+      showToast({ message: t('diary.toastDeleted') })
     } else {
       setConfirmDelete(event.id)
       setTimeout(() => setConfirmDelete(null), 3000)
@@ -160,14 +166,14 @@ export function DiaryPage() {
   return (
     <div className="page-container">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <div className="page-title">일기</div>
+        <div className="page-title">{t('diary.title')}</div>
         <button
           className="btn-primary"
           style={{ display: 'flex', alignItems: 'center', gap: 6 }}
           onClick={() => openEditor()}
         >
           <Plus size={14} />
-          일기 쓰기
+          {t('diary.write')}
         </button>
       </div>
 
@@ -185,8 +191,8 @@ export function DiaryPage() {
               <path d="M37 16C40 15.5 44 15.5 47 16" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
               <path d="M37 22C40 21.5 44 21.5 47 22" stroke="var(--stone-300)" strokeWidth="1.2" strokeLinecap="round"/>
             </svg>
-            <div className="empty-state-title">아직 일기가 없어요</div>
-            <div className="empty-state-sub">소중한 오늘을 기록해보세요</div>
+            <div className="empty-state-title">{t('diary.emptyTitle')}</div>
+            <div className="empty-state-sub">{t('diary.emptySub')}</div>
           </div>
         </div>
       ) : (
@@ -207,10 +213,10 @@ export function DiaryPage() {
                     </div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                       <span style={{ fontSize: 11, color: 'var(--stone-400)' }}>
-                        {format(parseISO(event.at), 'yyyy년 M월 d일 EEEEE', { locale: ko })}
+                        {format(parseISO(event.at), t('date.formatFull'), { locale: dateFnsLocale })}
                       </span>
                       <span style={{ fontSize: 11, color: 'var(--stone-400)' }}>
-                        {event.author.role === 'mom' ? '엄마' : '아빠'} {event.author.name}
+                        {t(`role.${event.author.role}`)} {event.author.name}
                       </span>
                     </div>
                   </div>

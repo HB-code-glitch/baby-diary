@@ -5,8 +5,10 @@ import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
 import { TimeEditModal } from '../components/TimeEditModal'
 import { DiaryEvent, BreastData, FormulaData } from '../../shared/types'
-import { formatDistanceStrict, parseISO, differenceInMinutes, format } from 'date-fns'
+import { differenceInMinutes, format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
+import { ja } from 'date-fns/locale'
+import { useTranslation } from 'react-i18next'
 
 // ---------------------------------------------------------------------------
 // Hero header strip (date + D+N + last feeding badge)
@@ -19,13 +21,15 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
   const lastFeeding = useAppStore(s => s.lastFeeding())
   const settings = useAppStore(s => s.settings)
   const [, setTick] = useState(0)
+  const { t, i18n: i18nInstance } = useTranslation()
 
   useEffect(() => {
     const id = setInterval(() => setTick(t => t + 1), 60_000)
     return () => clearInterval(id)
   }, [])
 
-  const dateStr = format(new Date(), 'M월 d일 (EEE)', { locale: ko })
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+  const dateStr = format(new Date(), t('date.formatLong'), { locale: dateFnsLocale })
 
   const birthdate = settings?.baby?.birthdate
   const dday = birthdate ? getDDay(birthdate) : null
@@ -35,19 +39,23 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
     const minutes = differenceInMinutes(new Date(), parseISO(lastFeeding.at))
     const hours = Math.floor(minutes / 60)
     const mins = minutes % 60
-    const label = hours > 0 ? `${hours}시간 ${mins}분 전` : `${mins}분 전`
-    const type = lastFeeding.type === 'breast' ? '모유' : '분유'
+    const timeStr = hours > 0
+      ? t('home.hoursMinutesAgo', { hours, mins })
+      : t('home.minutesAgo', { mins })
+    const feedingType = lastFeeding.type === 'breast'
+      ? t('home.breastMilk')
+      : t('home.formula')
     feedingBadge = (
       <div className="badge-feeding">
         <Clock size={12} />
-        마지막 {type} 후 {label}
+        {t('home.lastFeedingAgo', { type: feedingType, time: timeStr })}
       </div>
     )
   } else {
     feedingBadge = (
       <div className="badge-feeding-empty">
         <Clock size={12} />
-        아직 수유 기록이 없어요
+        {t('home.noFeedingYet')}
       </div>
     )
   }
@@ -57,13 +65,13 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
       <div className="home-hero-left">
         <div className="home-hero-date">{dateStr}</div>
         {dday != null ? (
-          <div className="home-hero-dday">D+{dday}일</div>
+          <div className="home-hero-dday">{t('dday', { days: dday })}</div>
         ) : (
           <button
             className="home-hero-dday-btn"
             onClick={onNavigateSettings}
           >
-            생일을 설정해주세요
+            {t('home.setBirthday')}
           </button>
         )}
       </div>
@@ -80,25 +88,26 @@ function TodaySummary() {
   const poopCount    = useAppStore(s => s.todayPoopCount())
   const feedCount    = useAppStore(s => s.todayFeedingCount())
   const formulaMl    = useAppStore(s => s.todayFormulaTotalMl())
+  const { t } = useTranslation()
 
   return (
     <div className="summary-pills">
       <div className="summary-pill">
         <span className="summary-pill-dot" style={{ background: 'var(--sage-400)' }} />
-        소변 {peeCount}회
+        {t('summary.pee', { count: peeCount })}
       </div>
       <div className="summary-pill">
         <span className="summary-pill-dot" style={{ background: 'var(--sage-500)' }} />
-        대변 {poopCount}회
+        {t('summary.poop', { count: poopCount })}
       </div>
       <div className="summary-pill">
         <span className="summary-pill-dot" style={{ background: 'var(--peach-400)' }} />
-        수유 {feedCount}회
+        {t('summary.feeding', { count: feedCount })}
       </div>
       {formulaMl > 0 && (
         <div className="summary-pill">
           <span className="summary-pill-dot" style={{ background: 'var(--peach-300)' }} />
-          분유 총 {formulaMl}ml
+          {t('summary.formulaTotal', { ml: formulaMl })}
         </div>
       )}
     </div>
@@ -117,6 +126,7 @@ interface TempPopoverProps {
 function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
   const [value, setValue] = useState('37.0')
   const inputRef = useRef<HTMLInputElement>(null)
+  const { t } = useTranslation()
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
@@ -129,7 +139,7 @@ function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
     <>
       <div className="popover-overlay" onClick={onClose} />
       <div className="popover" style={style}>
-        <div className="label">체온 입력</div>
+        <div className="label">{t('popover.tempInput')}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <input
             ref={inputRef}
@@ -145,7 +155,7 @@ function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
           <span style={{ fontSize: 14, color: 'var(--stone-600)', fontWeight: 600 }}>℃</span>
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>취소</button>
+          <button className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
           <button
             className="btn-primary"
             onClick={() => {
@@ -153,7 +163,7 @@ function TempPopover({ anchor, onConfirm, onClose }: TempPopoverProps) {
               if (!isNaN(n)) onConfirm(n)
             }}
           >
-            기록
+            {t('popover.record')}
           </button>
         </div>
       </div>
@@ -173,6 +183,7 @@ interface BreastPopoverProps {
 function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
   const [side, setSide] = useState<'L' | 'R' | 'both'>('both')
   const [minutes, setMinutes] = useState('')
+  const { t } = useTranslation()
 
   const style: React.CSSProperties = {
     top: anchor.bottom + 8,
@@ -180,16 +191,16 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
   }
 
   const SIDES: { value: 'L' | 'R' | 'both'; label: string }[] = [
-    { value: 'L', label: '왼쪽' },
-    { value: 'R', label: '오른쪽' },
-    { value: 'both', label: '양쪽' },
+    { value: 'L', label: t('breast.left') },
+    { value: 'R', label: t('breast.right') },
+    { value: 'both', label: t('breast.both') },
   ]
 
   return (
     <>
       <div className="popover-overlay" onClick={onClose} />
       <div className="popover" style={style}>
-        <div className="label" style={{ marginBottom: 8 }}>모유 수유</div>
+        <div className="label" style={{ marginBottom: 8 }}>{t('popover.breastFeeding')}</div>
         <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
           {SIDES.map(({ value, label }) => (
             <button
@@ -201,7 +212,7 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
             </button>
           ))}
         </div>
-        <div className="label">수유 시간 (선택)</div>
+        <div className="label">{t('popover.feedingDuration')}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           <input
             type="number"
@@ -211,12 +222,12 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
             style={{ width: 80 }}
             value={minutes}
             onChange={e => setMinutes(e.target.value)}
-            placeholder="분"
+            placeholder={t('popover.minutesPlaceholder')}
           />
-          <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>분</span>
+          <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('popover.minutesPlaceholder')}</span>
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>취소</button>
+          <button className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
           <button
             className="btn-primary"
             onClick={() => {
@@ -224,7 +235,7 @@ function BreastPopover({ anchor, onConfirm, onClose }: BreastPopoverProps) {
               onConfirm(side, isNaN(m as number) ? undefined : m)
             }}
           >
-            기록
+            {t('popover.record')}
           </button>
         </div>
       </div>
@@ -244,6 +255,7 @@ interface FormulaPopoverProps {
 function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
   const [ml, setMl] = useState(120)
   const SHORTCUTS = [60, 80, 100, 120, 150, 180]
+  const { t } = useTranslation()
 
   const style: React.CSSProperties = {
     top: anchor.bottom + 8,
@@ -254,7 +266,7 @@ function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
     <>
       <div className="popover-overlay" onClick={onClose} />
       <div className="popover" style={style}>
-        <div className="label" style={{ marginBottom: 8 }}>분유량</div>
+        <div className="label" style={{ marginBottom: 8 }}>{t('popover.formulaAmount')}</div>
         <div className="stepper" style={{ marginBottom: 10 }}>
           <button className="stepper-btn" onClick={() => setMl(v => Math.max(0, v - 10))}>−</button>
           <div className="stepper-value">{ml}</div>
@@ -273,8 +285,8 @@ function FormulaPopover({ anchor, onConfirm, onClose }: FormulaPopoverProps) {
           ))}
         </div>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>취소</button>
-          <button className="btn-primary" onClick={() => onConfirm(ml)}>기록</button>
+          <button className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
+          <button className="btn-primary" onClick={() => onConfirm(ml)}>{t('popover.record')}</button>
         </div>
       </div>
     </>
@@ -294,6 +306,7 @@ interface HomePageProps {
 export function HomePage({ onNavigate }: HomePageProps) {
   const { addPee, addPoop, addTemp, addBreast, addFormula, editEvent, softDeleteEvent, todayEvents } = useAppStore()
   const { showToast } = useToast()
+  const { t } = useTranslation()
   const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
   const [timeEditEvent, setTimeEditEvent] = useState<DiaryEvent | null>(null)
 
@@ -306,15 +319,15 @@ export function HomePage({ onNavigate }: HomePageProps) {
   ) => {
     const event = await recordFn()
     showToast({
-      message: `${label} 기록 완료 (${formatTime(event.at)})`,
-      undoLabel: '실행취소',
+      message: t('toast.recorded', { label, time: formatTime(event.at) }),
+      undoLabel: t('toast.undo'),
       onUndo: async () => { await softDeleteEvent(event) },
       onTimeEdit: () => setTimeEditEvent(event),
     })
-  }, [showToast, softDeleteEvent])
+  }, [showToast, softDeleteEvent, t])
 
-  const handlePee = () => quickRecord(() => addPee(), '소변')
-  const handlePoop = () => quickRecord(() => addPoop(), '대변')
+  const handlePee = () => quickRecord(() => addPee(), t('quickBtn.pee'))
+  const handlePoop = () => quickRecord(() => addPoop(), t('quickBtn.poop'))
 
   const openPopover = (type: ActivePopover, e: React.MouseEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -323,25 +336,30 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const handleTempConfirm = async (celsius: number) => {
     setPopover(null)
-    await quickRecord(() => addTemp(celsius), `체온 ${celsius.toFixed(1)}℃`)
+    await quickRecord(() => addTemp(celsius), `${t('quickBtn.temp')} ${celsius.toFixed(1)}℃`)
   }
 
   const handleBreastConfirm = async (side: 'L' | 'R' | 'both', minutes?: number) => {
     setPopover(null)
-    const label = side === 'L' ? '모유(왼쪽)' : side === 'R' ? '모유(오른쪽)' : '모유(양쪽)'
+    const sideLabel = side === 'L'
+      ? t('breast.left')
+      : side === 'R'
+        ? t('breast.right')
+        : t('breast.both')
+    const label = `${t('quickBtn.breast')}(${sideLabel})`
     await quickRecord(() => addBreast(side, minutes), label)
   }
 
   const handleFormulaConfirm = async (ml: number) => {
     setPopover(null)
-    await quickRecord(() => addFormula(ml), `분유 ${ml}ml`)
+    await quickRecord(() => addFormula(ml), `${t('quickBtn.formula')} ${ml}ml`)
   }
 
   const handleTimeEditConfirm = async (newAt: string) => {
     if (!timeEditEvent) return
     await editEvent(timeEditEvent, { at: newAt })
     setTimeEditEvent(null)
-    showToast({ message: '시간이 수정되었습니다.' })
+    showToast({ message: t('toast.timeEdited') })
   }
 
   return (
@@ -358,32 +376,32 @@ export function HomePage({ onNavigate }: HomePageProps) {
       }}>
         <button className="quick-btn quick-btn-pee" onClick={handlePee}>
           <Droplets size={26} />
-          <span>소변</span>
+          <span>{t('quickBtn.pee')}</span>
         </button>
         <button className="quick-btn quick-btn-poop" onClick={handlePoop}>
           <Wind size={26} />
-          <span>대변</span>
+          <span>{t('quickBtn.poop')}</span>
         </button>
         <button
           className="quick-btn quick-btn-temp"
           onClick={e => openPopover('temp', e)}
         >
           <Thermometer size={26} />
-          <span>체온</span>
+          <span>{t('quickBtn.temp')}</span>
         </button>
         <button
           className="quick-btn quick-btn-breast"
           onClick={e => openPopover('breast', e)}
         >
           <Heart size={26} />
-          <span>모유</span>
+          <span>{t('quickBtn.breast')}</span>
         </button>
         <button
           className="quick-btn quick-btn-formula"
           onClick={e => openPopover('formula', e)}
         >
           <Baby size={26} />
-          <span>분유</span>
+          <span>{t('quickBtn.formula')}</span>
         </button>
       </div>
 
@@ -396,7 +414,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
       {/* Today's timeline */}
       <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--stone-500)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-        오늘 기록
+        {t('home.todayRecords')}
       </div>
       <div className="card">
         <EventTimeline events={today} showAuthor editable />
