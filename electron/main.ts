@@ -8,6 +8,14 @@ import { DiaryEvent, AppSettings, ExportFormat } from '../shared/types'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 
+// F3: Prevent concurrent instances from writing to the same JSONL files simultaneously.
+// requestSingleInstanceLock() is synchronous and must be called before app is ready.
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  // Another instance is already running; quit immediately.
+  app.quit()
+}
+
 let mainWindow: BrowserWindow | null = null
 let eventLog: EventLog
 let settingsStore: SettingsStore
@@ -120,6 +128,14 @@ function setupIPC(): void {
     }
   })
 }
+
+// F3: When a second instance tries to launch, focus/restore the existing window.
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+})
 
 app.whenReady().then(() => {
   const userDataPath = app.getPath('userData')
