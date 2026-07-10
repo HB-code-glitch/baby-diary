@@ -45,7 +45,15 @@ export class SettingsStore {
     const tmpPath = this.settingsPath + '.tmp'
     const content = JSON.stringify(settings, null, 2)
 
-    fs.writeFileSync(tmpPath, content, 'utf-8')
+    // F9: fsync the tmp file before rename so the data is durable on disk
+    // even if the OS crashes between the write and rename.
+    const fd = fs.openSync(tmpPath, 'w')
+    try {
+      fs.writeSync(fd, content, 0, 'utf-8')
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
     fs.renameSync(tmpPath, this.settingsPath)
 
     this.settings = { ...settings }
