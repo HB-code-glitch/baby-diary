@@ -40,8 +40,8 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
     const hours = Math.floor(minutes / 60)
     const mins = minutes % 60
     const timeStr = hours > 0
-      ? t('home.hoursMinutesAgo', { hours, mins })
-      : t('home.minutesAgo', { mins })
+      ? t('home.durationHoursMins', { hours, mins })
+      : t('home.durationMins', { mins })
     const feedingType = lastFeeding.type === 'breast'
       ? t('home.breastMilk')
       : t('home.formula')

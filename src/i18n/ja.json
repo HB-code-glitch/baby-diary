@@ -15,10 +15,12 @@
   "home": {
     "todayRecords": "今日の記録",
     "setBirthday": "誕生日を設定してください",
-    "lastFeedingAgo": "最後の{{type}}から{{time}}",
+    "lastFeedingAgo": "前回の{{type}}から{{time}}",
     "noFeedingYet": "まだ授乳の記録がありません",
     "hoursMinutesAgo": "{{hours}}時間{{mins}}分前",
     "minutesAgo": "{{mins}}分前",
+    "durationHoursMins": "{{hours}}時間{{mins}}分",
+    "durationMins": "{{mins}}分",
     "breastMilk": "母乳",
     "formula": "ミルク"
   },
@@ -133,7 +135,7 @@
     "editTitle": "メッセージを編集",
     "composerSubtitle": "子どもが大きくなったら読むメッセージを残しましょう",
     "composerToBaby": "{{babyName}}へ",
-    "placeholder": "{{babyName}}へ…",
+    "placeholder": "うちの{{babyName}}へ…",
     "cancel": "キャンセル",
     "send": "送る",
     "saving": "保存中…",
@@ -187,8 +189,8 @@
     "passwordPlaceholder": "パスワード",
     "passwordSignupPlaceholder": "パスワード（6文字以上）",
     "processing": "処理中…",
-    "switchToSignup": "アカウントをお持ちでない方はこちら",
-    "switchToLogin": "すでにアカウントをお持ちの方はこちら",
+    "switchToSignup": "アカウントをお持ちでない方は新規登録",
+    "switchToLogin": "すでにアカウントをお持ちの方はログイン",
     "errorWrongCredentials": "メールアドレスまたはパスワードが正しくありません。",
     "errorEmailInUse": "このメールアドレスはすでに使用されています。",
     "errorWeakPassword": "パスワードは6文字以上にしてください。",
@@ -220,8 +222,8 @@
     "familyNeeded": "家族の連携が必要です"
   },
   "date": {
-    "formatLong": "M月d日(EEE)",
-    "formatShort": "M月d日(EEEEE)",
+    "formatLong": "M月d日（EEE）",
+    "formatShort": "M月d日（EEEEE）",
     "formatFull": "yyyy年M月d日 EEEEE",
     "formatYear": "yyyy年M月d日",
     "formatBackup": "M月d日 HH:mm"

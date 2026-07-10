@@ -19,6 +19,8 @@
     "noFeedingYet": "아직 수유 기록이 없어요",
     "hoursMinutesAgo": "{{hours}}시간 {{mins}}분 전",
     "minutesAgo": "{{mins}}분 전",
+    "durationHoursMins": "{{hours}}시간 {{mins}}분",
+    "durationMins": "{{mins}}분",
     "breastMilk": "모유",
     "formula": "분유"
   },
