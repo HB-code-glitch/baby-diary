@@ -46,7 +46,7 @@ export function SettingsPage() {
         name: myName.trim(),
         role: myRole,
       },
-      familyId: settings?.familyId ?? uuidv4(),
+      familyId: settings?.familyId ?? '',  // F8: never fabricate a familyId — only create/join flow sets this
       firebase:  settings?.firebase  ?? null,
     }
     await saveSettings(updated)
