@@ -76,17 +76,43 @@ const firebaseConfig = {
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // 초대 코드 컬렉션 — 직접 get()만 허용, list 불가
+    match /invites/{code} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow create: if request.auth != null
+        && request.resource.data.code_check == code
+        && request.resource.data.familyId is string;
+      allow update, delete: if false;
+    }
+
     match /families/{familyId} {
       function isMember() {
         return request.auth != null
           && resource.data.members[request.auth.uid] != null;
       }
-      allow get, list: if request.auth != null;
+
+      // get: 멤버만 허용 / list: 완전 차단
+      allow get: if isMember();
+      allow list: if false;
+
       allow create: if request.auth != null
         && request.resource.data.members[request.auth.uid] != null
         && request.resource.data.inviteCode is string
         && request.resource.data.inviteCode.size() == 6;
-      allow update: if isMember();
+
+      // 멤버 수정 또는 self-join (members 키만 변경하여 본인 추가)
+      allow update: if isMember()
+        || (
+          request.auth != null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+          && request.resource.data.members[request.auth.uid] != null
+          && resource.data.members.keys().toSet().difference(
+               request.resource.data.members.keys().toSet()
+             ).size() == 0
+        );
+
       allow delete: if false;
 
       match /events/{eventDocId} {
@@ -103,6 +129,8 @@ service cloud.firestore {
 ```
 
 3. **게시** 클릭
+
+> **보안 참고**: 이전 규칙과 달리 `families`의 `list`가 완전히 차단됩니다. 초대는 `invites/{code}` 컬렉션의 직접 `get()`으로만 가능하므로 가족 목록 열거, 아기 이름 유출, 초대코드 일괄 수집이 불가능합니다. 브루트포스(36^6 ≈ 2.2억 조합)는 Spark 무료 플랜 읽기 할당량(하루 5만 건)으로 실질적으로 차단됩니다.
 
 ### 방법 B: Firebase CLI로 배포
 
