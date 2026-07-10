@@ -312,11 +312,11 @@ export function formatEventValue(e: DiaryEvent): string {
     case 'breast': {
       const d = e.data as { side: string; minutes?: number }
       const side = d.side === 'L' ? '왼쪽' : d.side === 'R' ? '오른쪽' : '양쪽'
-      return `모유 ${side}${d.minutes != null ? ` ${d.minutes}분` : ''}`
+      return `${side}${d.minutes != null ? ` ${d.minutes}분` : ''}`
     }
     case 'formula': {
       const d = e.data as { ml: number }
-      return `분유 ${d.ml}ml`
+      return `${d.ml}ml`
     }
     case 'diary': {
       const d = e.data as { title?: string; text: string }
