@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { DiaryEvent, EventType } from '../../shared/types'
 
-const VALID_TYPES: EventType[] = ['pee', 'poop', 'temp', 'breast', 'formula', 'diary', 'message']
+const VALID_TYPES: EventType[] = ['pee', 'poop', 'temp', 'breast', 'formula', 'diary', 'message', 'sleep', 'growth']
 
 /** F4: Validate a DiaryEvent before writing to disk. Returns null if valid, error string if invalid. */
 export function validateEvent(event: unknown): string | null {

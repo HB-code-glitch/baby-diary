@@ -1,4 +1,4 @@
-export type EventType = 'pee' | 'poop' | 'temp' | 'breast' | 'formula' | 'diary' | 'message'
+export type EventType = 'pee' | 'poop' | 'temp' | 'breast' | 'formula' | 'diary' | 'message' | 'sleep' | 'growth'
 
 export interface PeeData { note?: string }
 export interface PoopData { note?: string }
@@ -7,6 +7,8 @@ export interface BreastData { side: 'L' | 'R' | 'both'; minutes?: number; note?:
 export interface FormulaData { ml: number; note?: string }
 export interface DiaryData { title?: string; text: string }
 export interface MessageData { text: string }
+export interface SleepData { minutes: number; note?: string }
+export interface GrowthData { weightKg?: number; heightCm?: number; note?: string }
 
 export type EventData =
   | PeeData
@@ -16,6 +18,8 @@ export type EventData =
   | FormulaData
   | DiaryData
   | MessageData
+  | SleepData
+  | GrowthData
 
 export interface DiaryEvent {
   id: string
