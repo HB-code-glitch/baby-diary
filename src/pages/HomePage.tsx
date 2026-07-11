@@ -78,29 +78,33 @@ function InsightsPanel({
 
   const rows = [
     {
-      icon: '🍼',
+      Icon: IconBottle,
       bg: 'var(--blush)',
+      iconColor: 'var(--blush-text)',
       label: t('home.lastFeedingLabel'),
       value: lastFeedingLabel,
       ago: lastFeedingAgo,
     },
     {
-      icon: '🤱',
+      Icon: IconHeart,
       bg: 'var(--sky)',
+      iconColor: 'var(--sky-text)',
       label: t('home.nextBreastLabel'),
       value: nextSideLabel,
       ago: null,
     },
     {
-      icon: '💧',
+      Icon: IconDrop,
       bg: 'var(--mint)',
+      iconColor: 'var(--mint-text)',
       label: t('home.todayDiaperLabel'),
       value: `${t('quickBtn.pee')} ${todayPeeCount} / ${t('quickBtn.poop')} ${todayPoopCount}`,
       ago: null,
     },
     {
-      icon: '🌡',
+      Icon: IconThermometer,
       bg: 'var(--butter)',
+      iconColor: 'var(--butter-text)',
       label: t('home.recentTempLabel'),
       value: tempLabel,
       ago: null,
@@ -110,14 +114,16 @@ function InsightsPanel({
   return (
     <div className="insights-panel">
       <div className="insights-title">{t('home.insightsTitle')}</div>
-      {rows.map((row, i) => (
+      {rows.map((row, i) => {
+        const RowIcon = row.Icon
+        return (
         <div key={i} className="insight-row">
           <div
             className="insight-icon"
             style={{ background: row.bg }}
             aria-hidden="true"
           >
-            <span style={{ fontSize: 16 }}>{row.icon}</span>
+            <RowIcon size={16} color={row.iconColor} />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="insight-label">{row.label}</div>
@@ -131,7 +137,8 @@ function InsightsPanel({
             </div>
           </div>
         </div>
-      ))}
+        )
+      })}
 
       {/* Backup card */}
       <div className="backup-card">

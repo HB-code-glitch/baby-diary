@@ -252,6 +252,7 @@
     "join": "参加",
     "cancel": "キャンセル",
     "errorInviteCodeLength": "6桁の招待コードを入力してください。",
+    "errorFamilyNotFound": "家族が見つかりません。",
     "copy": "コピー",
     "copied": "コピー済み",
     "inviteCodeLabel": "招待コード",
@@ -269,7 +270,7 @@
   "date": {
     "formatLong": "M月d日（EEE）",
     "formatShort": "M月d日（EEEEE）",
-    "formatFull": "yyyy年M月d日 EEEEE",
+    "formatFull": "yyyy年M月d日（EEE）",
     "formatYear": "yyyy年M月d日",
     "formatBackup": "M月d日 HH:mm"
   }

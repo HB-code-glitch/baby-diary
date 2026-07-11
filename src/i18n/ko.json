@@ -252,6 +252,7 @@
     "join": "참여",
     "cancel": "취소",
     "errorInviteCodeLength": "6자리 초대 코드를 입력해 주세요.",
+    "errorFamilyNotFound": "가족을 찾을 수 없습니다.",
     "copy": "복사",
     "copied": "복사됨",
     "inviteCodeLabel": "초대 코드",
@@ -269,7 +270,7 @@
   "date": {
     "formatLong": "M월 d일 (EEE)",
     "formatShort": "M월 d일 (EEEEE)",
-    "formatFull": "yyyy년 M월 d일 EEEEE",
+    "formatFull": "yyyy년 M월 d일 (EEE)",
     "formatYear": "yyyy년 M월 d일",
     "formatBackup": "M월 d일 HH:mm"
   }

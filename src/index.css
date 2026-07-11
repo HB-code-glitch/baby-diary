@@ -646,7 +646,7 @@ body {
 .stat-card-featured {
   grid-row: 1 / 3;
   padding: 20px 18px;
-  justify-content: flex-start;
+  justify-content: center;
   gap: 0;
 }
 
@@ -1679,6 +1679,9 @@ body {
 .cal-week-dday     { font-size: 10px; color: var(--text-muted); font-weight: 500; }
 
 .cal-week-today-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -1893,6 +1896,9 @@ body {
 [data-theme="dark"] .quick-btn-circle-breast:hover { background: #263040; }
 [data-theme="dark"] .quick-btn-circle-formula:hover { background: #263328; }
 
+/* Quick-record icon circles: dark tint instead of translucent white */
+[data-theme="dark"] .quick-btn-icon-circle { background: rgba(255,255,255,0.07); }
+
 /* Calendar chips in dark */
 [data-theme="dark"] .cal-indicator-sage  { background: #1e2b1e; color: #88c890; }
 [data-theme="dark"] .cal-indicator-peach { background: #2e2a1c; color: #e3cd7e; }
@@ -1901,6 +1907,49 @@ body {
 [data-theme="dark"] .cal-chip-sage  { background: #1e2b1e; color: #88c890; }
 [data-theme="dark"] .cal-chip-peach { background: #2e2a1c; color: #e3cd7e; }
 [data-theme="dark"] .cal-chip-red   { background: #2f2222; color: #e8a9a0; }
+
+/* ── Legacy palette dark overrides ──
+   EventIcon chips, author avatars, DiaryPage delete confirm, MessagesPage border all
+   reference --peach-*/--sage-*/--amber-*/--rose-*/--cream-* vars.
+   These were not overridden in [data-theme="dark"], causing light pastel discs on dark bg. */
+[data-theme="dark"] {
+  /* Peach family */
+  --peach-100: #2e201a;
+  --peach-200: #3d2a20;
+  --peach-300: #5a3a2a;
+  --peach-400: #c07050;
+  --peach-500: #d4835a;
+  --peach-600: #e09a70;
+
+  /* Sage family */
+  --sage-100: #1c2b1a;
+  --sage-200: #253823;
+  --sage-300: #2f4a2c;
+  --sage-400: #5a8c52;
+  --sage-500: #78b46e;
+  --sage-600: #9acc90;
+
+  /* Amber family */
+  --amber-100: #2b2410;
+  --amber-200: #3a3015;
+  --amber-300: #4d3f1a;
+  --amber-400: #b88c30;
+  --amber-500: #d4a84a;
+  --amber-600: #e8c060;
+
+  /* Rose family */
+  --rose-100: #2f1a1e;
+  --rose-200: #42222a;
+  --rose-300: #5e2e38;
+  --rose-400: #c05060;
+  --rose-500: #d87080;
+
+  /* Cream family — used for card/surface bg in SyncSettingsSlot & MessagesPage */
+  --cream-50:  #1e1e21;
+  --cream-100: #222226;
+  --cream-200: #2c2c32;
+  --cream-300: #38383f;
+}
 
 /* Summary pills in dark */
 [data-theme="dark"] .summary-pill {

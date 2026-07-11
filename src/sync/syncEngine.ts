@@ -88,6 +88,9 @@ const BASE_BACKOFF_MS = 3_000
  *  SyncSettingsSlot checks this constant (not Korean text) to branch UI. */
 export const DETAIL_FAMILY_NEEDED = 'FAMILY_NEEDED'
 
+/** Thrown when the families/{familyId} doc is missing during joinFamily. */
+export const DETAIL_FAMILY_NOT_FOUND = 'FAMILY_NOT_FOUND'
+
 // ────────────────────────────────────────────────────────────
 // 내부 상태
 // ────────────────────────────────────────────────────────────
@@ -316,7 +319,7 @@ export async function joinFamily(
   // F-RULES: self-join: add only the auth.uid to members (rules verify only members key changes)
   const familyRef = doc(_db, 'families', familyId)
   const familySnap = await getDoc(familyRef)
-  if (!familySnap.exists()) throw new Error('가족 문서를 찾을 수 없습니다')
+  if (!familySnap.exists()) throw new Error(DETAIL_FAMILY_NOT_FOUND)
 
   const data = familySnap.data() as FamilyDoc
 

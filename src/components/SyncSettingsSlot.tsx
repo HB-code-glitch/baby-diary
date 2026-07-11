@@ -4,7 +4,7 @@ import {
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, configure, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
-import { DETAIL_FAMILY_NEEDED } from '../sync/syncEngine'
+import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND } from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
@@ -257,7 +257,8 @@ function NoFamilyView() {
       }
       await saveSettings(updated)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg === DETAIL_FAMILY_NOT_FOUND ? t('sync.errorFamilyNotFound') : msg)
     } finally {
       setBusy(false)
     }
