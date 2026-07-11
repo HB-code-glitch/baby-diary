@@ -39,6 +39,10 @@ interface AppState {
   events:    DiaryEvent[]
   settings:  AppSettings | null
   isLoading: boolean
+  /** P13: true once Promise.all([loadEvents, loadSettings, loadDataInfo]) resolves.
+   * Gates birthdate-derived render sites (D+, milestone banners, InsightsPanel)
+   * so they never render with stale/null settings while events have already loaded. */
+  isReady:   boolean
   error:     string | null
   dataInfo:  DataInfo | null
 
@@ -85,6 +89,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   events:    [],
   settings:  null,
   isLoading: false,
+  isReady:   false,
   error:     null,
   dataInfo:  null,
 
@@ -122,7 +127,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   init: async () => {
     const { loadEvents, loadSettings, loadDataInfo } = get()
+    // P13: Wait for ALL three loaders before setting isReady so birthdate-derived
+    // render sites (D+, milestone banners, InsightsPanel) never see stale/null
+    // settings while events have already resolved.
     await Promise.all([loadEvents(), loadSettings(), loadDataInfo()])
+    set({ isReady: true })
 
     // Subscribe to external events appended by main/sync
     if (typeof window !== 'undefined' && window.babyDiary) {
