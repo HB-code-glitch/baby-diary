@@ -349,3 +349,151 @@ export function getGuidanceForDay(ageInDays: number): GuidanceItem[] {
   }
   return GUIDANCE_ITEMS.filter(g => !g.pinToSettings && g.startDay === ageInDays)
 }
+
+// ---------------------------------------------------------------------------
+// FEEDING_BANDS — structured numeric data colocated with markers
+// Every number here must appear verbatim in the corresponding marker's bodyKo
+// ---------------------------------------------------------------------------
+
+export interface FeedingBand {
+  /** Matches the marker id this band is derived from */
+  id: 'formula_0_1mo' | 'formula_1_3mo' | 'formula_3_6mo'
+  /** Min ml per feed — source: marker bodyKo (e.g. "30" in formula_0_1mo) */
+  perFeedMlMin: number
+  /** Max ml per feed — source: marker bodyKo (e.g. "120" in formula_0_1mo) */
+  perFeedMlMax: number
+  /** Min feeds per day — source: marker bodyKo */
+  feedsPerDayMin: number
+  /** Max feeds per day — source: marker bodyKo */
+  feedsPerDayMax: number
+  /** Daily max ml cap (null = no explicit cap in markers). source: marker bodyKo */
+  dailyMaxMl: number | null
+  /** Per-kg ml/day min — source: formula_1_3mo marker (厚生労働省/AAP) */
+  perKgMlPerDayMin?: number
+  /** Per-kg ml/day max — source: formula_1_3mo marker */
+  perKgMlPerDayMax?: number
+}
+
+/**
+ * Structured feeding bands derived verbatim from GUIDANCE_MARKERS prose.
+ * Band id matches the marker id it was extracted from.
+ * Do NOT change any number here without updating the corresponding marker body.
+ */
+export const FEEDING_BANDS: FeedingBand[] = [
+  {
+    // Source: formula_0_1mo bodyKo — "첫 주엔 1회 30~60 mL...1개월 말엔 1회 약 120 mL"
+    // "하루 8~12회"
+    id: 'formula_0_1mo',
+    perFeedMlMin: 30,
+    perFeedMlMax: 120,
+    feedsPerDayMin: 8,
+    feedsPerDayMax: 12,
+    dailyMaxMl: null,
+  },
+  {
+    // Source: formula_1_3mo bodyKo — "1회 120~160 mL...1회 120~180 mL"  (perFeedMlMin=120, perFeedMlMax=180)
+    // "하루 6~7회"
+    // "하루 약 150 mL/kg...약 165 mL/kg"
+    id: 'formula_1_3mo',
+    perFeedMlMin: 120,
+    perFeedMlMax: 180,
+    feedsPerDayMin: 6,
+    feedsPerDayMax: 7,
+    dailyMaxMl: null,
+    perKgMlPerDayMin: 150,
+    perKgMlPerDayMax: 165,
+  },
+  {
+    // Source: formula_3_6mo bodyKo — "1회 120~180 mL, 4~6개월은 1회 180~240 mL" (perFeedMlMin=120, perFeedMlMax=240)
+    // "하루 4~5회"
+    // "960 mL(32 oz)를 넘지 않도록"
+    id: 'formula_3_6mo',
+    perFeedMlMin: 120,
+    perFeedMlMax: 240,
+    feedsPerDayMin: 4,
+    feedsPerDayMax: 5,
+    dailyMaxMl: 960,
+  },
+]
+
+/**
+ * Returns the FeedingBand active for a baby of `ageDays` days old.
+ * Returns null if ageDays < 0 or > 180 (beyond tracked bands).
+ *
+ * Band boundaries match the startDay of each marker:
+ *   formula_0_1mo: 0–29 days
+ *   formula_1_3mo: 30–89 days
+ *   formula_3_6mo: 90–180 days
+ */
+export function getFeedingBand(ageDays: number): FeedingBand | null {
+  if (ageDays < 0 || ageDays > 180) return null
+  if (ageDays < 30) return FEEDING_BANDS[0]  // formula_0_1mo
+  if (ageDays < 90) return FEEDING_BANDS[1]  // formula_1_3mo
+  return FEEDING_BANDS[2]                     // formula_3_6mo
+}
+
+// ---------------------------------------------------------------------------
+// FEVER_CARE — pre-hospital care steps (sourced from AAP·HealthyChildren)
+// Content grounded in fever_under_3mo_emergency, fever_red_flags,
+// antipyretic_age_limits markers already in GUIDANCE_MARKERS, and
+// AAP HealthyChildren "Fever and Your Baby" (2024) cited in GUIDANCE_SOURCES.
+// Do NOT add any step not traceable to those sources.
+// ---------------------------------------------------------------------------
+
+export interface FeverCareStep {
+  ko: string
+  ja: string
+}
+
+export const FEVER_CARE: { steps: FeverCareStep[]; sourceLabel: string } = {
+  sourceLabel: 'AAP·HealthyChildren',
+  steps: [
+    {
+      ko: '옷을 가볍게 입히고 담요나 두꺼운 이불은 덮지 않아요.',
+      ja: '薄着にし、毛布や厚い掛け布団はかけないでください。',
+    },
+    {
+      ko: '실내를 서늘하고 환기가 잘 되게 유지해요.',
+      ja: '部屋を涼しく、風通しよく保ちましょう。',
+    },
+    {
+      ko: '모유 또는 분유를 자주 먹여 수분을 보충해요.',
+      ja: '母乳やミルクをこまめに与えて水分を補給してください。',
+    },
+    {
+      ko: '몸을 미온수(체온보다 약간 낮은 온도)로 닦아줄 수 있어요. 단, 몸이 떨리면 즉시 중단해요. 알코올(소독용 에탄올) 마사지는 절대 하면 안 돼요.',
+      ja: 'ぬるま湯(体温より少し低い温度)で体を拭くことができます。ふるえが出たらすぐ中止してください。アルコールでのマッサージは絶対にしないでください。',
+    },
+    {
+      ko: '아기의 호흡·의식·피부색·발진 상태를 주의 깊게 관찰해요.',
+      ja: '赤ちゃんの呼吸・意識・肌の色・発疹の状態を注意深く観察しましょう。',
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------------
+// evaluateFever — tier logic
+// ---------------------------------------------------------------------------
+
+export type FeverLevel = 'emergency' | 'danger' | 'warning' | 'caution' | null
+
+/**
+ * Returns the severity tier for a recorded temperature.
+ *
+ * Thresholds grounded in GUIDANCE_MARKERS:
+ *   fever_under_3mo_emergency: 3개월(90일) 미만 38.0°C → 즉시 진료
+ *   fever_red_flags: 39.0+ = 위험 범주 within red-flag context
+ *   fever_red_flags: 38.0+ = 발열 (general warning)
+ *
+ * @param celsius  Recorded temperature
+ * @param ageDays  Baby's age in days; null if birthdate unknown
+ */
+export function evaluateFever(celsius: number, ageDays: number | null): FeverLevel {
+  if (celsius < 37.5) return null
+  if (celsius < 38.0) return 'caution'
+  // emergency: under 90 days (3 months) with fever >= 38.0
+  if (ageDays !== null && ageDays < 90 && celsius >= 38.0) return 'emergency'
+  if (celsius >= 39.0) return 'danger'
+  if (celsius >= 38.0) return 'warning'
+  return 'caution'
+}
