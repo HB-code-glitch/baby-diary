@@ -11,6 +11,8 @@ import { useAppStore } from '../store/useAppStore'
 import { DiaryEvent, FormulaData, TempData, SleepData, GrowthData } from '../../shared/types'
 import { useTranslation } from 'react-i18next'
 import { computeZ, zToPercentile, percentileBandValue } from '../lib/whoGrowth'
+import { ipc } from '../lib/ipc'
+import { useToast } from '../components/Toast'
 
 type Range = 7 | 30
 
@@ -298,8 +300,31 @@ export function StatsPage() {
   const settings = useAppStore(s => s.settings)
   const [range, setRange] = useState<Range>(7)
   const { t, i18n: i18nInstance } = useTranslation()
+  const { showToast } = useToast()
+  const [pdfSaving, setPdfSaving] = useState(false)
 
   const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+
+  async function handleSavePdf() {
+    setPdfSaving(true)
+    try {
+      const result = await ipc.savePdf()
+      if (result.saved) {
+        showToast({ message: t('report.toastSuccess', { path: result.path }) })
+      } else {
+        showToast({ message: t('report.toastCanceled') })
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg === 'ELECTRON_ONLY') {
+        showToast({ message: t('report.electronOnly') })
+      } else {
+        showToast({ message: t('report.toastError') })
+      }
+    } finally {
+      setPdfSaving(false)
+    }
+  }
 
   const data = useMemo(() => buildDayStats(events, range, dateFnsLocale), [events, range, dateFnsLocale])
 
@@ -319,18 +344,28 @@ export function StatsPage() {
       <div className="page-header">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div className="page-title">{t('stats.title')}</div>
-          <div className="toggle-group">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div className="toggle-group">
+              <button
+                className={`toggle-btn${range === 7 ? ' active' : ''}`}
+                onClick={() => setRange(7)}
+              >
+                {t('stats.days7')}
+              </button>
+              <button
+                className={`toggle-btn${range === 30 ? ' active' : ''}`}
+                onClick={() => setRange(30)}
+              >
+                {t('stats.days30')}
+              </button>
+            </div>
             <button
-              className={`toggle-btn${range === 7 ? ' active' : ''}`}
-              onClick={() => setRange(7)}
+              className="btn-secondary"
+              style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}
+              onClick={handleSavePdf}
+              disabled={pdfSaving}
             >
-              {t('stats.days7')}
-            </button>
-            <button
-              className={`toggle-btn${range === 30 ? ' active' : ''}`}
-              onClick={() => setRange(30)}
-            >
-              {t('stats.days30')}
+              {pdfSaving ? t('report.saving') : t('report.btnLabel')}
             </button>
           </div>
         </div>

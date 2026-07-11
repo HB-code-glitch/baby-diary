@@ -212,7 +212,6 @@ function setupIPC(): void {
       const pdfBuffer = await printWin.webContents.printToPDF({
         pageSize: 'A4',
         printBackground: true,
-        marginsType: 0,
       })
 
       // 6. Write with fd+fsync for durability

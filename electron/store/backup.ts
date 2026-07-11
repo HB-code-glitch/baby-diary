@@ -49,9 +49,10 @@ export function selectBackupsToPrune(names: string[], now: Date): string[] {
   }
 
   const toPrune: string[] = []
-  for (const group of byMonth.values()) {
+  const groups = Array.from(byMonth.values())
+  for (const group of groups) {
     // Sort newest-first; keep index 0, prune the rest
-    group.sort((a, b) => b.date.getTime() - a.date.getTime())
+    group.sort((a: { name: string; date: Date }, b: { name: string; date: Date }) => b.date.getTime() - a.date.getTime())
     for (let i = 1; i < group.length; i++) {
       toPrune.push(group[i].name)
     }

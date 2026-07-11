@@ -40,6 +40,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'system'>(settings?.theme ?? 'system')
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false)
   const [deletingAll, setDeletingAll] = useState(false)
+  const [pdfSaving, setPdfSaving] = useState(false)
 
   // Hydrate form from a settings object
   const hydrateForm = useCallback((s: AppSettings) => {
@@ -208,6 +209,27 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       } else {
         showToast({ message: t('settings.toastOpenFolderFail') })
       }
+    }
+  }
+
+  const handleSavePdf = async () => {
+    setPdfSaving(true)
+    try {
+      const result = await ipc.savePdf()
+      if (result.saved) {
+        showToast({ message: t('report.toastSuccess', { path: result.path }) })
+      } else {
+        showToast({ message: t('report.toastCanceled') })
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg === 'ELECTRON_ONLY') {
+        showToast({ message: t('report.electronOnly') })
+      } else {
+        showToast({ message: t('report.toastError') })
+      }
+    } finally {
+      setPdfSaving(false)
     }
   }
 
@@ -424,6 +446,17 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                     CSV
                   </button>
                 </div>
+              </div>
+              <div className="settings-row">
+                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('report.btnLabel')}</span>
+                <button
+                  className="btn-secondary"
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
+                  onClick={handleSavePdf}
+                  disabled={pdfSaving}
+                >
+                  {pdfSaving ? t('report.saving') : t('report.btnLabel')}
+                </button>
               </div>
               <div className="settings-row">
                 <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>&nbsp;</span>
