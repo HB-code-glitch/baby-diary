@@ -166,219 +166,258 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const currentLang = i18nInstance.language as Language
 
   return (
-    <div className="page-container" style={{ maxWidth: 560 }} data-tour="settings-main">
+    <div className="page-container" data-tour="settings-main">
       <div className="page-header">
         <div className="page-title">{t('settings.title')}</div>
       </div>
 
-      {/* Language section — always at top, labels in own language */}
-      <div className="settings-section">
-        <div className="settings-section-title">{t('settings.language')}</div>
-        <div className="card">
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              className={`role-btn${currentLang === 'ko' ? ' selected' : ''}`}
-              onClick={() => handleLanguageChange('ko')}
-              lang="ko"
-            >
-              한국어
-            </button>
-            <button
-              className={`role-btn${currentLang === 'ja' ? ' selected' : ''}`}
-              onClick={() => handleLanguageChange('ja')}
-              lang="ja"
-            >
-              日本語
-            </button>
-          </div>
-        </div>
-      </div>
+      {/* Responsive 2-column grid — auto-collapses to 1 column below ~960px content width */}
+      <div className="settings-grid">
 
-      {/* Theme section */}
-      <div className="settings-section">
-        <div className="settings-section-title">{t('settings.theme')}</div>
-        <div className="card">
-          <div className="toggle-group">
-            <button
-              className={`toggle-btn${currentTheme === 'light' ? ' active' : ''}`}
-              onClick={() => handleThemeChange('light')}
-            >
-              {t('settings.themeLight')}
-            </button>
-            <button
-              className={`toggle-btn${currentTheme === 'dark' ? ' active' : ''}`}
-              onClick={() => handleThemeChange('dark')}
-            >
-              {t('settings.themeDark')}
-            </button>
-            <button
-              className={`toggle-btn${currentTheme === 'system' ? ' active' : ''}`}
-              onClick={() => handleThemeChange('system')}
-            >
-              {t('settings.themeSystem')}
-            </button>
-          </div>
-        </div>
-      </div>
+        {/* ── Left column: 언어, 테마, 아기 정보, 내 프로필, 저장 버튼 ── */}
+        <div className="settings-column">
 
-      {/* Baby info */}
-      <div className="settings-section">
-        <div className="settings-section-title">{t('settings.babyInfo')}</div>
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <div className="label">{t('settings.babyName')}</div>
-            <input
-              type="text"
-              className="input-field"
-              placeholder={t('settings.babyNamePlaceholder')}
-              value={babyName}
-              onChange={e => setBabyName(e.target.value)}
-            />
-          </div>
-          <div>
-            <div className="label">{t('settings.birthdate')}</div>
-            <input
-              type="date"
-              className="input-field"
-              value={birthdate}
-              onChange={e => setBirthdate(e.target.value)}
-            />
-          </div>
-          <div>
-            <div className="label">{t('settings.babyGender')}</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                className={`role-btn${babyGender === 'girl' ? ' selected' : ''}`}
-                onClick={() => setBabyGender(babyGender === 'girl' ? undefined : 'girl')}
-                type="button"
-              >
-                {t('settings.genderGirl')}
-              </button>
-              <button
-                className={`role-btn${babyGender === 'boy' ? ' selected' : ''}`}
-                onClick={() => setBabyGender(babyGender === 'boy' ? undefined : 'boy')}
-                type="button"
-              >
-                {t('settings.genderBoy')}
-              </button>
+          {/* Language section — always at top, labels in own language */}
+          <div className="settings-section">
+            <div className="settings-section-title">{t('settings.language')}</div>
+            <div className="card">
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className={`role-btn${currentLang === 'ko' ? ' selected' : ''}`}
+                  onClick={() => handleLanguageChange('ko')}
+                  lang="ko"
+                >
+                  한국어
+                </button>
+                <button
+                  className={`role-btn${currentLang === 'ja' ? ' selected' : ''}`}
+                  onClick={() => handleLanguageChange('ja')}
+                  lang="ja"
+                >
+                  日本語
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* My profile */}
-      <div className="settings-section">
-        <div className="settings-section-title">{t('settings.myProfile')}</div>
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <div className="label">{t('settings.myName')}</div>
-            <input
-              type="text"
-              className="input-field"
-              placeholder={t('settings.myNamePlaceholder')}
-              value={myName}
-              onChange={e => setMyName(e.target.value)}
-            />
-          </div>
-          <div>
-            <div className="label">{t('settings.role')}</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                className={`role-btn${myRole === 'mom' ? ' selected' : ''}`}
-                onClick={() => setMyRole('mom')}
-              >
-                {t('settings.roleMom')}
-              </button>
-              <button
-                className={`role-btn${myRole === 'dad' ? ' selected' : ''}`}
-                onClick={() => setMyRole('dad')}
-              >
-                {t('settings.roleDad')}
-              </button>
+          {/* Theme section */}
+          <div className="settings-section">
+            <div className="settings-section-title">{t('settings.theme')}</div>
+            <div className="card">
+              <div className="toggle-group">
+                <button
+                  className={`toggle-btn${currentTheme === 'light' ? ' active' : ''}`}
+                  onClick={() => handleThemeChange('light')}
+                >
+                  {t('settings.themeLight')}
+                </button>
+                <button
+                  className={`toggle-btn${currentTheme === 'dark' ? ' active' : ''}`}
+                  onClick={() => handleThemeChange('dark')}
+                >
+                  {t('settings.themeDark')}
+                </button>
+                <button
+                  className={`toggle-btn${currentTheme === 'system' ? ' active' : ''}`}
+                  onClick={() => handleThemeChange('system')}
+                >
+                  {t('settings.themeSystem')}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Save button */}
-      <div style={{ marginBottom: 24 }}>
-        <button
-          className="btn-primary"
-          onClick={handleSave}
-          disabled={saving}
-          style={{ width: '100%', padding: '11px' }}
-        >
-          {saving ? t('settings.saving') : t('settings.save')}
-        </button>
-      </div>
+          {/* Baby info */}
+          <div className="settings-section">
+            <div className="settings-section-title">{t('settings.babyInfo')}</div>
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div className="label">{t('settings.babyName')}</div>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder={t('settings.babyNamePlaceholder')}
+                  value={babyName}
+                  onChange={e => setBabyName(e.target.value)}
+                />
+              </div>
+              <div>
+                <div className="label">{t('settings.birthdate')}</div>
+                <input
+                  type="date"
+                  className="input-field"
+                  value={birthdate}
+                  onChange={e => setBirthdate(e.target.value)}
+                />
+              </div>
+              <div>
+                <div className="label">{t('settings.babyGender')}</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className={`role-btn${babyGender === 'girl' ? ' selected' : ''}`}
+                    onClick={() => setBabyGender(babyGender === 'girl' ? undefined : 'girl')}
+                    type="button"
+                  >
+                    {t('settings.genderGirl')}
+                  </button>
+                  <button
+                    className={`role-btn${babyGender === 'boy' ? ' selected' : ''}`}
+                    onClick={() => setBabyGender(babyGender === 'boy' ? undefined : 'boy')}
+                    type="button"
+                  >
+                    {t('settings.genderBoy')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
 
-      {/* Data section */}
-      <div className="settings-section">
-        <div className="settings-section-title">{t('settings.dataSection')}</div>
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-          {dataInfo && (
-            <>
+          {/* My profile */}
+          <div className="settings-section">
+            <div className="settings-section-title">{t('settings.myProfile')}</div>
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div className="label">{t('settings.myName')}</div>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder={t('settings.myNamePlaceholder')}
+                  value={myName}
+                  onChange={e => setMyName(e.target.value)}
+                />
+              </div>
+              <div>
+                <div className="label">{t('settings.role')}</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className={`role-btn${myRole === 'mom' ? ' selected' : ''}`}
+                    onClick={() => setMyRole('mom')}
+                  >
+                    {t('settings.roleMom')}
+                  </button>
+                  <button
+                    className={`role-btn${myRole === 'dad' ? ' selected' : ''}`}
+                    onClick={() => setMyRole('dad')}
+                  >
+                    {t('settings.roleDad')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Save button — visually attached to the profile/baby forms above */}
+          <div style={{ marginBottom: 24 }}>
+            <button
+              className="btn-primary"
+              onClick={handleSave}
+              disabled={saving}
+              style={{ width: '100%', padding: '11px' }}
+            >
+              {saving ? t('settings.saving') : t('settings.save')}
+            </button>
+          </div>
+
+        </div>{/* end left column */}
+
+        {/* ── Right column: 데이터, 육아 가이드, 가족 동기화, 튜토리얼 ── */}
+        <div className="settings-column">
+
+          {/* Data section */}
+          <div className="settings-section">
+            <div className="settings-section-title">{t('settings.dataSection')}</div>
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {dataInfo && (
+                <>
+                  <div className="settings-row">
+                    <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.totalRecords')}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-800)' }}>
+                      {t('settings.recordUnit', { count: dataInfo.eventCount })}
+                    </span>
+                  </div>
+                  <div className="settings-row">
+                    <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.lastBackup')}</span>
+                    <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>
+                      {dataInfo.lastBackupTime
+                        ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
+                        : t('settings.noBackup')}
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="settings-row">
-                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.totalRecords')}</span>
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-800)' }}>
-                  {t('settings.recordUnit', { count: dataInfo.eventCount })}
-                </span>
+                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.backupFolder')}</span>
+                <button
+                  className="btn-secondary"
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
+                  onClick={handleOpenBackup}
+                >
+                  <IconFolderOpen size={13} color="currentColor" />
+                  {t('settings.openFolder')}
+                </button>
+              </div>
+              <div className="settings-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.exportData')}</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    className="btn-secondary"
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
+                    onClick={handleExportJson}
+                  >
+                    <IconDownload size={13} color="currentColor" />
+                    JSON
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
+                    onClick={handleExportCsv}
+                  >
+                    <IconDownload size={13} color="currentColor" />
+                    CSV
+                  </button>
+                </div>
               </div>
               <div className="settings-row">
-                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.lastBackup')}</span>
-                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>
-                  {dataInfo.lastBackupTime
-                    ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
-                    : t('settings.noBackup')}
-                </span>
+                <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>&nbsp;</span>
+                <button
+                  className="btn-danger-text"
+                  onClick={() => setShowDeleteAllModal(true)}
+                >
+                  {t('settings.deleteAllRecords')}
+                </button>
               </div>
-            </>
+            </div>
+          </div>
+
+          {/* Care guidance reference card */}
+          <GuidanceReferenceCard lang={i18nInstance.language as 'ko' | 'ja'} />
+
+          {/* Sync section */}
+          <div className="settings-section">
+            <div className="settings-section-title">{t('settings.syncSection')}</div>
+            <SyncSettingsSlot />
+          </div>
+
+          {/* Tutorial replay */}
+          {onStartTour && (
+            <div className="settings-section">
+              <div className="card" style={{ padding: '10px 14px' }}>
+                <button
+                  className="btn-secondary"
+                  style={{ width: '100%', textAlign: 'center' }}
+                  onClick={onStartTour}
+                >
+                  {t('tour.replayBtn')}
+                </button>
+              </div>
+            </div>
           )}
-          <div className="settings-row">
-            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.backupFolder')}</span>
-            <button
-              className="btn-secondary"
-              style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
-              onClick={handleOpenBackup}
-            >
-              <IconFolderOpen size={13} color="currentColor" />
-              {t('settings.openFolder')}
-            </button>
-          </div>
-          <div className="settings-row" style={{ flexWrap: 'wrap', gap: 8 }}>
-            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>{t('settings.exportData')}</span>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                className="btn-secondary"
-                style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
-                onClick={handleExportJson}
-              >
-                <IconDownload size={13} color="currentColor" />
-                JSON
-              </button>
-              <button
-                className="btn-secondary"
-                style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
-                onClick={handleExportCsv}
-              >
-                <IconDownload size={13} color="currentColor" />
-                CSV
-              </button>
-            </div>
-          </div>
-          <div className="settings-row">
-            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>&nbsp;</span>
-            <button
-              className="btn-danger-text"
-              onClick={() => setShowDeleteAllModal(true)}
-            >
-              {t('settings.deleteAllRecords')}
-            </button>
-          </div>
-        </div>
-      </div>
 
-      {/* Delete all records modal */}
+        </div>{/* end right column */}
+
+      </div>{/* end settings-grid */}
+
+      {/* Delete all records modal — portal-level, outside grid */}
       {showDeleteAllModal && (
         <DeleteAllModal
           onConfirm={handleDeleteAll}
@@ -386,30 +425,6 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           busy={deletingAll}
         />
       )}
-
-      {/* Tutorial replay */}
-      {onStartTour && (
-        <div className="settings-section">
-          <div className="card" style={{ padding: '10px 14px' }}>
-            <button
-              className="btn-secondary"
-              style={{ width: '100%', textAlign: 'center' }}
-              onClick={onStartTour}
-            >
-              {t('tour.replayBtn')}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Sync section */}
-      <div className="settings-section">
-        <div className="settings-section-title">{t('settings.syncSection')}</div>
-        <SyncSettingsSlot />
-      </div>
-
-      {/* Care guidance reference card */}
-      <GuidanceReferenceCard lang={i18nInstance.language as 'ko' | 'ja'} />
     </div>
   )
 }
