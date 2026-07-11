@@ -9,6 +9,7 @@ import i18n from './i18n'
 import { TutorialTour, isTutorialDone } from './components/TutorialTour'
 import { LanguagePicker, isLangChosen, markLangChosen } from './components/LanguagePicker'
 import { UpdateBanner } from './components/UpdateBanner'
+import { useMidnightRefresh } from './lib/useMidnightRefresh'
 
 import { HomePage }     from './pages/HomePage'
 import { HistoryPage }  from './pages/HistoryPage'
@@ -90,6 +91,10 @@ function AppInner() {
   // Start sync engine on mount; stop on unmount.
   // Works in both Electron (real Firebase) and browser (mock ipc, no Firebase).
   useSyncLifecycle()
+
+  // P25: Reload events at local midnight so today-* selectors auto-refresh
+  // when the calendar date rolls over (no manual reload required).
+  useMidnightRefresh()
 
   useEffect(() => {
     // Guard for non-Electron environments (e.g. vite preview, tests)
