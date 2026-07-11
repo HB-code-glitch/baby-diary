@@ -58,7 +58,9 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
         {/* emergency: show emergency marker key sentence */}
         {level === 'emergency' && (
           <p className="fever-modal-body">
-            {emergencyBody.split(/[。.]\s*/)[0]}.
+            {lang === 'ja'
+              ? (emergencyMarker.quoteJa ?? emergencyBody.split(/[。]/)[0] + '。')
+              : (emergencyMarker.quoteKo ?? emergencyBody.split(/(?<=[다요])\.\s/)[0] + '.')}
           </p>
         )}
 
@@ -113,7 +115,9 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
               {/* antipyretic_age_limits first sentence for emergency */}
               {level === 'emergency' && (
                 <p className="fever-modal-note" style={{ marginTop: 8 }}>
-                  {antipyreticBody.split(/[。.]\s*/)[0]}.
+                  {lang === 'ja'
+                    ? (antipyreticMarker.quoteJa ?? antipyreticBody.split(/[。]/)[0] + '。')
+                    : (antipyreticMarker.quoteKo ?? antipyreticBody.split(/(?<=[다요])\.\s/)[0] + '.')}
                 </p>
               )}
             </div>

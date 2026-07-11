@@ -456,10 +456,14 @@ function QuickMenu({ anchor, onPee, onPoop, onOpenTemp, onOpenBreast, onOpenForm
     if (e.key === '2') { e.preventDefault(); onPoop(); onClose() }
   }
 
-  const menuStyle: React.CSSProperties = {
-    top: anchor.bottom + 8,
-    right: Math.max(8, window.innerWidth - anchor.right),
-  }
+  // QuickMenu has 5 items at ~44px each + 12px padding ≈ 240px
+  const QUICK_MENU_H = 250
+  const quickMenuTop = anchor.bottom + 8
+  const quickMenuBottom = quickMenuTop + QUICK_MENU_H
+  const quickMenuStyle: React.CSSProperties = quickMenuBottom > window.innerHeight - 8
+    ? { bottom: window.innerHeight - anchor.top + 8, right: Math.max(8, window.innerWidth - anchor.right) }
+    : { top: quickMenuTop, right: Math.max(8, window.innerWidth - anchor.right) }
+  const menuStyle = quickMenuStyle
 
   const ITEMS: {
     tintBg: string
@@ -560,10 +564,16 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
     if (e.key === 'Escape') { e.preventDefault(); onClose() }
   }
 
-  const style: React.CSSProperties = {
-    top: anchor.bottom + 8,
-    left: Math.max(8, anchor.left - 80),
-  }
+  // Clamp left so popover doesn't overflow right edge (popover min-width ~240px)
+  const POPOVER_W = 260
+  const rawLeft = anchor.left - 80
+  const clampedLeft = Math.min(Math.max(8, rawLeft), window.innerWidth - POPOVER_W - 8)
+  // If popover would overflow bottom, open upward (approx height 140px)
+  const POPOVER_H = 160
+  const openUpward = anchor.bottom + 8 + POPOVER_H > window.innerHeight - 8
+  const style: React.CSSProperties = openUpward
+    ? { bottom: window.innerHeight - anchor.top + 8, left: clampedLeft }
+    : { top: anchor.bottom + 8, left: clampedLeft }
 
   return (
     <>
@@ -718,10 +728,16 @@ function BreastPopover({ anchor, onConfirm, onClose, lastBreastSide, onTimerChan
     onConfirm(side, isNaN(m as number) ? undefined : m)
   }
 
-  const style: React.CSSProperties = {
-    top: anchor.bottom + 8,
-    left: Math.max(8, anchor.left - 60),
-  }
+  // Clamp left so popover doesn't overflow right edge (breast popover ~280px)
+  const BREAST_POPOVER_W = 300
+  const breastRawLeft = anchor.left - 60
+  const breastClampedLeft = Math.min(Math.max(8, breastRawLeft), window.innerWidth - BREAST_POPOVER_W - 8)
+  // If popover would overflow bottom, open upward (approx height 260px)
+  const BREAST_POPOVER_H = 280
+  const breastOpenUpward = anchor.bottom + 8 + BREAST_POPOVER_H > window.innerHeight - 8
+  const style: React.CSSProperties = breastOpenUpward
+    ? { bottom: window.innerHeight - anchor.top + 8, left: breastClampedLeft }
+    : { top: anchor.bottom + 8, left: breastClampedLeft }
 
   const SIDES: { value: 'L' | 'R' | 'both'; label: string }[] = [
     { value: 'L', label: t('breast.left') },
@@ -831,10 +847,16 @@ function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopove
     if (e.key === 'Escape') { e.preventDefault(); onClose() }
   }
 
-  const style: React.CSSProperties = {
-    top: anchor.bottom + 8,
-    left: Math.max(8, anchor.left - 80),
-  }
+  // Clamp left so popover doesn't overflow right edge (formula popover ~280px)
+  const FORMULA_POPOVER_W = 300
+  const formulaRawLeft = anchor.left - 80
+  const formulaClampedLeft = Math.min(Math.max(8, formulaRawLeft), window.innerWidth - FORMULA_POPOVER_W - 8)
+  // If popover would overflow bottom, open upward (approx height 220px)
+  const FORMULA_POPOVER_H = 240
+  const formulaOpenUpward = anchor.bottom + 8 + FORMULA_POPOVER_H > window.innerHeight - 8
+  const style: React.CSSProperties = formulaOpenUpward
+    ? { bottom: window.innerHeight - anchor.top + 8, left: formulaClampedLeft }
+    : { top: anchor.bottom + 8, left: formulaClampedLeft }
 
   return (
     <>

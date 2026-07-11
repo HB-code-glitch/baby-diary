@@ -20,6 +20,10 @@ export interface GuidanceMarker {
   titleJa: string
   bodyKo: string
   bodyJa: string
+  /** Optional verbatim first-sentence quote for UI display (avoids fragile sentence-splitting). */
+  quoteKo?: string
+  /** Optional verbatim first-sentence quote in Japanese for UI display. */
+  quoteJa?: string
   sourceLabel: string
   evidenceLevel: 'guideline-consensus' | 'RCT'
 }
@@ -84,6 +88,8 @@ export const GUIDANCE_MARKERS: GuidanceMarker[] = [
     titleJa: '生後3か月未満の発熱はすぐ受診',
     bodyKo: '생후 3개월(12주) 미만 아기가 직장 체온 38.0°C 이상이면 겉보기 상태가 좋아 보여도 예외 없이 즉시 병원에 가요. 이 시기 발열은 패혈증·수막염 등 중증 감염의 유일한 신호일 수 있어요. 진료 전 해열제를 먼저 먹이면 증상을 가려 진단이 늦어질 수 있어요.',
     bodyJa: '生後3か月(12週)未満の赤ちゃんが直腸体温38.0°C以上のときは、元気そうに見えても必ずすぐに受診してください。この時期の発熱は敗血症や髄膜炎など重い感染症の唯一のサインのことがあります。受診前に解熱剤を与えると症状が隠れ、診断が遅れる恐れがあります。',
+    quoteKo: '생후 3개월(12주) 미만 아기가 직장 체온 38.0°C 이상이면 겉보기 상태가 좋아 보여도 예외 없이 즉시 병원에 가요.',
+    quoteJa: '生後3か月(12週)未満の赤ちゃんが直腸体温38.0°C以上のときは、元気そうに見えても必ずすぐに受診してください。',
     sourceLabel: 'AAP·대한소아청소년과학회·日本小児科学会',
     evidenceLevel: 'guideline-consensus',
   },
@@ -104,6 +110,8 @@ export const GUIDANCE_MARKERS: GuidanceMarker[] = [
     titleJa: '解熱剤の年齢制限',
     bodyKo: '이부프로펜은 생후 6개월 미만에 쓰지 않아요(신장 미성숙). 아세트아미노펜(타이레놀)도 2세 미만은 의사 지시 없이 주지 않으며, 특히 3개월 미만은 반드시 먼저 진료받아요. 해열제는 체온 숫자보다 아이가 힘들어하거나 수유·수면에 지장이 있을 때 쓰는 게 원칙이에요.',
     bodyJa: 'イブプロフェンは生後6か月未満には使いません(腎機能が未熟なため)。アセトアミノフェン(カロナール等)も2歳未満は医師の指示なしに与えず、特に3か月未満は必ず先に受診してください。解熱剤は体温の数字よりも、赤ちゃんがつらそう・授乳や睡眠に支障がある時に使うのが基本です。',
+    quoteKo: '이부프로펜은 생후 6개월 미만에 쓰지 않아요(신장 미성숙).',
+    quoteJa: 'イブプロフェンは生後6か月未満には使いません(腎機能が未熟なため)。',
     sourceLabel: 'AAP·FDA·日本小児科学会',
     evidenceLevel: 'guideline-consensus',
   },

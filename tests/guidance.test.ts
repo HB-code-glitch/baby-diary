@@ -227,3 +227,36 @@ describe('getCalendarGuidance', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// fever marker quote fields — must not truncate at decimal points
+// ---------------------------------------------------------------------------
+
+describe('fever marker quoteKo/quoteJa fields', () => {
+  it('fever_under_3mo_emergency has non-empty quoteKo containing 38.0', () => {
+    const m = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
+    expect(m.quoteKo).toBeTruthy()
+    expect(m.quoteKo).toContain('38.0')
+  })
+
+  it('fever_under_3mo_emergency has non-empty quoteJa containing 38.0', () => {
+    const m = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
+    expect(m.quoteJa).toBeTruthy()
+    expect(m.quoteJa).toContain('38.0')
+  })
+
+  it('antipyretic_age_limits has non-empty quoteKo', () => {
+    const m = GUIDANCE_MARKERS.find(m => m.id === 'antipyretic_age_limits')!
+    expect(m.quoteKo).toBeTruthy()
+  })
+
+  it('antipyretic_age_limits has non-empty quoteJa', () => {
+    const m = GUIDANCE_MARKERS.find(m => m.id === 'antipyretic_age_limits')!
+    expect(m.quoteJa).toBeTruthy()
+  })
+
+  it('fever_under_3mo_emergency quoteKo is a complete first sentence (ends with 가요.)', () => {
+    const m = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
+    expect(m.quoteKo).toMatch(/가요\.$/)
+  })
+})

@@ -2970,11 +2970,13 @@ body {
    ══════════════════════════════════════════ */
 .feeding-tip-popup {
   position: fixed;
-  bottom: 80px;
+  bottom: clamp(8px, 80px, calc(100vh - 180px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 1090;
   width: min(360px, calc(100vw - 32px));
+  max-height: calc(100vh - 112px);
+  overflow-y: auto;
   background: rgba(22, 21, 19, 0.82);
   color: #ffffff;
   padding: 14px 16px 10px;
@@ -3063,8 +3065,8 @@ body {
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 1201;
-  width: min(420px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(84vh, 720px);
   overflow-y: auto;
   border-radius: 22px;
   padding: 24px 20px 20px;
