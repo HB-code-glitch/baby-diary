@@ -3,7 +3,7 @@ import { ToastProvider, useToast } from './components/Toast'
 import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
 import { useSyncLifecycle } from './sync/useSync'
-import { setLanguage } from './i18n'
+import { setLanguage, initLangAttr } from './i18n'
 import i18n from './i18n'
 
 import { HomePage }     from './pages/HomePage'
@@ -53,6 +53,17 @@ function GlobalErrorBoundary() {
   return null
 }
 
+/** Resolve theme setting → 'light' | 'dark', then set data-theme on <html>. */
+function applyTheme(theme: 'light' | 'dark' | 'system'): void {
+  let resolved: 'light' | 'dark'
+  if (theme === 'system') {
+    resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  } else {
+    resolved = theme
+  }
+  document.documentElement.setAttribute('data-theme', resolved)
+}
+
 function AppInner() {
   const init = useAppStore(s => s.init)
   const settings = useAppStore(s => s.settings)
@@ -73,8 +84,29 @@ function AppInner() {
   useEffect(() => {
     if (settings?.language) {
       setLanguage(settings.language)
+    } else {
+      // Set data-lang from detected language on first load
+      initLangAttr()
     }
   }, [settings?.language])
+
+  // Apply theme whenever settings change
+  useEffect(() => {
+    const theme = settings?.theme ?? 'system'
+    applyTheme(theme)
+  }, [settings?.theme])
+
+  // Listen for OS color-scheme changes when theme is 'system'
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const handler = () => {
+      if ((settings?.theme ?? 'system') === 'system') {
+        document.documentElement.setAttribute('data-theme', mq.matches ? 'dark' : 'light')
+      }
+    }
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [settings?.theme])
 
   return (
     <div className="app-shell">

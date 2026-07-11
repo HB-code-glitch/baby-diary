@@ -5,6 +5,10 @@
 @import '@fontsource/plus-jakarta-sans/700.css';
 @import '@fontsource/plus-jakarta-sans/800.css';
 @import 'pretendard/dist/web/static/pretendard.css';
+/* Zen Maru Gothic — cute rounded gothic for Japanese UI */
+@import '@fontsource/zen-maru-gothic/400.css';
+@import '@fontsource/zen-maru-gothic/500.css';
+@import '@fontsource/zen-maru-gothic/700.css';
 
 @tailwind base;
 @tailwind components;
@@ -12,10 +16,10 @@
 
 :root {
   /* ── Background & surface ── */
-  --bg: #f7f4ef;
+  --bg: #f7f7f8;
   --surface: #ffffff;
-  --border: #ece7df;
-  --shadow-card: 0 1px 2px rgba(60,50,40,0.04);
+  --border: #e8e8ec;
+  --shadow-card: 0 1px 2px rgba(40,40,60,0.04);
 
   /* ── Typography ── */
   --text-primary: #161513;
@@ -145,7 +149,7 @@ body {
   right: -100px;
   width: 600px;
   height: 600px;
-  background: radial-gradient(circle, rgba(244,180,160,0.10) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(180,195,230,0.05) 0%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
@@ -156,7 +160,7 @@ body {
   left: -100px;
   width: 600px;
   height: 600px;
-  background: radial-gradient(circle, rgba(230,180,195,0.08) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(200,185,215,0.04) 0%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
@@ -1701,6 +1705,222 @@ body {
 
 /* Day view */
 .cal-day { /* no extra */ }
+
+/* ══════════════════════════════════════════
+   JAPANESE FONT OVERRIDE
+   When data-lang="ja", CJK text uses Zen Maru Gothic (cute rounded);
+   latin/digits fall back to Plus Jakarta Sans first.
+   ══════════════════════════════════════════ */
+[data-lang="ja"] body,
+[data-lang="ja"] * {
+  font-family: 'Plus Jakarta Sans', 'Zen Maru Gothic', 'Pretendard', system-ui, sans-serif;
+}
+
+/* Explicit font-family overrides in component classes still need updating */
+[data-lang="ja"] .quick-btn-circle,
+[data-lang="ja"] .quick-btn,
+[data-lang="ja"] .quick-btn-badge,
+[data-lang="ja"] .btn-add-record,
+[data-lang="ja"] .filter-chip,
+[data-lang="ja"] .toggle-btn,
+[data-lang="ja"] .cal-view-btn,
+[data-lang="ja"] .role-btn,
+[data-lang="ja"] .input-field,
+[data-lang="ja"] .textarea-field,
+[data-lang="ja"] .btn-primary,
+[data-lang="ja"] .btn-secondary,
+[data-lang="ja"] .btn-danger,
+[data-lang="ja"] .toast-btn,
+[data-lang="ja"] .floating-timer-stop,
+[data-lang="ja"] .cal-week-row,
+[data-lang="ja"] .cal-day-cell {
+  font-family: 'Plus Jakarta Sans', 'Zen Maru Gothic', 'Pretendard', system-ui, sans-serif;
+}
+
+/* ══════════════════════════════════════════
+   DARK MODE TOKENS
+   ══════════════════════════════════════════ */
+[data-theme="dark"] {
+  /* ── Background & surface ── */
+  --bg: #151517;
+  --surface: #1e1e21;
+  --border: #2c2c30;
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.12);
+
+  /* ── Typography ── */
+  --text-primary: #ececec;
+  --text-secondary: #b0b0b8;
+  --text-muted: #9a9aa0;
+  --text-placeholder: #5a5a62;
+
+  /* ── Primary action — inverted pill ── */
+  --action-bg: #ececec;
+  --action-hover: #d8d8d8;
+
+  /* ── Category pastels — dark tinted ── */
+  --mint:        #1f2e26;
+  --mint-text:   #8fd4ae;
+  --butter:      #2e2a1c;
+  --butter-text: #e3cd7e;
+  --sage-p:      #1e2b1e;
+  --sage-p-text: #88c890;
+  --blush:       #2f2222;
+  --blush-text:  #e8a9a0;
+  --sky:         #1f2733;
+  --sky-text:    #9ec1e8;
+
+  /* ── Delta colors ── */
+  --delta-up:   #4ec78f;
+  --delta-down: #e07b7b;
+
+  /* ── Stone neutrals — darkened ── */
+  --stone-50:  #1a1a1d;
+  --stone-100: #222226;
+  --stone-200: #2e2e34;
+  --stone-300: #3e3e46;
+  --stone-400: #56565f;
+  --stone-500: #7a7a84;
+  --stone-600: #a0a0aa;
+  --stone-700: #c4c4cc;
+  --stone-800: #dcdce4;
+  --stone-900: #f0f0f4;
+
+  /* ── RGB values for tinted shadows — near-invisible ── */
+  --sage-shadow:  rgba(79,199,143,0.08);
+  --peach-shadow: rgba(217,180,90,0.08);
+  --amber-shadow: rgba(217,180,90,0.08);
+  --rose-shadow:  rgba(224,123,123,0.08);
+}
+
+/* Dark mode corner radials — very subtle cool glows */
+[data-theme="dark"] .app-shell::before {
+  background: radial-gradient(circle, rgba(100,130,200,0.04) 0%, transparent 70%);
+}
+[data-theme="dark"] .app-shell::after {
+  background: radial-gradient(circle, rgba(120,100,180,0.03) 0%, transparent 70%);
+}
+
+/* Action pill text color in dark (inverted pill → dark text on light bg) */
+[data-theme="dark"] .nav-item.active,
+[data-theme="dark"] .filter-chip.active,
+[data-theme="dark"] .toggle-btn.active,
+[data-theme="dark"] .cal-view-btn.active,
+[data-theme="dark"] .role-btn.selected,
+[data-theme="dark"] .btn-add-record,
+[data-theme="dark"] .btn-primary {
+  color: #17171a;
+}
+
+[data-theme="dark"] .btn-add-record:hover {
+  background: var(--action-hover);
+}
+
+/* Nav active badge in dark */
+[data-theme="dark"] .nav-item.active .nav-badge {
+  background: rgba(23,23,26,0.15);
+  color: rgba(23,23,26,0.7);
+  border-color: rgba(23,23,26,0.2);
+}
+
+/* Toast — inverted like action pill */
+[data-theme="dark"] .toast {
+  background: #ececec;
+  color: #17171a;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+
+[data-theme="dark"] .toast.toast-error {
+  background: #2a0a0a;
+  color: #f4a0a0;
+  border: 1px solid rgba(224,123,123,0.3);
+}
+
+[data-theme="dark"] .toast-btn {
+  background: rgba(23,23,26,0.15);
+  color: #17171a;
+}
+[data-theme="dark"] .toast-btn:hover {
+  background: rgba(23,23,26,0.25);
+}
+
+/* Floating timer pill in dark */
+[data-theme="dark"] .floating-timer-pill {
+  background: #ececec;
+  color: #17171a;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+[data-theme="dark"] .floating-timer-stop {
+  background: rgba(23,23,26,0.12);
+  color: #17171a;
+}
+[data-theme="dark"] .floating-timer-stop:hover {
+  background: rgba(23,23,26,0.22);
+}
+
+/* Danger button in dark */
+[data-theme="dark"] .btn-danger {
+  border-color: rgba(224,123,123,0.3);
+}
+[data-theme="dark"] .btn-danger:hover {
+  background: rgba(224,123,123,0.08);
+}
+
+/* Sidebar surface in dark */
+[data-theme="dark"] .sidebar {
+  background: #1a1a1d;
+}
+
+/* Input fields in dark */
+[data-theme="dark"] .input-field,
+[data-theme="dark"] .textarea-field {
+  color: var(--text-primary);
+  background: var(--surface);
+}
+[data-theme="dark"] .input-field:focus,
+[data-theme="dark"] .textarea-field:focus {
+  border-color: var(--stone-400);
+}
+
+/* Stepper in dark */
+[data-theme="dark"] .stepper-btn {
+  color: var(--text-primary);
+}
+
+/* Quick btn hover colors in dark */
+[data-theme="dark"] .quick-btn-circle-pee:hover   { background: #263624; }
+[data-theme="dark"] .quick-btn-circle-poop:hover  { background: #3a3320; }
+[data-theme="dark"] .quick-btn-circle-temp:hover  { background: #3d2828; }
+[data-theme="dark"] .quick-btn-circle-breast:hover { background: #263040; }
+[data-theme="dark"] .quick-btn-circle-formula:hover { background: #263328; }
+
+/* Calendar chips in dark */
+[data-theme="dark"] .cal-indicator-sage  { background: #1e2b1e; color: #88c890; }
+[data-theme="dark"] .cal-indicator-peach { background: #2e2a1c; color: #e3cd7e; }
+[data-theme="dark"] .cal-indicator-red   { background: #2f2222; color: #e8a9a0; }
+[data-theme="dark"] .cal-indicator-rose  { background: #2f2222; color: #e8a9a0; }
+[data-theme="dark"] .cal-chip-sage  { background: #1e2b1e; color: #88c890; }
+[data-theme="dark"] .cal-chip-peach { background: #2e2a1c; color: #e3cd7e; }
+[data-theme="dark"] .cal-chip-red   { background: #2f2222; color: #e8a9a0; }
+
+/* Summary pills in dark */
+[data-theme="dark"] .summary-pill {
+  background: var(--bg);
+}
+
+/* Backup card in dark */
+[data-theme="dark"] .backup-card {
+  background: #151517;
+}
+
+/* Letter card top stripe in dark */
+[data-theme="dark"] .letter-card::before {
+  background: var(--blush);
+}
+
+/* Breathing dot in dark */
+[data-theme="dark"] .breathing-dot {
+  background: var(--peach-400);
+}
 
 /* ══════════════════════════════════════════
    COMPREHENSIVE REDUCED-MOTION OVERRIDES

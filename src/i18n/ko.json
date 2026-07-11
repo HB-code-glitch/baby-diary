@@ -189,6 +189,10 @@
   "settings": {
     "title": "설정",
     "language": "언어",
+    "theme": "테마",
+    "themeLight": "라이트",
+    "themeDark": "다크",
+    "themeSystem": "시스템",
     "babyInfo": "아기 정보",
     "babyName": "아기 이름",
     "babyNamePlaceholder": "아기 이름",

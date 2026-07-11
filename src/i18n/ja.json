@@ -189,6 +189,10 @@
   "settings": {
     "title": "設定",
     "language": "言語",
+    "theme": "テーマ",
+    "themeLight": "ライト",
+    "themeDark": "ダーク",
+    "themeSystem": "システム",
     "babyInfo": "赤ちゃんの情報",
     "babyName": "赤ちゃんの名前",
     "babyNamePlaceholder": "赤ちゃんの名前",

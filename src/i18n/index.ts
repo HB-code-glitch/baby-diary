@@ -33,6 +33,16 @@ export default i18n
 /** Change language at runtime (no restart needed). */
 export function setLanguage(lang: Language): void {
   i18n.changeLanguage(lang)
+  if (typeof document !== 'undefined') {
+    document.documentElement.setAttribute('data-lang', lang)
+  }
+}
+
+/** Set initial data-lang attribute (called once on startup). */
+export function initLangAttr(): void {
+  if (typeof document !== 'undefined') {
+    document.documentElement.setAttribute('data-lang', detectLanguage())
+  }
 }
 
 export function getLanguage(): Language {

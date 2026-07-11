@@ -25,6 +25,7 @@ export function SettingsPage() {
   const [myName,     setMyName]     = useState(settings?.profile?.name    ?? '')
   const [myRole,     setMyRole]     = useState<'mom' | 'dad'>(settings?.profile?.role ?? 'mom')
   const [saving, setSaving] = useState(false)
+  const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'system'>(settings?.theme ?? 'system')
 
   // Sync local form when settings load
   useEffect(() => {
@@ -33,6 +34,7 @@ export function SettingsPage() {
       setBirthdate(settings.baby?.birthdate ?? '')
       setMyName(settings.profile?.name      ?? '')
       setMyRole(settings.profile?.role      ?? 'mom')
+      setCurrentTheme(settings.theme        ?? 'system')
     }
   }, [settings])
 
@@ -55,6 +57,7 @@ export function SettingsPage() {
       familyId: settings?.familyId ?? '',  // F8: never fabricate a familyId — only create/join flow sets this
       firebase:  settings?.firebase  ?? null,
       language:  (i18nInstance.language as Language) ?? 'ko',
+      theme:     currentTheme,
     }
     await saveSettings(updated)
     setSaving(false)
@@ -70,6 +73,29 @@ export function SettingsPage() {
       familyId: settings?.familyId ?? '',
       firebase:  settings?.firebase  ?? null,
       language:  lang,
+      theme:     currentTheme,
+    }
+    await saveSettings(updated)
+  }
+
+  const handleThemeChange = async (theme: 'light' | 'dark' | 'system') => {
+    setCurrentTheme(theme)
+    // Apply instantly via data-theme
+    let resolved: 'light' | 'dark'
+    if (theme === 'system') {
+      resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    } else {
+      resolved = theme
+    }
+    document.documentElement.setAttribute('data-theme', resolved)
+    // Persist immediately
+    const updated: AppSettings = {
+      baby:     settings?.baby     ?? { name: '', birthdate: '' },
+      profile:  settings?.profile  ?? { uid: uuidv4(), name: '', role: 'mom' },
+      familyId: settings?.familyId ?? '',
+      firebase:  settings?.firebase  ?? null,
+      language:  (i18nInstance.language as Language) ?? 'ko',
+      theme,
     }
     await saveSettings(updated)
   }
@@ -126,6 +152,33 @@ export function SettingsPage() {
               lang="ja"
             >
               日本語
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Theme section */}
+      <div className="settings-section">
+        <div className="settings-section-title">{t('settings.theme')}</div>
+        <div className="card">
+          <div className="toggle-group">
+            <button
+              className={`toggle-btn${currentTheme === 'light' ? ' active' : ''}`}
+              onClick={() => handleThemeChange('light')}
+            >
+              {t('settings.themeLight')}
+            </button>
+            <button
+              className={`toggle-btn${currentTheme === 'dark' ? ' active' : ''}`}
+              onClick={() => handleThemeChange('dark')}
+            >
+              {t('settings.themeDark')}
+            </button>
+            <button
+              className={`toggle-btn${currentTheme === 'system' ? ' active' : ''}`}
+              onClick={() => handleThemeChange('system')}
+            >
+              {t('settings.themeSystem')}
             </button>
           </div>
         </div>

@@ -53,6 +53,7 @@ export interface AppSettings {
     appId: string
   } | null
   language?: 'ko' | 'ja'
+  theme?: 'light' | 'dark' | 'system'
 }
 
 export interface DataInfo {
