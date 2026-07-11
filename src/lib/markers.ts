@@ -9,6 +9,7 @@
  */
 
 import { getMilestones, Milestone } from './milestones'
+import { getCalendarGuidance } from './guidance'
 
 // ---------------------------------------------------------------------------
 // CalendarMarker interface
@@ -53,10 +54,22 @@ function milestoneToMarker(m: Milestone): CalendarMarker {
 }
 
 // ---------------------------------------------------------------------------
-// TODO: guidance markers — add import and spread here when guidance.ts
-// exposes a getGuidanceMarkers() function.
-// const guidanceMarkers: CalendarMarker[] = []
+// Guidance → CalendarMarker conversion (startDay > 0 only)
 // ---------------------------------------------------------------------------
+
+function guidanceToMarker(date: string, id: string, titleKo: string, titleJa: string, bodyKo: string, bodyJa: string): CalendarMarker {
+  return {
+    id: `guidance-${id}`,
+    date,
+    kind: 'guidance',
+    titleKo,
+    titleJa,
+    descKo: bodyKo,
+    descJa: bodyJa,
+    tint: 'sky',
+    icon: 'info',
+  }
+}
 
 // ---------------------------------------------------------------------------
 // getMarkers — main entry point
@@ -65,6 +78,7 @@ function milestoneToMarker(m: Milestone): CalendarMarker {
 /**
  * Returns all CalendarMarkers for a given birthdate and optional gender.
  * Sorted by date ascending.
+ * Includes milestone markers (festive) + guidance calendar markers (sky, startDay > 0 only).
  */
 export function getMarkers(
   birthdate: string,
@@ -74,8 +88,13 @@ export function getMarkers(
 
   const milestoneMarkers = getMilestones(birthdate, gender).map(milestoneToMarker)
 
-  // TODO: spread guidanceMarkers here when guidance calendar support is added
-  const allMarkers = [...milestoneMarkers]
+  // Guidance calendar markers — only startDay > 0 (day-0 items would clutter birth date)
+  const calGuidance = getCalendarGuidance(birthdate)
+  const guidanceMarkers: CalendarMarker[] = calGuidance.map(({ marker, date }) =>
+    guidanceToMarker(date, marker.id, marker.titleKo, marker.titleJa, marker.bodyKo, marker.bodyJa)
+  )
+
+  const allMarkers = [...milestoneMarkers, ...guidanceMarkers]
 
   return allMarkers.sort((a, b) => a.date.localeCompare(b.date))
 }

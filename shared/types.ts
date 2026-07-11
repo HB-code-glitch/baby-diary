@@ -37,6 +37,7 @@ export interface AppSettings {
   baby: {
     name: string
     birthdate: string
+    gender?: 'girl' | 'boy'
   }
   profile: {
     uid: string

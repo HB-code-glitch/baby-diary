@@ -197,6 +197,9 @@
     "babyName": "赤ちゃんの名前",
     "babyNamePlaceholder": "赤ちゃんの名前",
     "birthdate": "誕生日",
+    "babyGender": "性別（任意）",
+    "genderGirl": "女の子",
+    "genderBoy": "男の子",
     "myProfile": "プロフィール",
     "myName": "名前",
     "myNamePlaceholder": "名前",
@@ -273,5 +276,24 @@
     "formatFull": "yyyy年M月d日（EEE）",
     "formatYear": "yyyy年M月d日",
     "formatBackup": "M月d日 HH:mm"
+  },
+  "milestone": {
+    "upcomingBanner": "あと{{days}}日 · {{date}}は{{name}}です",
+    "upcomingBannerToday": "今日は{{name}}のお祝いです！",
+    "dismiss": "閉じる",
+    "calendarChip": "{{name}}",
+    "dayBannerTitle": "{{name}}",
+    "culturalMilestone": "記念日"
+  },
+  "guidance": {
+    "calendarChip": "{{title}}",
+    "dayBannerTitle": "育児情報",
+    "disclaimer": "一般的な参考情報です。赤ちゃんによって異なります。具体的なことは小児科医にご相談ください。",
+    "guideCardTitle": "育児ガイド",
+    "currentFormulaLabel": "今の時期のミルク量",
+    "guideExpand": "開く",
+    "guideCollapse": "閉じる",
+    "evidenceConsensus": "ガイドライン",
+    "sourcePrefix": "出典: "
   }
 }

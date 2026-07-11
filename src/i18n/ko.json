@@ -197,6 +197,9 @@
     "babyName": "아기 이름",
     "babyNamePlaceholder": "아기 이름",
     "birthdate": "생일",
+    "babyGender": "성별 (선택)",
+    "genderGirl": "여아",
+    "genderBoy": "남아",
     "myProfile": "내 프로필",
     "myName": "이름",
     "myNamePlaceholder": "이름",
@@ -273,5 +276,24 @@
     "formatFull": "yyyy년 M월 d일 (EEE)",
     "formatYear": "yyyy년 M월 d일",
     "formatBackup": "M월 d일 HH:mm"
+  },
+  "milestone": {
+    "upcomingBanner": "D-{{days}} · {{name}}이(가) {{date}}에 예정되어 있어요",
+    "upcomingBannerToday": "오늘은 {{name}}이에요!",
+    "dismiss": "닫기",
+    "calendarChip": "{{name}}",
+    "dayBannerTitle": "{{name}}",
+    "culturalMilestone": "기념일"
+  },
+  "guidance": {
+    "calendarChip": "{{title}}",
+    "dayBannerTitle": "육아 정보",
+    "disclaimer": "참고용 일반 정보예요. 아기마다 달라요 — 구체적인 것은 소아과와 상담하세요.",
+    "guideCardTitle": "육아 가이드",
+    "currentFormulaLabel": "지금 시기 수유량",
+    "guideExpand": "펼치기",
+    "guideCollapse": "접기",
+    "evidenceConsensus": "가이드라인",
+    "sourcePrefix": "출처: "
   }
 }

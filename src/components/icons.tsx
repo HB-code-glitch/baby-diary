@@ -215,3 +215,33 @@ export function IconDownload({ size = defaults.size, color = 'currentColor', str
     </svg>
   )
 }
+
+export function IconStar({ size = defaults.size, color = 'currentColor', strokeWidth = defaults.strokeWidth, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <path d="M12 2L14.9 8.9L22 9.8L17 14.6L18.2 21.7L12 18.4L5.8 21.7L7 14.6L2 9.8L9.1 8.9L12 2Z" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+export function IconInfo({ size = defaults.size, color = 'currentColor', strokeWidth = defaults.strokeWidth, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke={color} strokeWidth={strokeWidth}/>
+      <path d="M12 11V17" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round"/>
+      <circle cx="12" cy="7.5" r="1" fill={color}/>
+    </svg>
+  )
+}
+
+export function IconGift({ size = defaults.size, color = 'currentColor', strokeWidth = defaults.strokeWidth, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <rect x="3" y="9" width="18" height="13" rx="2" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M3 9H21" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round"/>
+      <path d="M12 9V22" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round"/>
+      <path d="M12 9C12 9 8 9 8 6C8 4 9.5 3 11 3C12 3 12.5 3.5 12 5" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M12 9C12 9 16 9 16 6C16 4 14.5 3 13 3C12 3 11.5 3.5 12 5" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}

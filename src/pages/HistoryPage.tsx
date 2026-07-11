@@ -1,9 +1,9 @@
 import React, { useState, useMemo } from 'react'
-import { IconChevronLeft, IconChevronRight } from '../components/icons'
+import { IconChevronLeft, IconChevronRight, IconStar, IconInfo } from '../components/icons'
 import {
   format, addDays, subDays, addWeeks, subWeeks, addMonths, subMonths,
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
-  isToday, isSameDay, isSameMonth, getDay, parseISO,
+  isToday, isSameDay, isSameMonth, getDay, parseISO, differenceInDays,
 } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
@@ -11,6 +11,8 @@ import { useAppStore, getDDay } from '../store/useAppStore'
 import { EventTimeline } from '../components/EventTimeline'
 import { EventType, DiaryEvent, FormulaData } from '../../shared/types'
 import { useTranslation } from 'react-i18next'
+import { getMilestones, Milestone } from '../lib/milestones'
+import { GUIDANCE_ITEMS, GuidanceItem, GUIDANCE_DISCLAIMER_KO, GUIDANCE_DISCLAIMER_JA } from '../lib/guidance'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,9 +54,12 @@ interface MonthViewProps {
   onSelectDay: (date: Date) => void
   onPrevMonth: () => void
   onNextMonth: () => void
+  milestones: Milestone[]
+  guidanceItems: GuidanceItem[]
+  birthdate?: string
 }
 
-function MonthView({ selectedDate, displayMonth, allEvents, onSelectDay, onPrevMonth, onNextMonth }: MonthViewProps) {
+function MonthView({ selectedDate, displayMonth, allEvents, onSelectDay, onPrevMonth, onNextMonth, milestones, guidanceItems, birthdate }: MonthViewProps) {
   const { t } = useTranslation()
 
   const year = displayMonth.getFullYear()
@@ -106,6 +111,9 @@ function MonthView({ selectedDate, displayMonth, allEvents, onSelectDay, onPrevM
             selectedDate={selectedDate}
             allEvents={allEvents}
             onSelect={onSelectDay}
+            milestones={milestones}
+            guidanceItems={guidanceItems}
+            birthdate={birthdate}
           />
         ))}
       </div>
@@ -119,16 +127,32 @@ interface MonthDayCellProps {
   selectedDate: Date
   allEvents: DiaryEvent[]
   onSelect: (date: Date) => void
+  milestones: Milestone[]
+  guidanceItems: GuidanceItem[]
+  birthdate?: string
 }
 
-function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect }: MonthDayCellProps) {
+function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, milestones, guidanceItems, birthdate }: MonthDayCellProps) {
   const indicators = useDayIndicators(allEvents, day)
+  const { i18n: i18nInstance } = useTranslation()
   const isCurrentMonth = isSameMonth(day, displayMonth)
   const isTodayDay = isToday(day)
   const isSelected = isSameDay(day, selectedDate)
   const dayNum = getDay(day) // 0=Sun, 6=Sat
+  const lang = i18nInstance.language
 
   const hasContent = indicators.diaperCount > 0 || indicators.feedingCount > 0 || indicators.hasHighTemp || indicators.hasDiaryOrMessage
+
+  const dayStr = format(day, 'yyyy-MM-dd')
+  const dayMilestones = milestones.filter(m => m.date === dayStr)
+
+  // Guidance items relevant for this day (calendar items only — exclude pinToSettings)
+  const dayGuidance = birthdate ? guidanceItems.filter(g => {
+    if (g.pinToSettings) return false
+    const birth = parseISO(birthdate)
+    const ageInDays = differenceInDays(day, birth)
+    return ageInDays >= 0 && g.startDay === ageInDays
+  }) : []
 
   return (
     <button
@@ -143,23 +167,37 @@ function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect }: 
       aria-label={format(day, 'yyyy-MM-dd')}
     >
       <span className="cal-day-num">{day.getDate()}</span>
-      {hasContent && isCurrentMonth && (
+      {isCurrentMonth && (
         <div className="cal-day-indicators">
-          {indicators.diaperCount > 0 && (
-            <span className="cal-indicator cal-indicator-sage">
-              {indicators.diaperCount}
+          {hasContent && (
+            <>
+              {indicators.diaperCount > 0 && (
+                <span className="cal-indicator cal-indicator-sage">
+                  {indicators.diaperCount}
+                </span>
+              )}
+              {indicators.feedingCount > 0 && (
+                <span className="cal-indicator cal-indicator-peach">
+                  {indicators.formulaMl > 0 ? `${indicators.formulaMl}ml` : indicators.feedingCount}
+                </span>
+              )}
+              {indicators.hasHighTemp && (
+                <span className="cal-indicator cal-indicator-red">↑</span>
+              )}
+              {indicators.hasDiaryOrMessage && (
+                <span className="cal-indicator cal-indicator-rose">●</span>
+              )}
+            </>
+          )}
+          {dayMilestones.length > 0 && (
+            <span className="cal-indicator cal-indicator-festive" title={lang === 'ja' ? dayMilestones[0].nameJa : dayMilestones[0].nameKo}>
+              <IconStar size={8} color="currentColor" />
             </span>
           )}
-          {indicators.feedingCount > 0 && (
-            <span className="cal-indicator cal-indicator-peach">
-              {indicators.formulaMl > 0 ? `${indicators.formulaMl}ml` : indicators.feedingCount}
+          {dayGuidance.length > 0 && (
+            <span className="cal-indicator cal-indicator-sky" title={lang === 'ja' ? dayGuidance[0].titleJa : dayGuidance[0].titleKo}>
+              <IconInfo size={8} color="currentColor" />
             </span>
-          )}
-          {indicators.hasHighTemp && (
-            <span className="cal-indicator cal-indicator-red">↑</span>
-          )}
-          {indicators.hasDiaryOrMessage && (
-            <span className="cal-indicator cal-indicator-rose">●</span>
           )}
         </div>
       )}
@@ -316,11 +354,15 @@ interface DayViewProps {
   onPrevDay: () => void
   onNextDay: () => void
   onGoToday: () => void
+  milestones: Milestone[]
+  guidanceItems: GuidanceItem[]
+  birthdate?: string
 }
 
-function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDay, onNextDay, onGoToday }: DayViewProps) {
+function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDay, onNextDay, onGoToday, milestones, guidanceItems, birthdate }: DayViewProps) {
   const { t, i18n: i18nInstance } = useTranslation()
   const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+  const lang = i18nInstance.language
 
   const TYPES: { type: EventType; labelKey: string }[] = [
     { type: 'pee',     labelKey: 'event.pee' },
@@ -337,6 +379,23 @@ function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDa
   const filtered = filterType ? dayEvents.filter(e => e.type === filterType) : dayEvents
 
   const dayNum = getDay(selectedDate)
+  const dayStr = format(selectedDate, 'yyyy-MM-dd')
+  const dayMilestones = milestones.filter(m => m.date === dayStr)
+
+  // Age-specific guidance items for this day
+  const dayGuidance = useMemo(() => {
+    if (!birthdate) return [] as GuidanceItem[]
+    const birth = parseISO(birthdate)
+    const ageInDays = differenceInDays(selectedDate, birth)
+    if (ageInDays < 0) return [] as GuidanceItem[]
+    // On birth day (day 0) include safety pinToSettings items
+    return guidanceItems.filter(g => {
+      if (ageInDays === 0) return g.startDay === 0
+      return !g.pinToSettings && g.startDay === ageInDays
+    })
+  }, [selectedDate, birthdate, guidanceItems])
+
+  const disclaimer = lang === 'ja' ? GUIDANCE_DISCLAIMER_JA : GUIDANCE_DISCLAIMER_KO
 
   return (
     <div className="cal-day">
@@ -360,6 +419,40 @@ function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDa
           </button>
         )}
       </div>
+
+      {/* Milestone banner cards */}
+      {dayMilestones.map(m => (
+        <div key={m.id} className="day-banner-festive" style={{ marginBottom: 10 }}>
+          <div className="day-banner-festive-header">
+            <IconStar size={14} color="var(--rose-500)" />
+            <span className="day-banner-festive-name">
+              {lang === 'ja' ? m.nameJa : m.nameKo}
+            </span>
+          </div>
+          <div className="day-banner-festive-desc">
+            {lang === 'ja' ? m.descJa : m.descKo}
+          </div>
+        </div>
+      ))}
+
+      {/* Guidance info cards */}
+      {dayGuidance.map(g => (
+        <div key={g.id} className="day-banner-info" style={{ marginBottom: 10 }}>
+          <div className="day-banner-info-header">
+            <IconInfo size={14} color="var(--sky-text)" />
+            <span className="day-banner-info-title">
+              {lang === 'ja' ? g.titleJa : g.titleKo}
+            </span>
+          </div>
+          <div className="day-banner-info-body">
+            {lang === 'ja' ? g.bodyJa : g.bodyKo}
+          </div>
+          <div className="day-banner-info-meta">
+            <span>{g.source}</span>
+            <span className="day-banner-info-disclaimer">{disclaimer}</span>
+          </div>
+        </div>
+      ))}
 
       {/* Filter chips */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -405,6 +498,16 @@ export function HistoryPage() {
     events.filter(e => !e.deleted),
     [events]
   )
+
+  const birthdate = settings?.baby?.birthdate
+  const gender = settings?.baby?.gender
+
+  const milestones = useMemo(
+    () => birthdate ? getMilestones(birthdate, gender) : [],
+    [birthdate, gender]
+  )
+
+  const guidanceItems = useMemo(() => GUIDANCE_ITEMS, [])
 
   // Navigate to month view keeping selected month
   const goToView = (v: CalendarView, date?: Date) => {
@@ -511,6 +614,9 @@ export function HistoryPage() {
           onSelectDay={handleMonthDaySelect}
           onPrevMonth={() => setDisplayMonth(m => subMonths(m, 1))}
           onNextMonth={() => setDisplayMonth(m => addMonths(m, 1))}
+          milestones={milestones}
+          guidanceItems={guidanceItems}
+          birthdate={birthdate}
         />
       )}
       {view === 'week' && (
@@ -533,6 +639,9 @@ export function HistoryPage() {
           onPrevDay={handleDayPrev}
           onNextDay={handleDayNext}
           onGoToday={handleDayGoToday}
+          milestones={milestones}
+          guidanceItems={guidanceItems}
+          birthdate={birthdate}
         />
       )}
     </div>

@@ -10,7 +10,7 @@ import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
 import { getMilestones, getUpcoming, Milestone } from '../lib/milestones'
-import { getCurrentFormulaGuidance } from '../lib/guidance'
+import { getCurrentFormulaGuidance, getGuidanceForAge } from '../lib/guidance'
 
 // ---------------------------------------------------------------------------
 // Milestone dismiss persistence
@@ -197,12 +197,13 @@ function InsightsPanel({
     ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
     : t('settings.noBackup')
 
-  // Current formula guidance
+  // Current formula guidance (using new getGuidanceForAge — picks best formula band)
   const formulaGuidance = useMemo(() => {
     if (!birthdate) return null
-    const ageInDays = differenceInDays(new Date(), parseISO(birthdate))
-    if (ageInDays < 0) return null
-    return getCurrentFormulaGuidance(ageInDays)
+    const markers = getGuidanceForAge(birthdate, new Date())
+    // Pick the first formula marker (most relevant age band)
+    const formula = markers.find(m => m.id.startsWith('formula_'))
+    return formula ?? null
   }, [birthdate])
 
   const lang = i18nInstance.language
@@ -271,7 +272,7 @@ function InsightsPanel({
         )
       })}
 
-      {/* Current formula guidance row */}
+      {/* Current formula / age guidance row */}
       {formulaGuidance && (
         <div className="insight-row">
           <div
@@ -282,9 +283,12 @@ function InsightsPanel({
             <IconInfo size={16} color="var(--sky-text)" />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="insight-label">{t('guidance.currentFormulaLabel')}</div>
+            <div className="insight-label">
+              {lang === 'ja' ? formulaGuidance.titleJa : formulaGuidance.titleKo}
+            </div>
             <div className="insight-value" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              {lang === 'ja' ? formulaGuidance.bodyJa : formulaGuidance.bodyKo}
+              {/* First sentence only */}
+              {(lang === 'ja' ? formulaGuidance.bodyJa : formulaGuidance.bodyKo).split(/[。.]\s*/)[0]}
             </div>
           </div>
         </div>
