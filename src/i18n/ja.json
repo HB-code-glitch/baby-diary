@@ -30,7 +30,8 @@
     "nextBreastLabel": "次の授乳おすすめ側",
     "todayDiaperLabel": "今日のおむつ",
     "recentTempLabel": "最近の体温",
-    "backupLabel": "バックアップ状態"
+    "backupLabel": "バックアップ状態",
+    "guidanceRowAriaLabel": "育児ガイドを詳しく見る（設定へ移動）"
   },
   "stat": {
     "formulaLabel": "ミルク合計",
@@ -221,6 +222,7 @@
     "toastExportCsv": "CSVファイルを書き出しました。",
     "toastExportFail": "書き出しに失敗しました。",
     "toastOpenFolderFail": "フォルダを開けません。",
+    "electronOnly": "この機能はデスクトップアプリでのみ使用できます",
     "syncSection": "家族の同期"
   },
   "sync": {

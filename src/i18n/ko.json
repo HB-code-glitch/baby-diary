@@ -30,7 +30,8 @@
     "nextBreastLabel": "다음 수유 추천쪽",
     "todayDiaperLabel": "오늘 기저귀",
     "recentTempLabel": "최근 체온",
-    "backupLabel": "백업 상태"
+    "backupLabel": "백업 상태",
+    "guidanceRowAriaLabel": "육아 가이드 자세히 보기 (설정으로 이동)"
   },
   "stat": {
     "formulaLabel": "분유 총량",
@@ -221,6 +222,7 @@
     "toastExportCsv": "CSV 파일이 내보내기되었습니다.",
     "toastExportFail": "내보내기에 실패했습니다.",
     "toastOpenFolderFail": "폴더를 열 수 없습니다.",
+    "electronOnly": "이 기능은 데스크톱 앱에서만 사용할 수 있어요",
     "syncSection": "가족 동기화"
   },
   "sync": {

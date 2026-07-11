@@ -108,8 +108,12 @@ export function SettingsPage() {
     try {
       await ipc.exportData('json')
       showToast({ message: t('settings.toastExportJson') })
-    } catch {
-      showToast({ message: t('settings.toastExportFail') })
+    } catch (err) {
+      if (err instanceof Error && err.message === 'ELECTRON_ONLY') {
+        showToast({ message: t('settings.electronOnly') })
+      } else {
+        showToast({ message: t('settings.toastExportFail') })
+      }
     }
   }
 
@@ -117,16 +121,24 @@ export function SettingsPage() {
     try {
       await ipc.exportData('csv')
       showToast({ message: t('settings.toastExportCsv') })
-    } catch {
-      showToast({ message: t('settings.toastExportFail') })
+    } catch (err) {
+      if (err instanceof Error && err.message === 'ELECTRON_ONLY') {
+        showToast({ message: t('settings.electronOnly') })
+      } else {
+        showToast({ message: t('settings.toastExportFail') })
+      }
     }
   }
 
   const handleOpenBackup = async () => {
     try {
       await ipc.openBackupFolder()
-    } catch {
-      showToast({ message: t('settings.toastOpenFolderFail') })
+    } catch (err) {
+      if (err instanceof Error && err.message === 'ELECTRON_ONLY') {
+        showToast({ message: t('settings.electronOnly') })
+      } else {
+        showToast({ message: t('settings.toastOpenFolderFail') })
+      }
     }
   }
 

@@ -100,11 +100,11 @@ const mockBabyDiary: Window['babyDiary'] = {
   },
 
   exportData: async (_format: ExportFormat) => {
-    console.warn('[브라우저 모드] exportData는 Electron에서만 지원됩니다.')
+    throw new Error('ELECTRON_ONLY')
   },
 
   openBackupFolder: async () => {
-    console.warn('[브라우저 모드] openBackupFolder는 Electron에서만 지원됩니다.')
+    throw new Error('ELECTRON_ONLY')
   },
 
   getDataInfo: async () => {

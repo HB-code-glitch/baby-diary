@@ -11,6 +11,7 @@ import { ja } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
 import { getMilestones, getUpcoming, Milestone } from '../lib/milestones'
 import { getCurrentFormulaGuidance, getGuidanceForAge } from '../lib/guidance'
+import { useSyncStatus } from '../sync/useSync'
 
 // ---------------------------------------------------------------------------
 // Milestone dismiss persistence
@@ -140,6 +141,7 @@ interface InsightsPanelProps {
   todayPoopCount: number
   dataInfo: DataInfo | null
   birthdate?: string
+  onNavigate?: (page: 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings') => void
 }
 
 function InsightsPanel({
@@ -149,9 +151,12 @@ function InsightsPanel({
   todayPoopCount,
   dataInfo,
   birthdate,
+  onNavigate,
 }: InsightsPanelProps) {
   const { t, i18n: i18nInstance } = useTranslation()
   const [, setTick] = useState(0)
+  const syncState = useSyncStatus()
+  const syncDotClass = syncState.status === 'online' ? 'on' : syncState.status === 'error' ? 'err' : 'off'
 
   useEffect(() => {
     const id = setInterval(() => setTick(c => c + 1), 60_000)
@@ -274,11 +279,19 @@ function InsightsPanel({
 
       {/* Current formula / age guidance row */}
       {formulaGuidance && (
-        <div className="insight-row">
+        <div
+          className="insight-row"
+          role="button"
+          tabIndex={0}
+          aria-label={t('home.guidanceRowAriaLabel')}
+          style={{ cursor: 'pointer' }}
+          onClick={() => onNavigate?.('settings')}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate?.('settings') } }}
+        >
           <div
             className="insight-icon"
-            style={{ background: 'var(--sky)' }}
             aria-hidden="true"
+            style={{ background: 'var(--sky)' }}
           >
             <IconInfo size={16} color="var(--sky-text)" />
           </div>
@@ -299,7 +312,7 @@ function InsightsPanel({
         <div className="backup-card-title">{t('home.backupLabel')}</div>
         <div className="backup-card-row">
           <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{backupStr}</span>
-          <span className="sync-dot off" />
+          <span className={`sync-dot ${syncDotClass}`} />
         </div>
       </div>
     </div>
@@ -1025,6 +1038,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           todayPoopCount={poopCount}
           dataInfo={dataInfo}
           birthdate={birthdate ?? undefined}
+          onNavigate={onNavigate}
         />
       </div>
 
