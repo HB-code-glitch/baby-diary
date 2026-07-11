@@ -3532,3 +3532,153 @@ body {
     animation: none !important;
   }
 }
+
+/* ══════════════════════════════════════════
+   LANGUAGE PICKER — first-launch overlay
+   z-index 1400 (above tutorial 1300)
+   ══════════════════════════════════════════ */
+
+/* Full-screen dim backdrop */
+.lang-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 14, 12, 0.60);
+  backdrop-filter: blur(8px) saturate(1.2);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
+}
+
+/* Entrance keyframe: opacity + margin-top only */
+@keyframes langPickerCardIn {
+  from { opacity: 0; margin-top: 18px; }
+  to   { opacity: 1; margin-top: 0px;  }
+}
+
+/* Centered glass card */
+.lang-picker-card {
+  --lp-bg:       rgba(255, 255, 255, 0.82);
+  --lp-border:   rgba(255, 255, 255, 0.55);
+  --lp-text:     #161513;
+  --lp-sub:      #5a524a;
+  --lp-btn-bg:   #161513;
+  --lp-btn-text: #ffffff;
+  --lp-btn-hover: #2a2723;
+
+  width: 340px;
+  background: var(--lp-bg);
+  border: 1px solid var(--lp-border);
+  border-radius: 22px;
+  padding: 36px 32px 32px;
+  box-shadow:
+    0 8px 40px rgba(20, 18, 15, 0.18),
+    0 2px 8px  rgba(20, 18, 15, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(20px) saturate(1.8);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  /* Start invisible; animate when .lang-picker-card-visible is added */
+  opacity: 0;
+  margin-top: 18px;
+}
+
+.lang-picker-card.lang-picker-card-visible {
+  animation: langPickerCardIn 300ms var(--ease-out-smooth, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  opacity: 1;
+  margin-top: 0;
+}
+
+/* Wordmark */
+.lang-picker-wordmark {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--lp-text);
+  letter-spacing: -0.03em;
+  margin-bottom: 24px;
+}
+
+/* Bilingual question lines */
+.lang-picker-question {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 28px;
+  text-align: center;
+}
+
+.lang-picker-q-ko {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--lp-text);
+  line-height: 1.5;
+}
+
+.lang-picker-q-ja {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lp-sub);
+  line-height: 1.5;
+}
+
+/* Button row */
+.lang-picker-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+/* Pill button */
+.lang-picker-btn {
+  width: 100%;
+  padding: 13px 20px;
+  border-radius: 99px;
+  border: none;
+  background: var(--lp-btn-bg);
+  color: var(--lp-btn-text);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: -0.01em;
+  transition: background 160ms, opacity 120ms;
+  -webkit-app-region: no-drag;
+}
+
+.lang-picker-btn:hover {
+  background: var(--lp-btn-hover);
+}
+
+.lang-picker-btn:active {
+  opacity: 0.82;
+}
+
+/* Dark theme */
+[data-theme="dark"] .lang-picker-card {
+  --lp-bg:       rgba(30, 28, 26, 0.88);
+  --lp-border:   rgba(255, 255, 255, 0.10);
+  --lp-text:     #ececec;
+  --lp-sub:      #9a9490;
+  --lp-btn-bg:   rgba(255, 255, 255, 0.14);
+  --lp-btn-text: #ffffff;
+  --lp-btn-hover: rgba(255, 255, 255, 0.22);
+  box-shadow:
+    0 8px 48px rgba(0, 0, 0, 0.50),
+    0 2px 8px  rgba(0, 0, 0, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .lang-picker-card,
+  .lang-picker-card.lang-picker-card-visible {
+    animation: none !important;
+    opacity: 1 !important;
+    margin-top: 0 !important;
+  }
+}

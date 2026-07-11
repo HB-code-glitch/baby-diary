@@ -100,6 +100,24 @@ async function main() {
     })
 
     // ---------------------------------------------------------------------------
+    // 0. Language picker (first launch — fresh profile shows picker before tour)
+    // ---------------------------------------------------------------------------
+    console.log('\n[0] Language picker')
+
+    await page.waitForSelector('.lang-picker-overlay', { timeout: 10000 })
+    await shot(page, 'language-picker')
+
+    // Click 한국어 button (lang="ko")
+    const koBtn = await page.$('.lang-picker-btn[lang="ko"]')
+    assert(!!koBtn, 'Korean language button found')
+    await koBtn.click()
+    await page.waitForTimeout(400)
+
+    // Picker should be gone and tour should appear
+    const pickerGone = await page.$('.lang-picker-overlay') === null
+    assert(pickerGone, 'language picker dismissed after selecting Korean')
+
+    // ---------------------------------------------------------------------------
     // 1. Window title + tutorial overlay
     // ---------------------------------------------------------------------------
     console.log('\n[1] Window title + tutorial')

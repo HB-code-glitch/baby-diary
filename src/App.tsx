@@ -4,8 +4,10 @@ import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
 import { useSyncLifecycle } from './sync/useSync'
 import { setLanguage, initLangAttr } from './i18n'
+import type { Language } from './i18n'
 import i18n from './i18n'
 import { TutorialTour, isTutorialDone } from './components/TutorialTour'
+import { LanguagePicker, isLangChosen, markLangChosen } from './components/LanguagePicker'
 import { UpdateBanner } from './components/UpdateBanner'
 
 import { HomePage }     from './pages/HomePage'
@@ -69,8 +71,11 @@ function applyTheme(theme: 'light' | 'dark' | 'system'): void {
 function AppInner() {
   const init = useAppStore(s => s.init)
   const settings = useAppStore(s => s.settings)
+  const saveSettings = useAppStore(s => s.saveSettings)
   const [currentPage, setCurrentPage] = useState<Page>('home')
   const [tourActive, setTourActive] = useState(false)
+  // null = undecided (show picker on first launch), false = hidden, true = shown
+  const [showLangPicker, setShowLangPicker] = useState<boolean>(false)
 
   const startTour = useCallback(() => {
     setCurrentPage('home')
@@ -121,15 +126,43 @@ function AppInner() {
     return () => mq.removeEventListener('change', handler)
   }, [settings?.theme])
 
-  // First-launch: start tutorial after 300ms if not done
+  // First-launch: show LanguagePicker if language not yet chosen,
+  // then start tutorial. If language already chosen, go straight to tutorial.
   useEffect(() => {
     const id = setTimeout(() => {
-      if (!isTutorialDone()) {
+      if (isTutorialDone()) return // neither picker nor tour needed
+
+      if (!isLangChosen()) {
+        // Show language picker first; tutorial starts after pick (see handleLangPick)
+        setShowLangPicker(true)
+      } else {
+        // Language already picked → straight to tutorial
         setTourActive(true)
       }
     }, 300)
     return () => clearTimeout(id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const handleLangPick = useCallback(async (lang: Language) => {
+    // 1. Apply language immediately so tour renders in chosen language
+    setLanguage(lang)
+
+    // 2. Persist to settings (best-effort; works in Electron, no-op in pure web)
+    try {
+      const current = settings ?? ({} as any)
+      await saveSettings({ ...current, language: lang })
+    } catch {
+      // non-fatal — language is already applied in-memory
+    }
+
+    // 3. Mark as chosen so next launch skips picker
+    markLangChosen()
+
+    // 4. Hide picker and start tutorial
+    setShowLangPicker(false)
+    setTourActive(true)
+  }, [settings, saveSettings])
 
   return (
     <div className="app-shell">
@@ -137,6 +170,9 @@ function AppInner() {
       <main className="main-content">
         <PageContent page={currentPage} onNavigate={setCurrentPage} onStartTour={startTour} />
       </main>
+      {showLangPicker && (
+        <LanguagePicker onPick={handleLangPick} />
+      )}
       {tourActive && (
         <TutorialTour
           onNavigate={setCurrentPage}
