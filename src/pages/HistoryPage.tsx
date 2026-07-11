@@ -9,7 +9,7 @@ import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useAppStore, getDDay } from '../store/useAppStore'
 import { EventTimeline } from '../components/EventTimeline'
-import { EventType, DiaryEvent, FormulaData } from '../../shared/types'
+import { EventType, DiaryEvent, FormulaData, SleepData } from '../../shared/types'
 import { useTranslation } from 'react-i18next'
 import { getMilestones, Milestone } from '../lib/milestones'
 import { GUIDANCE_ITEMS, GuidanceItem, GUIDANCE_DISCLAIMER_KO, GUIDANCE_DISCLAIMER_JA } from '../lib/guidance'
@@ -28,6 +28,9 @@ interface DayIndicators {
   formulaMl: number
   hasHighTemp: boolean
   hasDiaryOrMessage: boolean
+  sleepCount: number
+  sleepMinutes: number
+  growthCount: number
 }
 
 function useDayIndicators(events: DiaryEvent[], date: Date): DayIndicators {
@@ -40,7 +43,11 @@ function useDayIndicators(events: DiaryEvent[], date: Date): DayIndicators {
       .reduce((s, e) => s + ((e.data as FormulaData).ml ?? 0), 0)
     const hasHighTemp = dayEvents.some(e => e.type === 'temp' && (e.data as { celsius: number }).celsius >= 37.5)
     const hasDiaryOrMessage = dayEvents.some(e => e.type === 'diary' || e.type === 'message')
-    return { diaperCount, feedingCount, formulaMl, hasHighTemp, hasDiaryOrMessage }
+    const sleepEvts = dayEvents.filter(e => e.type === 'sleep')
+    const sleepCount = sleepEvts.length
+    const sleepMinutes = sleepEvts.reduce((s, e) => s + ((e.data as SleepData).minutes ?? 0), 0)
+    const growthCount = dayEvents.filter(e => e.type === 'growth').length
+    return { diaperCount, feedingCount, formulaMl, hasHighTemp, hasDiaryOrMessage, sleepCount, sleepMinutes, growthCount }
   }, [events, date])
 }
 
@@ -141,7 +148,7 @@ function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, mi
   const dayNum = getDay(day) // 0=Sun, 6=Sat
   const lang = i18nInstance.language
 
-  const hasContent = indicators.diaperCount > 0 || indicators.feedingCount > 0 || indicators.hasHighTemp || indicators.hasDiaryOrMessage
+  const hasContent = indicators.diaperCount > 0 || indicators.feedingCount > 0 || indicators.hasHighTemp || indicators.hasDiaryOrMessage || indicators.sleepCount > 0 || indicators.growthCount > 0
 
   const dayStr = format(day, 'yyyy-MM-dd')
   const dayMilestones = milestones.filter(m => m.date === dayStr)
@@ -186,6 +193,16 @@ function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, mi
               )}
               {indicators.hasDiaryOrMessage && (
                 <span className="cal-indicator cal-indicator-rose">●</span>
+              )}
+              {indicators.sleepCount > 0 && (
+                <span className="cal-chip-sleep" style={{ fontSize: 9, padding: '1px 4px', borderRadius: 4 }}>
+                  {indicators.sleepMinutes}
+                </span>
+              )}
+              {indicators.growthCount > 0 && (
+                <span className="cal-chip-growth" style={{ fontSize: 9, padding: '1px 4px', borderRadius: 4 }}>
+                  {indicators.growthCount}
+                </span>
               )}
             </>
           )}
@@ -276,6 +293,10 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
           const formulaCount = indicators.filter(e => e.type === 'formula').length
           const formulaMl = indicators.filter(e => e.type === 'formula').reduce((s, e) => s + ((e.data as FormulaData).ml ?? 0), 0)
           const hasHighTemp = indicators.some(e => e.type === 'temp' && (e.data as { celsius: number }).celsius >= 37.5)
+          const sleepEvts = indicators.filter(e => e.type === 'sleep')
+          const sleepCount = sleepEvts.length
+          const sleepMinutes = sleepEvts.reduce((s, e) => s + ((e.data as SleepData).minutes ?? 0), 0)
+          const growthCount = indicators.filter(e => e.type === 'growth').length
 
           // First few event times
           const timePreview = indicators
@@ -325,6 +346,16 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
                 )}
                 {hasHighTemp && (
                   <span className="cal-chip cal-chip-red">{t('history.tempHighIndicator')}</span>
+                )}
+                {sleepCount > 0 && (
+                  <span className="cal-chip cal-chip-sleep">
+                    {t('summary.sleep', { count: sleepCount, totalMin: sleepMinutes })}
+                  </span>
+                )}
+                {growthCount > 0 && (
+                  <span className="cal-chip cal-chip-growth">
+                    {t('summary.growth', { count: growthCount })}
+                  </span>
                 )}
               </div>
 
