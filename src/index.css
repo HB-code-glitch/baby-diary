@@ -49,6 +49,14 @@
   from { opacity: 0; transform: scale(0.92) translateY(6px); }
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
+/* fixed+translate(-50%,-50%) 센터링 요소 전용 — glassAppear는 transform을 덮어써 센터링을 깨뜨림 */
+@keyframes feverModalAppear {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(0.94); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fever-modal { animation: none !important; transform: translate(-50%, -50%) !important; }
+}
 
 /* ── Stagger entrance (kept, curve upgraded) ── */
 @keyframes mountIn {
@@ -3070,7 +3078,7 @@ body {
   overflow-y: auto;
   border-radius: 22px;
   padding: 24px 20px 20px;
-  animation: glassAppear var(--dur-appear) var(--spring-snappy) both;
+  animation: feverModalAppear var(--dur-appear) var(--spring-snappy) both;
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
 }
