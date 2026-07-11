@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { IconFolderOpen, IconDownload, IconInfo } from '../components/icons'
 import { GUIDANCE_MARKERS, GUIDANCE_DISCLAIMER } from '../lib/guidance'
 import { format, parseISO } from 'date-fns'
@@ -13,6 +13,11 @@ import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 import { DeleteAllModal } from '../components/DeleteAllModal'
+import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
+
+// Re-export for any consumers that already import from this path
+export type { FormSnapshot }
+export { mergeSettingsSafely }
 
 interface SettingsPageProps {
   onStartTour?: () => void
@@ -36,17 +41,35 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false)
   const [deletingAll, setDeletingAll] = useState(false)
 
-  // Sync local form when settings load
+  // Hydrate form from a settings object
+  const hydrateForm = useCallback((s: AppSettings) => {
+    setBabyName(s.baby?.name       ?? '')
+    setBirthdate(s.baby?.birthdate ?? '')
+    setBabyGender(s.baby?.gender)
+    setMyName(s.profile?.name      ?? '')
+    setMyRole(s.profile?.role      ?? 'mom')
+    setCurrentTheme(s.theme        ?? 'system')
+  }, [])
+
+  // Belt+suspenders: on mount, always fetch fresh settings directly from disk
+  // (bypasses possible stale Zustand store state from hydration race)
+  useEffect(() => {
+    let cancelled = false
+    ipc.getSettings().then(fresh => {
+      if (!cancelled) hydrateForm(fresh)
+    }).catch(() => {
+      // fallback to store state handled below
+    })
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Sync local form when store settings load (secondary, catches store updates)
   useEffect(() => {
     if (settings) {
-      setBabyName(settings.baby?.name       ?? '')
-      setBirthdate(settings.baby?.birthdate ?? '')
-      setBabyGender(settings.baby?.gender)
-      setMyName(settings.profile?.name      ?? '')
-      setMyRole(settings.profile?.role      ?? 'mom')
-      setCurrentTheme(settings.theme        ?? 'system')
+      hydrateForm(settings)
     }
-  }, [settings])
+  }, [settings, hydrateForm])
 
   useEffect(() => {
     loadDataInfo()
@@ -54,25 +77,51 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 
   const handleSave = async () => {
     setSaving(true)
-    const updated: AppSettings = {
-      baby: {
-        name:      babyName.trim(),
-        birthdate: birthdate,
-        gender:    babyGender,
-      },
-      profile: {
-        uid:  settings?.profile?.uid ?? uuidv4(),
-        name: myName.trim(),
-        role: myRole,
-      },
-      familyId: settings?.familyId ?? '',  // F8: never fabricate a familyId — only create/join flow sets this
-      firebase:  settings?.firebase  ?? null,
-      language:  (i18nInstance.language as Language) ?? 'ko',
-      theme:     currentTheme,
+    try {
+      // Source of truth: always fetch fresh from disk before merging
+      const current = await ipc.getSettings()
+
+      const form: FormSnapshot = {
+        babyName,
+        birthdate,
+        babyGender,
+        myName,
+      }
+
+      // Merge: never blank-overwrite non-empty saved critical fields
+      const merged = mergeSettingsSafely(current, form)
+
+      // Apply non-critical fields from UI
+      const updated: AppSettings = {
+        ...merged,
+        profile: {
+          ...merged.profile,
+          uid:  current.profile?.uid ?? settings?.profile?.uid ?? uuidv4(),
+          role: myRole,
+        },
+        familyId: current.familyId ?? settings?.familyId ?? '',  // F8: never fabricate
+        firebase:  current.firebase  ?? settings?.firebase  ?? null,
+        language:  (i18nInstance.language as Language) ?? 'ko',
+        theme:     currentTheme,
+      }
+
+      await saveSettings(updated)
+
+      // Detect race scenario: form was fully blank but disk had data →
+      // re-hydrate the form and show info toast instead of normal saved toast
+      const formWasBlank = !babyName.trim() && !birthdate.trim() && !myName.trim()
+      const diskHadData  = !!(current.baby?.name?.trim() || current.baby?.birthdate?.trim() || current.profile?.name?.trim())
+
+      if (formWasBlank && diskHadData) {
+        // Re-hydrate from merged result so the user sees their real data
+        hydrateForm(updated)
+        showToast({ message: t('settings.restoredFromDisk') })
+      } else {
+        showToast({ message: t('settings.toastSaved') })
+      }
+    } finally {
+      setSaving(false)
     }
-    await saveSettings(updated)
-    setSaving(false)
-    showToast({ message: t('settings.toastSaved') })
   }
 
   const handleLanguageChange = async (lang: Language) => {

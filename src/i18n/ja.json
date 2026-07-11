@@ -233,7 +233,8 @@
     "deleteAllCancel": "キャンセル",
     "deleteAllConfirmBtn": "すべて削除",
     "deleteAllToastSuccess": "記録{{count}}件を削除しました",
-    "deleteAllToastPartial": "記録{{count}}件を削除中にエラーが発生しました"
+    "deleteAllToastPartial": "記録{{count}}件を削除中にエラーが発生しました",
+    "restoredFromDisk": "保存された情報を読み込み直しました"
   },
   "sync": {
     "noConfigTitle": "Firebase設定",
