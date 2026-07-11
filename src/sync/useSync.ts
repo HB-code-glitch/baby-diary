@@ -50,12 +50,12 @@ export function useSyncLifecycle(): void {
     // 앱 설정을 읽어 configure → start
     // settings.firebase 가 null 이면 내장 기본 설정(DEFAULT_FIREBASE_CONFIG)으로 폴백.
     // 덕분에 첫 설치에서도 바로 로그인/회원가입 화면으로 진입할 수 있음.
-    ipc.getSettings().then(settings => {
-      configure(settings.firebase ?? DEFAULT_FIREBASE_CONFIG, settings.familyId)
+    ipc.getSettings().then(async settings => {
+      await configure(settings.firebase ?? DEFAULT_FIREBASE_CONFIG, settings.familyId)
       start()
-    }).catch(() => {
+    }).catch(async () => {
       // 설정 읽기 실패 시에도 기본 설정으로 configure
-      configure(DEFAULT_FIREBASE_CONFIG, '')
+      await configure(DEFAULT_FIREBASE_CONFIG, '')
       start()
     })
 

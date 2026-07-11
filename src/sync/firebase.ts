@@ -2,21 +2,17 @@
  * src/sync/firebase.ts
  * Firebase 앱 지연 초기화 (lazy init).
  * 설정이 없으면 sync는 off 상태, 앱의 나머지 기능은 로컬 모드로 동작.
+ *
+ * PERF: All firebase/* modules are dynamically imported inside initFirebase()
+ * so that the firebase chunk is never pulled into the main bundle.
+ * Type-only imports are used at the module level to keep TypeScript happy.
  */
-import { initializeApp, getApps, deleteApp, FirebaseApp } from 'firebase/app'
-import {
-  getFirestore,
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
+import type { FirebaseApp } from 'firebase/app'
+import type {
   Firestore,
 } from 'firebase/firestore'
-import {
-  getAuth,
+import type {
   Auth,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  signOut,
   UserCredential,
 } from 'firebase/auth'
 import { AppSettings } from '../../shared/types'
@@ -33,10 +29,13 @@ export type FirebaseConfig = NonNullable<AppSettings['firebase']>
  * 설정이 있으면 Firebase 앱을 초기화하고 { db, auth }를 반환.
  * 같은 설정으로 이미 초기화된 경우 기존 인스턴스를 재사용.
  * 설정이 null이면 null 반환 → 호출자가 로컬 모드로 처리.
+ *
+ * Dynamic import keeps firebase/* out of the initial JS bundle — the chunk
+ * is fetched only when this function is first called (after first paint).
  */
-export function initFirebase(
+export async function initFirebase(
   config: FirebaseConfig | null
-): { db: Firestore; auth: Auth } | null {
+): Promise<{ db: Firestore; auth: Auth } | null> {
   if (!config) {
     return null
   }
@@ -46,10 +45,19 @@ export function initFirebase(
     return { db: _db, auth: _auth }
   }
 
+  // Dynamic imports — firebase chunk is loaded on demand
+  const { initializeApp, getApps, deleteApp } = await import('firebase/app')
+  const {
+    initializeFirestore,
+    persistentLocalCache,
+    persistentMultipleTabManager,
+  } = await import('firebase/firestore')
+  const { getAuth } = await import('firebase/auth')
+
   // 기존 앱이 있으면 삭제 후 재생성 (설정 변경 시)
   const existing = getApps().find(a => a.name === APP_NAME)
   if (existing) {
-    deleteApp(existing)
+    await deleteApp(existing)
   }
 
   _app = initializeApp(config, APP_NAME)
@@ -83,6 +91,7 @@ export async function fbSignIn(
   email: string,
   password: string
 ): Promise<UserCredential> {
+  const { signInWithEmailAndPassword } = await import('firebase/auth')
   return signInWithEmailAndPassword(auth, email, password)
 }
 
@@ -92,17 +101,20 @@ export async function fbSignUp(
   email: string,
   password: string
 ): Promise<UserCredential> {
+  const { createUserWithEmailAndPassword } = await import('firebase/auth')
   return createUserWithEmailAndPassword(auth, email, password)
 }
 
 /** Firebase 로그아웃 */
 export async function fbSignOut(auth: Auth): Promise<void> {
+  const { signOut } = await import('firebase/auth')
   return signOut(auth)
 }
 
 /** Firebase 앱 종료 (설정 변경 또는 앱 종료 시) */
 export async function teardownFirebase(): Promise<void> {
   if (_app) {
+    const { deleteApp } = await import('firebase/app')
     await deleteApp(_app)
   }
   _app = null

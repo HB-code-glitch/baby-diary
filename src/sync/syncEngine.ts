@@ -13,20 +13,13 @@
  * - 업로드 큐: 실패 시 localStorage 영속 + 지수 백오프 재시도
  * - 원격 수신 이벤트에는 origin 태그 → 재업로드 방지
  */
-import {
+// PERF: Type-only imports — no runtime firebase code pulled into main bundle
+import type {
   Firestore,
-  collection,
-  doc,
-  getDoc,
-  setDoc,
-  getDocs,
-  onSnapshot,
-  writeBatch,
-  serverTimestamp,
   Unsubscribe,
   DocumentData,
 } from 'firebase/firestore'
-import { Auth, onAuthStateChanged, User } from 'firebase/auth'
+import type { Auth, User } from 'firebase/auth'
 import { DiaryEvent } from '../../shared/types'
 import { ipc } from '../lib/ipc'
 import {
@@ -38,6 +31,55 @@ import {
   getFirebaseAuth,
   FirebaseConfig,
 } from './firebase'
+
+// ────────────────────────────────────────────────────────────
+// Lazy-loaded firebase/firestore helpers.
+// Populated on first call to _firestoreOps() which runs only after
+// initFirebase() has already fetched the firebase chunk.
+// ────────────────────────────────────────────────────────────
+
+type FirestoreOps = {
+  collection: typeof import('firebase/firestore').collection
+  doc: typeof import('firebase/firestore').doc
+  getDoc: typeof import('firebase/firestore').getDoc
+  setDoc: typeof import('firebase/firestore').setDoc
+  getDocs: typeof import('firebase/firestore').getDocs
+  onSnapshot: typeof import('firebase/firestore').onSnapshot
+  writeBatch: typeof import('firebase/firestore').writeBatch
+  serverTimestamp: typeof import('firebase/firestore').serverTimestamp
+}
+
+type AuthOps = {
+  onAuthStateChanged: typeof import('firebase/auth').onAuthStateChanged
+}
+
+let _firestoreOpsCache: FirestoreOps | null = null
+let _authOpsCache: AuthOps | null = null
+
+async function _firestoreOps(): Promise<FirestoreOps> {
+  if (!_firestoreOpsCache) {
+    const m = await import('firebase/firestore')
+    _firestoreOpsCache = {
+      collection: m.collection,
+      doc: m.doc,
+      getDoc: m.getDoc,
+      setDoc: m.setDoc,
+      getDocs: m.getDocs,
+      onSnapshot: m.onSnapshot,
+      writeBatch: m.writeBatch,
+      serverTimestamp: m.serverTimestamp,
+    }
+  }
+  return _firestoreOpsCache
+}
+
+async function _authOps(): Promise<AuthOps> {
+  if (!_authOpsCache) {
+    const m = await import('firebase/auth')
+    _authOpsCache = { onAuthStateChanged: m.onAuthStateChanged }
+  }
+  return _authOpsCache
+}
 
 // ────────────────────────────────────────────────────────────
 // 타입 정의
@@ -237,8 +279,11 @@ function generateInviteCode(): string {
 /**
  * Firebase 설정 및 familyId 주입.
  * 앱 시작 시 또는 설정 변경 시 호출.
+ * initFirebase is now async (dynamic import), so configure returns a Promise.
+ * Callers (useSyncLifecycle) already await ipc.getSettings() before calling
+ * configure, so the async change is safe.
  */
-export function configure(cfg: FirebaseConfig | null, familyId: string): void {
+export async function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
   _config = cfg
   _familyId = familyId
 
@@ -247,7 +292,7 @@ export function configure(cfg: FirebaseConfig | null, familyId: string): void {
     return
   }
 
-  const result = initFirebase(cfg)
+  const result = await initFirebase(cfg)
   if (!result) {
     setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: 0 })
     return
@@ -307,6 +352,7 @@ export async function createFamily(
   const memberRole = profile.role ?? 'mom'
 
   const inviteCode = generateInviteCode()
+  const { doc, collection, writeBatch, serverTimestamp } = await _firestoreOps()
   const familyRef = doc(collection(_db, 'families'))
   const inviteRef = doc(_db, 'invites', inviteCode)
 
@@ -360,6 +406,7 @@ export async function joinFamily(
   const memberRole = profile.role ?? 'mom'
 
   // F-RULES: direct get() on invites/{code} — no list needed
+  const { doc, getDoc, setDoc } = await _firestoreOps()
   const code = inviteCode.trim().toUpperCase()
   const inviteRef = doc(_db, 'invites', code)
   const inviteSnap = await getDoc(inviteRef)
@@ -427,15 +474,19 @@ export function start(): void {
     return
   }
 
-  _unsubAuth = onAuthStateChanged(_auth, user => {
-    _currentUser = user
-    if (user) {
-      void onUserSignedIn(user)
-    } else {
-      setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
-      _unsubSnapshot?.()
-      _unsubSnapshot = null
-    }
+  // onAuthStateChanged is loaded dynamically — firebase chunk already in cache
+  // at this point because configure() awaited initFirebase() first.
+  void _authOps().then(({ onAuthStateChanged }) => {
+    _unsubAuth = onAuthStateChanged(_auth!, user => {
+      _currentUser = user
+      if (user) {
+        void onUserSignedIn(user)
+      } else {
+        setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
+        _unsubSnapshot?.()
+        _unsubSnapshot = null
+      }
+    })
   })
 }
 
@@ -471,7 +522,7 @@ export async function restartSync(cfg: FirebaseConfig, familyId: string): Promis
   _restarting = true
   try {
     stop()
-    configure(cfg, familyId)
+    await configure(cfg, familyId)
     start()
   } finally {
     _restarting = false
@@ -507,6 +558,7 @@ async function onUserSignedIn(user: User): Promise<void> {
   try {
     // F2 + F8: fetch family doc early so we can surface the invite code and detect
     // not-found familyIds (e.g. a leftover uuid from the old F8 bug).
+    const { doc, getDoc } = await _firestoreOps()
     const familyRef = doc(_db, 'families', _familyId)
     const familySnap = await getDoc(familyRef)
     if (!familySnap.exists()) {
@@ -520,7 +572,7 @@ async function onUserSignedIn(user: User): Promise<void> {
     setState({ inviteCode: familyData.inviteCode })
 
     await reconcile(user)
-    attachSnapshot()
+    await attachSnapshot()
     setState({ status: 'online', detail: `${user.email} connected`, pendingCount: _pending.length })
     void drainQueue()
   } catch (err) {
@@ -541,6 +593,8 @@ async function onUserSignedIn(user: User): Promise<void> {
  */
 async function reconcile(user: User): Promise<void> {
   if (!_db || !_familyId) return
+
+  const { doc, getDoc, collection, getDocs } = await _firestoreOps()
 
   // 가족 문서 확인 (멤버 검증)
   const familyRef = doc(_db, 'families', _familyId)
@@ -589,11 +643,12 @@ async function reconcile(user: User): Promise<void> {
 }
 
 /** onSnapshot 리스너 부착 — 실시간 원격 업데이트 수신 */
-function attachSnapshot(): void {
+async function attachSnapshot(): Promise<void> {
   if (!_db || !_familyId) return
 
   _unsubSnapshot?.()
 
+  const { collection, onSnapshot } = await _firestoreOps()
   const eventsRef = collection(_db, 'families', _familyId, 'events')
   _unsubSnapshot = onSnapshot(
     eventsRef,
@@ -633,6 +688,7 @@ function docToEvent(docId: string, data: DocumentData): DiaryEvent {
  */
 async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | 'error'> {
   if (!_db || !_familyId) return 'error'
+  const { doc, writeBatch } = await _firestoreOps()
   const docId = makeDocId(event)
   const ref = doc(_db, 'families', _familyId, 'events', docId)
   try {
@@ -663,6 +719,8 @@ async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | '
 async function batchUpload(events: DiaryEvent[]): Promise<Set<string>> {
   const uploaded = new Set<string>()
   if (!_db || !_familyId || events.length === 0) return uploaded
+
+  const { doc, writeBatch, getDoc } = await _firestoreOps()
 
   for (let i = 0; i < events.length; i += BATCH_SIZE) {
     const chunk = events.slice(i, i + BATCH_SIZE)

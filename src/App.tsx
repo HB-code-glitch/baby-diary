@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, Suspense, lazy } from 'react'
 import { ToastProvider, useToast } from './components/Toast'
 import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
@@ -10,24 +10,34 @@ import { TutorialTour, isTutorialDone } from './components/TutorialTour'
 import { LanguagePicker, isLangChosen, markLangChosen } from './components/LanguagePicker'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useMidnightRefresh } from './lib/useMidnightRefresh'
+import { PageSkeleton } from './components/PageSkeleton'
 
-import { HomePage }     from './pages/HomePage'
-import { HistoryPage }  from './pages/HistoryPage'
-import { StatsPage }    from './pages/StatsPage'
-import { DiaryPage }    from './pages/DiaryPage'
-import { MessagesPage } from './pages/MessagesPage'
-import { SettingsPage } from './pages/SettingsPage'
+// HomePage is the landing view — always eager so first paint has no async gap.
+import { HomePage } from './pages/HomePage'
+
+// All other pages are lazy-loaded so they land in separate JS chunks.
+const HistoryPage  = lazy(() => import('./pages/HistoryPage').then(m => ({ default: m.HistoryPage })))
+const StatsPage    = lazy(() => import('./pages/StatsPage').then(m => ({ default: m.StatsPage })))
+const DiaryPage    = lazy(() => import('./pages/DiaryPage').then(m => ({ default: m.DiaryPage })))
+const MessagesPage = lazy(() => import('./pages/MessagesPage').then(m => ({ default: m.MessagesPage })))
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })))
 
 function PageContent({ page, onNavigate, onStartTour }: { page: Page; onNavigate: (p: Page) => void; onStartTour: () => void }) {
-  switch (page) {
-    case 'home':     return <HomePage onNavigate={onNavigate} />
-    case 'history':  return <HistoryPage />
-    case 'stats':    return <StatsPage />
-    case 'diary':    return <DiaryPage />
-    case 'messages': return <MessagesPage />
-    case 'settings': return <SettingsPage onStartTour={onStartTour} />
-    default:         return <HomePage onNavigate={onNavigate} />
-  }
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      {(() => {
+        switch (page) {
+          case 'home':     return <HomePage onNavigate={onNavigate} />
+          case 'history':  return <HistoryPage />
+          case 'stats':    return <StatsPage />
+          case 'diary':    return <DiaryPage />
+          case 'messages': return <MessagesPage />
+          case 'settings': return <SettingsPage onStartTour={onStartTour} />
+          default:         return <HomePage onNavigate={onNavigate} />
+        }
+      })()}
+    </Suspense>
+  )
 }
 
 /** Attach global unhandled error / rejection listeners so nothing is ever silent. */

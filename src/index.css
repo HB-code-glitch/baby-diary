@@ -3765,3 +3765,43 @@ body {
     margin-top: 0 !important;
   }
 }
+
+/* ── Page skeleton (lazy-chunk loading fallback) ── */
+@keyframes skeletonPulse {
+  0%, 100% { opacity: 0.45; }
+  50%       { opacity: 0.2; }
+}
+
+.page-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 32px 24px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.page-skeleton-bar {
+  border-radius: 8px;
+  height: 18px;
+  animation: skeletonPulse 1.4s ease-in-out infinite;
+}
+
+/* light theme */
+[data-theme="light"] .page-skeleton-bar,
+:root:not([data-theme="dark"]) .page-skeleton-bar {
+  background: rgba(0, 0, 0, 0.10);
+}
+
+/* dark theme */
+[data-theme="dark"] .page-skeleton-bar {
+  background: rgba(255, 255, 255, 0.10);
+}
+
+.page-skeleton-bar--wide   { width: 75%; }
+.page-skeleton-bar--medium { width: 55%; animation-delay: 0.15s; }
+.page-skeleton-bar--narrow { width: 35%; animation-delay: 0.30s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .page-skeleton-bar { animation: none; opacity: 0.25; }
+}
