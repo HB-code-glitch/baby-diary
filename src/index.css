@@ -805,6 +805,101 @@ body {
   .btn-add-record::after { display: none; }
 }
 
+/* ── Quick-record glass dropdown menu ── */
+.quick-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 200px;
+  border-radius: 16px;
+  padding: 6px;
+  background: rgba(255,255,255,0.82);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-inset-light),
+              0 12px 40px rgba(22,21,19,0.16),
+              0 2px 8px rgba(22,21,19,0.08);
+  animation: glassAppear var(--dur-appear) var(--spring-snappy) both;
+  transform-origin: top right;
+}
+
+.quick-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  padding: 9px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  transition: background var(--dur-micro) ease;
+  text-align: left;
+}
+
+.quick-menu-item:hover,
+.quick-menu-item:focus-visible {
+  background: rgba(0,0,0,0.05);
+  outline: none;
+}
+
+.quick-menu-item:active {
+  background: rgba(0,0,0,0.09);
+}
+
+.quick-menu-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.quick-menu-label {
+  flex: 1;
+}
+
+.quick-menu-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dark mode */
+[data-theme="dark"] .quick-menu {
+  background: rgba(30,30,34,0.88);
+  box-shadow: var(--glass-inset-dark),
+              0 12px 40px rgba(0,0,0,0.38),
+              0 2px 8px rgba(0,0,0,0.22);
+}
+
+[data-theme="dark"] .quick-menu-item:hover,
+[data-theme="dark"] .quick-menu-item:focus-visible {
+  background: rgba(255,255,255,0.07);
+}
+
+[data-theme="dark"] .quick-menu-item:active {
+  background: rgba(255,255,255,0.12);
+}
+
+[data-theme="dark"] .quick-menu-badge {
+  background: rgba(255,255,255,0.1);
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-menu { animation: none; }
+}
+
 /* Main 2-col grid */
 .home-main-grid {
   display: grid;

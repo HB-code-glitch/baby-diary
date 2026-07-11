@@ -411,6 +411,124 @@ function StatCards() {
 }
 
 // ---------------------------------------------------------------------------
+// Quick-record glass dropdown menu
+// ---------------------------------------------------------------------------
+interface QuickMenuProps {
+  anchor: DOMRect
+  onPee: () => void
+  onPoop: () => void
+  onOpenTemp: (e: React.MouseEvent) => void
+  onOpenBreast: (e: React.MouseEvent) => void
+  onOpenFormula: (e: React.MouseEvent) => void
+  onClose: () => void
+}
+
+function QuickMenu({ anchor, onPee, onPoop, onOpenTemp, onOpenBreast, onOpenFormula, onClose }: QuickMenuProps) {
+  const { t } = useTranslation()
+  const menuRef = useRef<HTMLDivElement>(null)
+  const firstItemRef = useRef<HTMLButtonElement>(null)
+
+  // Close on outside click
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose()
+      }
+    }
+    // Delay one frame so the triggering click doesn't immediately close the menu
+    const id = requestAnimationFrame(() => {
+      document.addEventListener('pointerdown', onPointerDown)
+    })
+    return () => {
+      cancelAnimationFrame(id)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [onClose])
+
+  // Focus first item on open
+  useEffect(() => {
+    firstItemRef.current?.focus()
+  }, [])
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); onClose() }
+    if (e.key === '1') { e.preventDefault(); onPee(); onClose() }
+    if (e.key === '2') { e.preventDefault(); onPoop(); onClose() }
+  }
+
+  const menuStyle: React.CSSProperties = {
+    top: anchor.bottom + 8,
+    right: Math.max(8, window.innerWidth - anchor.right),
+  }
+
+  const ITEMS: {
+    tintBg: string
+    tintColor: string
+    Icon: React.FC<{ size: number; color?: string }>
+    labelKey: string
+    badge: string
+    action: (e: React.MouseEvent<HTMLButtonElement>) => void
+  }[] = [
+    {
+      tintBg: 'var(--mint)', tintColor: 'var(--mint-text)',
+      Icon: IconDrop, labelKey: 'quickBtn.pee', badge: '1',
+      action: () => { onPee(); onClose() },
+    },
+    {
+      tintBg: 'var(--butter)', tintColor: 'var(--butter-text)',
+      Icon: IconPoop, labelKey: 'quickBtn.poop', badge: '2',
+      action: () => { onPoop(); onClose() },
+    },
+    {
+      tintBg: 'var(--blush)', tintColor: 'var(--blush-text)',
+      Icon: IconThermometer, labelKey: 'quickBtn.temp', badge: '3',
+      action: (e) => { onClose(); onOpenTemp(e) },
+    },
+    {
+      tintBg: 'var(--sky)', tintColor: 'var(--sky-text)',
+      Icon: IconHeart, labelKey: 'quickBtn.breast', badge: '4',
+      action: (e) => { onClose(); onOpenBreast(e) },
+    },
+    {
+      tintBg: 'var(--sage-p)', tintColor: 'var(--sage-p-text)',
+      Icon: IconBottle, labelKey: 'quickBtn.formula', badge: '5',
+      action: (e) => { onClose(); onOpenFormula(e) },
+    },
+  ]
+
+  return (
+    <div
+      ref={menuRef}
+      className="quick-menu"
+      role="menu"
+      aria-label={t('home.addRecord')}
+      style={menuStyle}
+      onKeyDown={handleKeyDown}
+    >
+      {ITEMS.map(({ tintBg, tintColor, Icon, labelKey, badge, action }, idx) => (
+        <button
+          key={badge}
+          ref={idx === 0 ? firstItemRef : undefined}
+          className="quick-menu-item"
+          role="menuitem"
+          onClick={action as React.MouseEventHandler<HTMLButtonElement>}
+        >
+          <span
+            className="quick-menu-icon"
+            style={{ background: tintBg, color: tintColor }}
+            aria-hidden="true"
+          >
+            <Icon size={14} color={tintColor} />
+          </span>
+          <span className="quick-menu-label">{t(labelKey)}</span>
+          <span className="quick-menu-badge" aria-hidden="true">{badge}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Temperature popover
 // ---------------------------------------------------------------------------
 interface TempPopoverProps {
@@ -814,6 +932,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
   const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
+  const [quickMenuAnchor, setQuickMenuAnchor] = useState<DOMRect | null>(null)
   const [timeEditEvent, setTimeEditEvent] = useState<DiaryEvent | null>(null)
   const [timerTick, setTimerTick] = useState(0)
   const [feedingTip, setFeedingTip] = useState<{
@@ -987,25 +1106,27 @@ export function HomePage({ onNavigate }: HomePageProps) {
     }
   }, [lastBreastSide]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keyboard shortcuts (1–5)
+  // Keyboard shortcuts (1–5) — work both when quick menu is open and from the main view
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.ctrlKey || e.metaKey || e.altKey) return
+      if (e.key === 'Escape' && quickMenuAnchor) { setQuickMenuAnchor(null); return }
       if (popover) return
 
+      // Digits work from main view (quick-record row always visible) or from the menu
       switch (e.key) {
-        case '1': e.preventDefault(); handlePee(); break
-        case '2': e.preventDefault(); handlePoop(); break
-        case '3': { e.preventDefault(); const btn = document.querySelector('.quick-btn-circle-temp') as HTMLElement; if (btn) btn.click(); break }
-        case '4': { e.preventDefault(); const btn = document.querySelector('.quick-btn-circle-breast') as HTMLElement; if (btn) btn.click(); break }
-        case '5': { e.preventDefault(); const btn = document.querySelector('.quick-btn-circle-formula') as HTMLElement; if (btn) btn.click(); break }
+        case '1': e.preventDefault(); handlePee(); setQuickMenuAnchor(null); break
+        case '2': e.preventDefault(); handlePoop(); setQuickMenuAnchor(null); break
+        case '3': { e.preventDefault(); const btn = document.querySelector('.quick-btn-circle-temp') as HTMLElement; if (btn) btn.click(); setQuickMenuAnchor(null); break }
+        case '4': { e.preventDefault(); const btn = document.querySelector('.quick-btn-circle-breast') as HTMLElement; if (btn) btn.click(); setQuickMenuAnchor(null); break }
+        case '5': { e.preventDefault(); const btn = document.querySelector('.quick-btn-circle-formula') as HTMLElement; if (btn) btn.click(); setQuickMenuAnchor(null); break }
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [popover, handlePee, handlePoop])
+  }, [popover, quickMenuAnchor, handlePee, handlePoop])
 
   // Quick-record buttons config
   const quickBtns = [
@@ -1034,11 +1155,16 @@ export function HomePage({ onNavigate }: HomePageProps) {
           )}
         </div>
 
-        {/* + Record button scrolls to quick-record row */}
+        {/* + Record button — opens glass quick-menu dropdown */}
         <button
           className="btn-add-record"
-          onClick={() => quickRecordRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })}
+          onClick={(e) => {
+            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+            setQuickMenuAnchor(prev => prev ? null : rect)
+          }}
           aria-label={t('home.addRecord')}
+          aria-haspopup="menu"
+          aria-expanded={quickMenuAnchor !== null}
         >
           <span style={{ fontSize: 15, fontWeight: 700, marginRight: 1 }}>+</span>
           {t('home.addRecord')}
@@ -1109,6 +1235,28 @@ export function HomePage({ onNavigate }: HomePageProps) {
       {/* Floating nursing timer pill */}
       {nursingTimer.running && (
         <FloatingTimerPill key={timerTick} onStop={handleFloatingTimerStop} />
+      )}
+
+      {/* Quick record glass dropdown menu */}
+      {quickMenuAnchor && (
+        <QuickMenu
+          anchor={quickMenuAnchor}
+          onPee={handlePee}
+          onPoop={handlePoop}
+          onOpenTemp={(e) => {
+            const rect = quickMenuAnchor
+            setPopover({ type: 'temp', anchor: rect })
+          }}
+          onOpenBreast={(e) => {
+            const rect = quickMenuAnchor
+            setPopover({ type: 'breast', anchor: rect })
+          }}
+          onOpenFormula={(e) => {
+            const rect = quickMenuAnchor
+            setPopover({ type: 'formula', anchor: rect })
+          }}
+          onClose={() => setQuickMenuAnchor(null)}
+        />
       )}
 
       {/* Popovers */}
