@@ -100,7 +100,8 @@
       {
         "provider": "github",
         "owner": "HB-code-glitch",
-        "repo": "baby-diary-releases"
+        "repo": "baby-diary-releases",
+        "releaseType": "release"
       }
     ]
   }
