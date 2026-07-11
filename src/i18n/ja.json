@@ -24,6 +24,12 @@
     "breastMilk": "母乳",
     "formula": "ミルク"
   },
+  "stat": {
+    "formulaLabel": "ミルク合計",
+    "peeLabel": "おしっこ",
+    "poopLabel": "うんち",
+    "feedLabel": "授乳回数"
+  },
   "summary": {
     "pee": "おしっこ {{count}}回",
     "poop": "うんち {{count}}回",

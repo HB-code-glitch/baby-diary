@@ -1,5 +1,5 @@
 import React from 'react'
-import { Home, List, BarChart2, BookOpen, Mail, Settings } from 'lucide-react'
+import { IconHome, IconCalendar, IconChart, IconBook, IconMail, IconGear } from './icons'
 import { useAppStore, getDDay } from '../store/useAppStore'
 import { useTranslation } from 'react-i18next'
 
@@ -8,21 +8,30 @@ export type Page = 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settin
 interface NavItem {
   id: Page
   labelKey: string
-  icon: React.ElementType
+  Icon: React.ComponentType<{ size?: number; color?: string }>
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home',     labelKey: 'nav.home',     icon: Home },
-  { id: 'history',  labelKey: 'nav.history',  icon: List },
-  { id: 'stats',    labelKey: 'nav.stats',    icon: BarChart2 },
-  { id: 'diary',    labelKey: 'nav.diary',    icon: BookOpen },
-  { id: 'messages', labelKey: 'nav.messages', icon: Mail },
-  { id: 'settings', labelKey: 'nav.settings', icon: Settings },
+  { id: 'home',     labelKey: 'nav.home',     Icon: IconHome },
+  { id: 'history',  labelKey: 'nav.history',  Icon: IconCalendar },
+  { id: 'stats',    labelKey: 'nav.stats',    Icon: IconChart },
+  { id: 'diary',    labelKey: 'nav.diary',    Icon: IconBook },
+  { id: 'messages', labelKey: 'nav.messages', Icon: IconMail },
+  { id: 'settings', labelKey: 'nav.settings', Icon: IconGear },
 ]
 
 interface SidebarProps {
   currentPage: Page
   onNavigate: (page: Page) => void
+}
+
+/** Deterministic hue from name string (0-360) */
+function nameToHue(name: string): number {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  return Math.abs(hash) % 360
 }
 
 export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
@@ -33,10 +42,25 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const birthdate = settings?.baby?.birthdate
   const dday = birthdate ? getDDay(birthdate) : null
 
+  const initial = babyName.charAt(0).toUpperCase()
+  const hue = nameToHue(babyName)
+  const avatarBg = `hsl(${hue}, 55%, 70%)`
+  const avatarFg = `hsl(${hue}, 35%, 30%)`
+
   return (
     <nav className="sidebar">
       <div className="sidebar-header">
-        <div className="sidebar-logo">Baby Diary</div>
+        {/* Baby avatar circle */}
+        <div
+          className="sidebar-avatar"
+          style={{
+            background: avatarBg,
+            color: avatarFg,
+          }}
+          aria-hidden="true"
+        >
+          {initial}
+        </div>
         <div className="sidebar-baby-name">{babyName}</div>
         {dday != null ? (
           <div className="sidebar-dday">{t('dday', { days: dday })}</div>
@@ -46,13 +70,16 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       </div>
 
       <div className="sidebar-nav">
-        {NAV_ITEMS.map(({ id, labelKey, icon: Icon }) => (
+        {NAV_ITEMS.map(({ id, labelKey, Icon }) => (
           <button
             key={id}
             className={`nav-item${currentPage === id ? ' active' : ''}`}
             onClick={() => onNavigate(id)}
           >
-            <Icon />
+            <Icon
+              size={16}
+              color={currentPage === id ? 'var(--stone-700)' : 'var(--stone-500)'}
+            />
             <span>{t(labelKey)}</span>
           </button>
         ))}

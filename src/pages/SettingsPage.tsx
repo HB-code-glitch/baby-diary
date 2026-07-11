@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { FolderOpen, Download } from 'lucide-react'
+import { IconFolderOpen, IconDownload } from '../components/icons'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
@@ -232,7 +232,7 @@ export function SettingsPage() {
               style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
               onClick={handleOpenBackup}
             >
-              <FolderOpen size={13} />
+              <IconFolderOpen size={13} color="currentColor" />
               {t('settings.openFolder')}
             </button>
           </div>
@@ -244,7 +244,7 @@ export function SettingsPage() {
                 style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
                 onClick={handleExportJson}
               >
-                <Download size={13} />
+                <IconDownload size={13} color="currentColor" />
                 JSON
               </button>
               <button
@@ -252,7 +252,7 @@ export function SettingsPage() {
                 style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}
                 onClick={handleExportCsv}
               >
-                <Download size={13} />
+                <IconDownload size={13} color="currentColor" />
                 CSV
               </button>
             </div>

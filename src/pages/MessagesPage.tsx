@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { Plus, Pencil, Trash2, X, Mail } from 'lucide-react'
+import { IconPlus, IconPencil, IconTrash, IconX } from '../components/icons'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
@@ -61,7 +61,7 @@ function MessageComposer({ initial, babyName, onSave, onClose }: ComposerProps) 
             onClick={onClose}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--stone-500)' }}
           >
-            <X size={18} />
+            <IconX size={18} color="var(--stone-500)" />
           </button>
         </div>
 
@@ -187,7 +187,7 @@ export function MessagesPage() {
           style={{ display: 'flex', alignItems: 'center', gap: 6 }}
           onClick={() => openComposer()}
         >
-          <Plus size={14} />
+          <IconPlus size={14} color="white" />
           {t('messages.write')}
         </button>
       </div>
@@ -209,16 +209,17 @@ export function MessagesPage() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {messageEvents.map(event => {
+          {messageEvents.map((event, i) => {
             const data = event.data as MessageData
             return (
-              <div key={`${event.id}-${event.rev}`} className="letter-card">
+              <div
+                key={`${event.id}-${event.rev}`}
+                className="letter-card stagger-mount"
+                style={{ '--i': i } as React.CSSProperties}
+              >
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 14, color: 'var(--stone-700)', lineHeight: 1.8,
-                      whiteSpace: 'pre-line',
-                    }}>
+                    <div className="letter-body">
                       {data.text}
                     </div>
                     <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
@@ -235,18 +236,18 @@ export function MessagesPage() {
                       onClick={() => openComposer(event)}
                       style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--stone-400)', borderRadius: 5 }}
                     >
-                      <Pencil size={13} />
+                      <IconPencil size={13} color="var(--stone-400)" />
                     </button>
                     <button
                       onClick={() => handleDelete(event)}
                       style={{
-                        background: confirmDelete === event.id ? '#fff0f0' : 'none',
+                        background: confirmDelete === event.id ? 'var(--rose-100)' : 'none',
                         border: 'none', cursor: 'pointer', padding: 4,
-                        color: confirmDelete === event.id ? '#c44' : 'var(--stone-400)',
+                        color: confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)',
                         borderRadius: 5,
                       }}
                     >
-                      <Trash2 size={13} />
+                      <IconTrash size={13} color={confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)'} />
                     </button>
                   </div>
                 </div>

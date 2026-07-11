@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { format, parseISO } from 'date-fns'
-import { X } from 'lucide-react'
+import { IconX } from './icons'
 import { useTranslation } from 'react-i18next'
 
 interface TimeEditModalProps {
@@ -47,7 +47,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
             onClick={onClose}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--stone-500)', padding: 2 }}
           >
-            <X size={16} />
+            <IconX size={16} color="var(--stone-500)" />
           </button>
         </div>
 

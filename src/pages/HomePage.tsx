@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react'
-import { Droplets, Wind, Thermometer, Heart, Baby, Clock } from 'lucide-react'
+import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconClock } from '../components/icons'
 import { useAppStore, formatTime, getDDay } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
@@ -20,6 +20,10 @@ interface HomeHeroProps {
 function HomeHero({ onNavigateSettings }: HomeHeroProps) {
   const lastFeeding = useAppStore(s => s.lastFeeding())
   const settings = useAppStore(s => s.settings)
+  const peeCount = useAppStore(s => s.todayPeeCount())
+  const poopCount = useAppStore(s => s.todayPoopCount())
+  const feedCount = useAppStore(s => s.todayFeedingCount())
+  const formulaMl = useAppStore(s => s.todayFormulaTotalMl())
   const [, setTick] = useState(0)
   const { t, i18n: i18nInstance } = useTranslation()
 
@@ -33,8 +37,9 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
 
   const birthdate = settings?.baby?.birthdate
   const dday = birthdate ? getDDay(birthdate) : null
+  const babyName = settings?.baby?.name || t('sidebar.defaultBabyName')
 
-  let feedingBadge: React.ReactNode
+  let feedingBadgeContent: React.ReactNode
   if (lastFeeding) {
     const minutes = differenceInMinutes(new Date(), parseISO(lastFeeding.at))
     const hours = Math.floor(minutes / 60)
@@ -45,25 +50,33 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
     const feedingType = lastFeeding.type === 'breast'
       ? t('home.breastMilk')
       : t('home.formula')
-    feedingBadge = (
+    feedingBadgeContent = (
       <div className="badge-feeding">
-        <Clock size={12} />
+        <span className="breathing-dot" />
         {t('home.lastFeedingAgo', { type: feedingType, time: timeStr })}
       </div>
     )
   } else {
-    feedingBadge = (
+    feedingBadgeContent = (
       <div className="badge-feeding-empty">
-        <Clock size={12} />
+        <IconClock size={12} color="var(--stone-400)" />
         {t('home.noFeedingYet')}
       </div>
     )
   }
 
+  const statTiles = [
+    { key: 'formula', num: formulaMl > 0 ? formulaMl : '-', unit: formulaMl > 0 ? 'ml' : '', label: t('stat.formulaLabel'), bg: 'var(--peach-100)', color: 'var(--peach-600)', featured: true },
+    { key: 'pee', num: peeCount, unit: '', label: t('stat.peeLabel'), bg: 'var(--sage-100)', color: 'var(--sage-600)', featured: false },
+    { key: 'poop', num: poopCount, unit: '', label: t('stat.poopLabel'), bg: 'var(--sage-100)', color: 'var(--sage-500)', featured: false },
+    { key: 'feed', num: feedCount, unit: '', label: t('stat.feedLabel'), bg: 'var(--cream-200)', color: 'var(--stone-700)', featured: false },
+  ]
+
   return (
     <div className="home-hero">
       <div className="home-hero-left">
         <div className="home-hero-date">{dateStr}</div>
+        <div className="home-hero-baby-name">{babyName}</div>
         {dday != null ? (
           <div className="home-hero-dday">{t('dday', { days: dday })}</div>
         ) : (
@@ -74,8 +87,28 @@ function HomeHero({ onNavigateSettings }: HomeHeroProps) {
             {t('home.setBirthday')}
           </button>
         )}
+        <div style={{ marginTop: 8 }}>
+          {feedingBadgeContent}
+        </div>
       </div>
-      {feedingBadge}
+
+      <div className="home-hero-right">
+        <div className="stat-tile-grid">
+          {statTiles.map(tile => (
+            <div
+              key={tile.key}
+              className={`stat-tile${tile.featured ? ' stat-tile-featured' : ''}`}
+              style={{ background: tile.bg }}
+            >
+              <div className="stat-tile-num" style={{ color: tile.color }}>
+                {tile.num}
+              </div>
+              {tile.unit && <div className="stat-tile-unit">{tile.unit}</div>}
+              <div className="stat-tile-label">{tile.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
@@ -676,61 +709,67 @@ export function HomePage({ onNavigate }: HomePageProps) {
       {/* Hero header strip */}
       <HomeHero onNavigateSettings={() => onNavigate?.('settings')} />
 
-      {/* Quick record buttons */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(5, 1fr)',
-        gap: 10,
-        marginBottom: 6,
-      }}>
-        <button className="quick-btn quick-btn-pee" onClick={handlePee} style={{ position: 'relative' }}>
-          <span className="quick-btn-badge">1</span>
-          <Droplets size={26} />
-          <span>{t('quickBtn.pee')}</span>
-        </button>
-        <button className="quick-btn quick-btn-poop" onClick={handlePoop} style={{ position: 'relative' }}>
-          <span className="quick-btn-badge">2</span>
-          <Wind size={26} />
-          <span>{t('quickBtn.poop')}</span>
-        </button>
-        <button
-          className="quick-btn quick-btn-temp"
-          onClick={e => openPopover('temp', e)}
-          style={{ position: 'relative' }}
-        >
-          <span className="quick-btn-badge">3</span>
-          <Thermometer size={26} />
-          <span>{t('quickBtn.temp')}</span>
-        </button>
-        <button
-          className="quick-btn quick-btn-breast"
-          onClick={e => openPopover('breast', e)}
-          style={{ position: 'relative' }}
-        >
-          <span className="quick-btn-badge">4</span>
-          <Heart size={26} />
-          <span>{t('quickBtn.breast')}</span>
-        </button>
-        <button
-          className="quick-btn quick-btn-formula"
-          onClick={e => openPopover('formula', e)}
-          style={{ position: 'relative' }}
-        >
-          <span className="quick-btn-badge">5</span>
-          <Baby size={26} />
-          <span>{t('quickBtn.formula')}</span>
-        </button>
+      {/* Quick record buttons — circular icon design */}
+      <div className="quick-record-row">
+        {[
+          {
+            cls: 'quick-btn-circle quick-btn-circle-pee',
+            Icon: IconDrop,
+            label: t('quickBtn.pee'),
+            badge: '1',
+            onClick: handlePee,
+          },
+          {
+            cls: 'quick-btn-circle quick-btn-circle-poop',
+            Icon: IconPoop,
+            label: t('quickBtn.poop'),
+            badge: '2',
+            onClick: handlePoop,
+          },
+          {
+            cls: 'quick-btn-circle quick-btn-circle-temp',
+            Icon: IconThermometer,
+            label: t('quickBtn.temp'),
+            badge: '3',
+            onClick: (e: React.MouseEvent) => openPopover('temp', e),
+          },
+          {
+            cls: 'quick-btn-circle quick-btn-circle-breast',
+            Icon: IconHeart,
+            label: t('quickBtn.breast'),
+            badge: '4',
+            onClick: (e: React.MouseEvent) => openPopover('breast', e),
+          },
+          {
+            cls: 'quick-btn-circle quick-btn-circle-formula',
+            Icon: IconBottle,
+            label: t('quickBtn.formula'),
+            badge: '5',
+            onClick: (e: React.MouseEvent) => openPopover('formula', e),
+          },
+        ].map(({ cls, Icon, label, badge, onClick }, i) => (
+          <div
+            key={badge}
+            className="quick-record-slot stagger-mount"
+            style={{ '--i': i } as React.CSSProperties}
+          >
+            <button
+              className={cls}
+              onClick={onClick as React.MouseEventHandler}
+              style={{ position: 'relative' }}
+            >
+              <span className="quick-btn-badge">{badge}</span>
+              <Icon size={24} />
+            </button>
+            <span className="quick-btn-circle-label">{label}</span>
+          </div>
+        ))}
       </div>
 
       {/* Keyboard shortcut hint */}
       <div className="quick-btn-hint">{t('quickBtnHint')}</div>
 
-      {/* Today summary */}
-      <div style={{ marginBottom: 20, marginTop: 10 }}>
-        <TodaySummary />
-      </div>
-
-      <hr className="divider" style={{ marginBottom: 16 }} />
+      <hr className="divider" style={{ marginBottom: 16, marginTop: 16 }} />
 
       {/* Today's timeline */}
       <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--stone-500)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>

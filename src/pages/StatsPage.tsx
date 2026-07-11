@@ -53,11 +53,12 @@ function buildDayStats(events: DiaryEvent[], days: number, dateFnsLocale: typeof
 }
 
 const TOOLTIP_STYLE = {
-  background: 'var(--stone-50)',
+  background: 'var(--cream-50)',
   border: '1px solid var(--stone-200)',
-  borderRadius: 8,
+  borderRadius: 10,
   fontSize: 12,
   fontFamily: 'Pretendard, sans-serif',
+  boxShadow: '0 4px 12px rgba(0,0,0,0.07)',
 }
 
 export function StatsPage() {
@@ -97,56 +98,56 @@ export function StatsPage() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         {/* Formula total */}
         <div className="card">
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
+          <div className="section-header-accent">
             {t('stats.formulaTitle')}
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--stone-200)" />
+              <CartesianGrid strokeDasharray="2 4" stroke="var(--stone-200)" strokeOpacity={0.6} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <YAxis tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <Tooltip
                 contentStyle={TOOLTIP_STYLE}
                 formatter={(v: number) => [t('stats.mlUnit', { value: v }), t('stats.formulaTooltip')]}
               />
-              <Bar dataKey="formulaMl" fill="var(--peach-300)" radius={[3,3,0,0]} name={t('stats.formulaTooltip')} />
+              <Bar dataKey="formulaMl" fill="var(--peach-300)" radius={[6,6,0,0]} name={t('stats.formulaTooltip')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
         {/* Feeding count */}
         <div className="card">
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
+          <div className="section-header-accent">
             {t('stats.feedingTitle')}
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--stone-200)" />
+              <CartesianGrid strokeDasharray="2 4" stroke="var(--stone-200)" strokeOpacity={0.6} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <Tooltip
                 contentStyle={TOOLTIP_STYLE}
                 formatter={(v: number) => [t('stats.countUnit', { count: v }), t('stats.feedingTooltip')]}
               />
-              <Bar dataKey="feedingCount" fill="var(--peach-200)" radius={[3,3,0,0]} name={t('stats.feedingTooltip')} />
+              <Bar dataKey="feedingCount" fill="var(--peach-200)" radius={[6,6,0,0]} name={t('stats.feedingTooltip')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
         {/* Diaper counts */}
         <div className="card">
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
+          <div className="section-header-accent">
             {t('stats.diaperTitle')}
           </div>
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--stone-200)" />
+              <CartesianGrid strokeDasharray="2 4" stroke="var(--stone-200)" strokeOpacity={0.6} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <Tooltip contentStyle={TOOLTIP_STYLE} />
               <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="peeCount"  stackId="a" fill="var(--sage-200)"  radius={[0,0,0,0]} name={t('stats.peeLabel')} />
-              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[3,3,0,0]} name={t('stats.poopLabel')} />
+              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[6,6,0,0]} name={t('stats.poopLabel')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -154,12 +155,12 @@ export function StatsPage() {
         {/* Temperature */}
         {hasTempData && (
           <div className="card">
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)', marginBottom: 12 }}>
+            <div className="section-header-accent">
               {t('stats.tempTitle')}
             </div>
             <ResponsiveContainer width="100%" height={180}>
               <LineChart data={tempData} margin={{ top: 4, right: 0, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--stone-200)" />
+                <CartesianGrid strokeDasharray="2 4" stroke="var(--stone-200)" strokeOpacity={0.6} />
                 <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
                 <YAxis domain={[36, 40]} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
                 <Tooltip

@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { Plus, Pencil, Trash2, X, BookOpen } from 'lucide-react'
+import { IconPlus, IconPencil, IconTrash, IconX } from '../components/icons'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
@@ -55,7 +55,7 @@ function DiaryEditor({ initial, onSave, onClose }: EditorProps) {
             onClick={onClose}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--stone-500)' }}
           >
-            <X size={18} />
+            <IconX size={18} color="var(--stone-500)" />
           </button>
         </div>
 
@@ -181,7 +181,7 @@ export function DiaryPage() {
           style={{ display: 'flex', alignItems: 'center', gap: 6 }}
           onClick={() => openEditor()}
         >
-          <Plus size={14} />
+          <IconPlus size={14} color="white" />
           {t('diary.write')}
         </button>
       </div>
@@ -206,46 +206,57 @@ export function DiaryPage() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {diaryEvents.map(event => {
+          {diaryEvents.map((event, i) => {
             const data = event.data as DiaryData
             return (
-              <div key={`${event.id}-${event.rev}`} className="card" style={{ padding: '16px 18px' }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+              <div
+                key={`${event.id}-${event.rev}`}
+                className="card stagger-mount"
+                style={{ padding: '16px 18px', '--i': i } as React.CSSProperties}
+              >
+                {/* Title row */}
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {data.title && (
                       <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--stone-800)', marginBottom: 4 }}>
                         {data.title}
                       </div>
                     )}
-                    <div style={{ fontSize: 13, color: 'var(--stone-600)', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+                    <div style={{ fontSize: 13, color: 'var(--stone-600)', lineHeight: 1.65, whiteSpace: 'pre-line' }}>
                       {data.text.length > 120 ? data.text.slice(0, 120) + '…' : data.text}
                     </div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                      <span style={{ fontSize: 11, color: 'var(--stone-400)' }}>
-                        {format(parseISO(event.at), t('date.formatFull'), { locale: dateFnsLocale })}
-                      </span>
-                      <span style={{ fontSize: 11, color: 'var(--stone-400)' }}>
+                  </div>
+                </div>
+                {/* Footer row: date + author chip (right-aligned) */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, gap: 8 }}>
+                  <span style={{ fontSize: 11, color: 'var(--stone-400)' }}>
+                    {format(parseISO(event.at), t('date.formatFull'), { locale: dateFnsLocale })}
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {event.author?.name && (
+                      <span style={{
+                        fontSize: 11, color: 'var(--stone-500)',
+                        background: 'var(--stone-100)', borderRadius: 99, padding: '2px 8px',
+                      }}>
                         {t(`role.${event.author.role}`)} {event.author.name}
                       </span>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                    )}
                     <button
                       onClick={() => openEditor(event)}
                       style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--stone-400)', borderRadius: 5 }}
                     >
-                      <Pencil size={13} />
+                      <IconPencil size={13} color="var(--stone-400)" />
                     </button>
                     <button
                       onClick={() => handleDelete(event)}
                       style={{
-                        background: confirmDelete === event.id ? '#fff0f0' : 'none',
+                        background: confirmDelete === event.id ? 'var(--rose-100)' : 'none',
                         border: 'none', cursor: 'pointer', padding: 4,
-                        color: confirmDelete === event.id ? '#c44' : 'var(--stone-400)',
+                        color: confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)',
                         borderRadius: 5,
                       }}
                     >
-                      <Trash2 size={13} />
+                      <IconTrash size={13} color={confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)'} />
                     </button>
                   </div>
                 </div>

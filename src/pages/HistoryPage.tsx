@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { IconChevronLeft, IconChevronRight } from '../components/icons'
 import {
   format, addDays, subDays, addWeeks, subWeeks, addMonths, subMonths,
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
@@ -74,13 +74,13 @@ function MonthView({ selectedDate, displayMonth, allEvents, onSelectDay, onPrevM
       {/* Month navigation */}
       <div className="cal-nav">
         <button className="btn-secondary cal-nav-arrow" onClick={onPrevMonth} aria-label="prev month">
-          <ChevronLeft size={16} />
+          <IconChevronLeft size={16} color="var(--stone-600)" />
         </button>
         <div className="cal-nav-title">
           {t('history.monthTitle', { year, month })}
         </div>
         <button className="btn-secondary cal-nav-arrow" onClick={onNextMonth} aria-label="next month">
-          <ChevronRight size={16} />
+          <IconChevronRight size={16} color="var(--stone-600)" />
         </button>
       </div>
 
@@ -204,13 +204,13 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
       {/* Week navigation */}
       <div className="cal-nav">
         <button className="btn-secondary cal-nav-arrow" onClick={onPrevWeek} aria-label="prev week">
-          <ChevronLeft size={16} />
+          <IconChevronLeft size={16} color="var(--stone-600)" />
         </button>
         <div className="cal-nav-title">
           {t(titleKey, titleParams)}
         </div>
         <button className="btn-secondary cal-nav-arrow" onClick={onNextWeek} aria-label="next week">
-          <ChevronRight size={16} />
+          <IconChevronRight size={16} color="var(--stone-600)" />
         </button>
       </div>
 
@@ -343,7 +343,7 @@ function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDa
       {/* Day navigation */}
       <div className="cal-nav">
         <button className="btn-secondary cal-nav-arrow" onClick={onPrevDay} aria-label="prev day">
-          <ChevronLeft size={16} />
+          <IconChevronLeft size={16} color="var(--stone-600)" />
         </button>
         <div className={[
           'cal-nav-title',
@@ -352,7 +352,7 @@ function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDa
           {format(selectedDate, t('date.formatLong'), { locale: dateFnsLocale })}
         </div>
         <button className="btn-secondary cal-nav-arrow" onClick={onNextDay} aria-label="next day">
-          <ChevronRight size={16} />
+          <IconChevronRight size={16} color="var(--stone-600)" />
         </button>
         {!isToday(selectedDate) && (
           <button className="btn-secondary" style={{ marginLeft: 4 }} onClick={onGoToday}>
@@ -478,7 +478,7 @@ export function HistoryPage() {
             className="btn-secondary cal-breadcrumb"
             onClick={() => setView('month')}
           >
-            <ChevronLeft size={13} />
+            <IconChevronLeft size={13} color="var(--stone-600)" />
             {t('history.viewMonth')}
           </button>
         )}
@@ -488,14 +488,14 @@ export function HistoryPage() {
               className="btn-secondary cal-breadcrumb"
               onClick={() => setView('month')}
             >
-              <ChevronLeft size={13} />
+              <IconChevronLeft size={13} color="var(--stone-600)" />
               {t('history.viewMonth')}
             </button>
             <button
               className="btn-secondary cal-breadcrumb"
               onClick={() => setView('week')}
             >
-              <ChevronLeft size={13} />
+              <IconChevronLeft size={13} color="var(--stone-600)" />
               {t('history.viewWeek')}
             </button>
           </>

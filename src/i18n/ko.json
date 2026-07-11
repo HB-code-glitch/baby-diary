@@ -24,6 +24,12 @@
     "breastMilk": "모유",
     "formula": "분유"
   },
+  "stat": {
+    "formulaLabel": "분유 총량",
+    "peeLabel": "소변",
+    "poopLabel": "대변",
+    "feedLabel": "수유 횟수"
+  },
   "summary": {
     "pee": "소변 {{count}}회",
     "poop": "대변 {{count}}회",
