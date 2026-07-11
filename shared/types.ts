@@ -70,3 +70,5 @@ export interface DataInfo {
 }
 
 export type ExportFormat = 'json' | 'csv'
+
+export type SavePdfResult = { saved: true; path: string } | { saved: false }

@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
-import { DiaryEvent, AppSettings, ExportFormat } from '../shared/types'
+import { DiaryEvent, AppSettings, ExportFormat, SavePdfResult } from '../shared/types'
 import { setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
@@ -171,6 +171,62 @@ function setupIPC(): void {
       documentsBackupDir: backupManager.getDocumentsBackupDir(),
       eventCount: eventLog.getCount(),
       lastBackupTime: backupManager.getLastBackupTime(),
+    }
+  })
+
+  ipcMain.handle('report:savePdf', async (): Promise<SavePdfResult> => {
+    if (!mainWindow) return { saved: false }
+
+    // 1. Show save dialog first so user picks a path before rendering
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: '검진 리포트 저장 / 健診レポート保存',
+      defaultPath: `baby-report-${new Date().toISOString().slice(0, 10)}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    })
+    if (canceled || !filePath) return { saved: false }
+
+    // 2. Create a hidden BrowserWindow that loads the report route
+    const printWin = new BrowserWindow({
+      width: 900,
+      height: 1200,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    })
+
+    try {
+      // 3. Load the same app at #/report -- shares the same preload+store hydration
+      if (isDev) {
+        await printWin.loadURL('http://localhost:5173/#/report')
+      } else {
+        await printWin.loadFile(path.join(__dirname, '../../dist/index.html'), { hash: '/report' })
+      }
+
+      // 4. Wait for React to render (give i18n + store a moment)
+      await new Promise<void>(resolve => setTimeout(resolve, 800))
+
+      // 5. Print to PDF
+      const pdfBuffer = await printWin.webContents.printToPDF({
+        pageSize: 'A4',
+        printBackground: true,
+        marginsType: 0,
+      })
+
+      // 6. Write with fd+fsync for durability
+      const fd = fs.openSync(filePath, 'w')
+      try {
+        fs.writeSync(fd, pdfBuffer)
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
+
+      return { saved: true, path: filePath }
+    } finally {
+      printWin.destroy()
     }
   })
 }

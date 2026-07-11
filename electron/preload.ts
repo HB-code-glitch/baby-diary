@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { DiaryEvent, AppSettings, DataInfo, ExportFormat } from '../shared/types'
+import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult } from '../shared/types'
 
 const babyDiaryAPI = {
   listEvents: (): Promise<DiaryEvent[]> =>
@@ -54,6 +54,9 @@ const babyDiaryAPI = {
   openUpdateDownload: (): void => {
     ipcRenderer.send('update:openDownload')
   },
+
+  savePdf: (): Promise<SavePdfResult> =>
+    ipcRenderer.invoke('report:savePdf'),
 }
 
 contextBridge.exposeInMainWorld('babyDiary', babyDiaryAPI)

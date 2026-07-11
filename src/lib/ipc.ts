@@ -1,4 +1,4 @@
-import { DiaryEvent, AppSettings, DataInfo, ExportFormat } from '../../shared/types'
+import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -16,6 +16,7 @@ declare global {
       onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void) => () => void
       installUpdate: () => void
       openUpdateDownload: () => void
+      savePdf: () => Promise<SavePdfResult>
     }
   }
 }
@@ -136,6 +137,10 @@ const mockBabyDiary: Window['babyDiary'] = {
   onUpdateAvailable: (_callback: (payload: { version: string; url: string }) => void) => () => {},
   installUpdate: () => {},
   openUpdateDownload: () => {},
+
+  savePdf: async (): Promise<SavePdfResult> => {
+    throw new Error('ELECTRON_ONLY')
+  },
 }
 
 // ────────────────────────────────────────────────────────────
@@ -177,4 +182,5 @@ export const ipc = {
     getApi().onUpdateAvailable(callback),
   installUpdate:       (): void => getApi().installUpdate(),
   openUpdateDownload:  (): void => getApi().openUpdateDownload(),
+  savePdf: (): Promise<SavePdfResult> => getApi().savePdf(),
 }
