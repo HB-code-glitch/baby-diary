@@ -28,9 +28,8 @@ export function FeedingTipPopup({
   onNavigate,
   onDismiss,
 }: FeedingTipPopupProps): React.JSX.Element | null {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lang = i18n.language
 
   useEffect(() => {
     timerRef.current = setTimeout(onDismiss, AUTO_DISMISS_MS)
@@ -114,10 +113,11 @@ export function FeedingTipPopup({
         </div>
       )}
 
+      {/* P31: aria-label from i18n key instead of hardcoded bilingual string */}
       <button
         className="feeding-tip-footer"
         onClick={() => onNavigate?.('settings')}
-        aria-label={lang === 'ja' ? '育児ガイドを確認する' : '육아 가이드 보기'}
+        aria-label={t('feedingTip.footerAriaLabel')}
       >
         {t('feedingTip.footerSource', { sourceLabel })}
         <span className="feeding-tip-footer-note"> · {t('feedingTip.footerDisclaimer')}</span>

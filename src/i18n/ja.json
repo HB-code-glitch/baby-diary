@@ -320,8 +320,8 @@
     "breastLastSide": "前回{{side}}側 → 今回は反対側がおすすめ",
     "footerSource": "参考: 育児ガイド · {{sourceLabel}}",
     "footerDisclaimer": "数値は目標ではなく参考範囲です",
-    "dismiss": "閉じる",
-    "noBirthdate": null
+    "footerAriaLabel": "育児ガイドを確認する",
+    "dismiss": "閉じる"
   },
   "tour": {
     "next": "次へ",

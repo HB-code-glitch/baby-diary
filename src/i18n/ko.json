@@ -320,8 +320,8 @@
     "breastLastSide": "지난번 {{side}}쪽 → 이번엔 반대쪽 추천",
     "footerSource": "참고: 육아 가이드 · {{sourceLabel}}",
     "footerDisclaimer": "수치는 목표가 아닌 참고 범위예요",
-    "dismiss": "닫기",
-    "noBirthdate": null
+    "footerAriaLabel": "육아 가이드 보기",
+    "dismiss": "닫기"
   },
   "tour": {
     "next": "다음",
