@@ -119,9 +119,11 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
     if (isBefore(candidate, birth)) {
       candidate = setDate(setMonth(setYear(birth, getYear(birth) + 1), festivalMonth), festivalDay)
     }
-    // if candidate is within 30 days of birth (i.e. days difference < 30), push to next year
+    // P35: if candidate is within 30 days of birth (inclusive: <= 30), push to next year.
+    // Japanese practice postpones 初節句 when the baby is not yet 30 days old at the
+    // festival date. Changed from < 30 to <= 30 to match "within 30 days" semantics.
     const diffDays = Math.floor((candidate.getTime() - birth.getTime()) / (1000 * 60 * 60 * 24))
-    if (diffDays < 30) {
+    if (diffDays <= 30) {
       candidate = setDate(setMonth(setYear(candidate, getYear(candidate) + 1), festivalMonth), festivalDay)
     }
 

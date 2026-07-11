@@ -256,7 +256,7 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
       <div className="cal-week-rows">
         {days.map(day => {
           const indicators = allEvents.filter(e => !e.deleted && isSameDay(parseISO(e.at), day))
-          const dday = birthdate ? getDDay(birthdate) - getDDay(format(day, 'yyyy-MM-dd')) + getDDay(birthdate) : null
+          // P36: Removed dead `dday` variable (added getDDay twice, was never rendered)
           // compute D+N for this specific day
           let ddayForDay: number | null = null
           if (birthdate) {
