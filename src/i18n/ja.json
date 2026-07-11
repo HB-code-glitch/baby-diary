@@ -297,5 +297,33 @@
     "guideCollapse": "閉じる",
     "evidenceConsensus": "ガイドライン",
     "sourcePrefix": "出典: "
+  },
+  "feedingTip": {
+    "formulaWithMax": "今日の合計 {{total}}ml — 1日の上限 {{max}}mlまで残り{{remaining}}ml",
+    "formulaReachedMax": "今日 {{total}}ml — 参考上限 {{max}}mlに達しました。もっと飲みたがる場合は小児科にご相談ください",
+    "formulaNoMax": "今日 {{total}}ml · {{count}}回 — この時期の参考: 1回 {{perMin}}~{{perMax}}ml、1日 {{dayMin}}~{{dayMax}}回",
+    "formulaNoMaxNoBand": "今日ミルク {{total}}ml · {{count}}回",
+    "breastCount": "今日の授乳 {{count}}回目です",
+    "breastLastSide": "前回{{side}}側 → 今回は反対側がおすすめ",
+    "footerSource": "参考: 育児ガイド · {{sourceLabel}}",
+    "footerDisclaimer": "数値は目標ではなく参考範囲です",
+    "dismiss": "閉じる",
+    "noBirthdate": null
+  },
+  "feverModal": {
+    "emergencyTitle": "今すぐ病院へ行ってください",
+    "dangerTitle": "高熱です — すぐに受診することをおすすめします",
+    "warningTitle": "熱があります",
+    "cautionToast": "微熱です — 様子を見てあげてください",
+    "unknownAgeNote": "誕生日を設定すると月齢別の基準でご案内します",
+    "redFlagsTitle": "緊急サイン（一つでも見られたらすぐ救急へ）",
+    "redFlagCollapse": "危険サインを閉じる",
+    "redFlagExpand": "危険サインを見る",
+    "careStepsTitle": "今できること",
+    "antipyreticNote": "解熱剤: イブプロフェンは6か月未満に禁止、2歳未満は医師の指示なしに使用不可",
+    "durationNote": "2歳未満の赤ちゃんで発熱が24時間以上続く場合は小児科に連絡してください",
+    "confirm": "確認しました",
+    "sourceLabel": "AAP·HealthyChildren",
+    "disclaimer": "この情報は一般的な参考情報です。心配な場合はいつでも小児科にご相談ください。"
   }
 }

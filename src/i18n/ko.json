@@ -297,5 +297,33 @@
     "guideCollapse": "접기",
     "evidenceConsensus": "가이드라인",
     "sourcePrefix": "출처: "
+  },
+  "feedingTip": {
+    "formulaWithMax": "오늘 총 {{total}}ml — 하루 상한 {{max}}ml까지 {{remaining}}ml 남았어요",
+    "formulaReachedMax": "오늘 {{total}}ml — 참고 상한 {{max}}ml에 도달했어요. 더 원하면 소아과와 상담해보세요",
+    "formulaNoMax": "오늘 {{total}}ml · {{count}}회 — 이 시기 참고: 1회 {{perMin}}~{{perMax}}ml, 하루 {{dayMin}}~{{dayMax}}회",
+    "formulaNoMaxNoBand": "오늘 분유 {{total}}ml · {{count}}회",
+    "breastCount": "오늘 수유 {{count}}회째예요",
+    "breastLastSide": "지난번 {{side}}쪽 → 이번엔 반대쪽 추천",
+    "footerSource": "참고: 육아 가이드 · {{sourceLabel}}",
+    "footerDisclaimer": "수치는 목표가 아닌 참고 범위예요",
+    "dismiss": "닫기",
+    "noBirthdate": null
+  },
+  "feverModal": {
+    "emergencyTitle": "지금 바로 병원에 가야 해요",
+    "dangerTitle": "고열이에요 — 빨리 진료받는 게 좋아요",
+    "warningTitle": "열이 있어요",
+    "cautionToast": "미열이에요 — 컨디션을 지켜봐 주세요",
+    "unknownAgeNote": "생일을 설정하면 월령별 기준으로 안내해드려요",
+    "redFlagsTitle": "응급 위험 신호 (하나라도 보이면 즉시 응급실)",
+    "redFlagCollapse": "위험 신호 접기",
+    "redFlagExpand": "위험 신호 보기",
+    "careStepsTitle": "지금 할 수 있는 것",
+    "antipyreticNote": "해열제: 이부프로펜 6개월 미만 금지, 2세 미만 의사 지시 없이 사용 금지",
+    "durationNote": "발열이 2세 미만 아기에서 24시간 이상 지속되면 소아과에 연락해요",
+    "confirm": "확인했어요",
+    "sourceLabel": "AAP·HealthyChildren",
+    "disclaimer": "이 정보는 일반 참고용이에요. 걱정되면 언제든 소아과와 상담하세요."
   }
 }
