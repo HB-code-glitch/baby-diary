@@ -28,6 +28,32 @@ const babyDiaryAPI = {
     ipcRenderer.on('event:appended', handler)
     return () => ipcRenderer.removeListener('event:appended', handler)
   },
+
+  // ── Auto-update ────────────────────────────────────────────────────────────
+
+  /** Windows: called when installer is downloaded and ready to apply. */
+  onUpdateReady: (callback: (payload: { version: string }) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: { version: string }) => callback(payload)
+    ipcRenderer.on('update:ready', handler)
+    return () => ipcRenderer.removeListener('update:ready', handler)
+  },
+
+  /** macOS: called when a new version is available on GitHub Releases. */
+  onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: { version: string; url: string }) => callback(payload)
+    ipcRenderer.on('update:available', handler)
+    return () => ipcRenderer.removeListener('update:available', handler)
+  },
+
+  /** Windows: quit and apply the downloaded update. */
+  installUpdate: (): void => {
+    ipcRenderer.send('update:install')
+  },
+
+  /** macOS: open the GitHub Releases page in the default browser. */
+  openUpdateDownload: (): void => {
+    ipcRenderer.send('update:openDownload')
+  },
 }
 
 contextBridge.exposeInMainWorld('babyDiary', babyDiaryAPI)

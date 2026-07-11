@@ -11,6 +11,11 @@ declare global {
       openBackupFolder: () => Promise<void>
       getDataInfo: () => Promise<DataInfo>
       onEventAppended: (callback: (event: DiaryEvent) => void) => () => void
+      // Auto-update
+      onUpdateReady: (callback: (payload: { version: string }) => void) => () => void
+      onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void) => () => void
+      installUpdate: () => void
+      openUpdateDownload: () => void
     }
   }
 }
@@ -125,6 +130,12 @@ const mockBabyDiary: Window['babyDiary'] = {
       if (idx >= 0) _mockListeners.splice(idx, 1)
     }
   },
+
+  // Auto-update — no-ops in browser/mock mode
+  onUpdateReady: (_callback: (payload: { version: string }) => void) => () => {},
+  onUpdateAvailable: (_callback: (payload: { version: string; url: string }) => void) => () => {},
+  installUpdate: () => {},
+  openUpdateDownload: () => {},
 }
 
 // ────────────────────────────────────────────────────────────
@@ -159,4 +170,11 @@ export const ipc = {
   getDataInfo:      (): Promise<DataInfo>        => getApi().getDataInfo(),
   onEventAppended:  (callback: (event: DiaryEvent) => void): (() => void) =>
     getApi().onEventAppended(callback),
+  // Auto-update
+  onUpdateReady: (callback: (payload: { version: string }) => void): (() => void) =>
+    getApi().onUpdateReady(callback),
+  onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void): (() => void) =>
+    getApi().onUpdateAvailable(callback),
+  installUpdate:       (): void => getApi().installUpdate(),
+  openUpdateDownload:  (): void => getApi().openUpdateDownload(),
 }

@@ -5,6 +5,7 @@ import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
 import { DiaryEvent, AppSettings, ExportFormat } from '../shared/types'
+import { setupUpdater } from './updater'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 
@@ -186,6 +187,7 @@ app.whenReady().then(() => {
   eventLog.loadAll()
 
   setupIPC()
+  setupUpdater()
   createWindow()
   backupManager.start()
 

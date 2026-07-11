@@ -347,6 +347,13 @@
     "step10Title": "기록은 안전하게 지켜져요",
     "step10Body": "모든 기록은 자동으로 저장되고 두 곳에 백업돼요.\n위험한 체온을 기록하면 빨간 경고로 바로 알려드려요.\n이제 첫 기록을 남겨볼까요?"
   },
+  "update": {
+    "readyMessage": "새 버전 {{v}} 준비 완료 — 재시작하면 적용돼요",
+    "availableMessage": "새 버전 {{v}}이 나왔어요",
+    "installBtn": "지금 재시작",
+    "downloadBtn": "다운로드",
+    "laterBtn": "나중에"
+  },
   "feverModal": {
     "emergencyTitle": "지금 바로 병원에 가야 해요",
     "dangerTitle": "고열이에요 — 빨리 진료받는 게 좋아요",

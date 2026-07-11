@@ -15,6 +15,7 @@
     "@fontsource/plus-jakarta-sans": "^5.2.8",
     "@fontsource/zen-maru-gothic": "^5.2.8",
     "date-fns": "^3.6.0",
+    "electron-updater": "^6.8.9",
     "firebase": "^10.12.2",
     "i18next": "^26.3.6",
     "lucide-react": "^0.396.0",
@@ -94,6 +95,13 @@
     },
     "nsis": {
       "shortcutName": "베이비 다이어리"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "HB-code-glitch",
+        "repo": "baby-diary-releases"
+      }
+    ]
   }
 }

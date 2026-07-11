@@ -6,6 +6,7 @@ import { useSyncLifecycle } from './sync/useSync'
 import { setLanguage, initLangAttr } from './i18n'
 import i18n from './i18n'
 import { TutorialTour, isTutorialDone } from './components/TutorialTour'
+import { UpdateBanner } from './components/UpdateBanner'
 
 import { HomePage }     from './pages/HomePage'
 import { HistoryPage }  from './pages/HistoryPage'
@@ -151,6 +152,7 @@ export default function App() {
     <ToastProvider>
       <GlobalErrorBoundary />
       <AppInner />
+      <UpdateBanner />
     </ToastProvider>
   )
 }
