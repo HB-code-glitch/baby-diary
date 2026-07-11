@@ -11,6 +11,7 @@ import { LanguagePicker, isLangChosen, markLangChosen } from './components/Langu
 import { UpdateBanner } from './components/UpdateBanner'
 import { useMidnightRefresh } from './lib/useMidnightRefresh'
 import { PageSkeleton } from './components/PageSkeleton'
+import { ReportView } from './report/ReportView'
 
 // HomePage is the landing view — always eager so first paint has no async gap.
 import { HomePage } from './pages/HomePage'
@@ -199,6 +200,16 @@ function AppInner() {
 }
 
 export default function App() {
+  // Hidden print window: when the app is loaded at #/report, render only
+  // the print-optimized ReportView with no navigation chrome.
+  if (typeof window !== 'undefined' && window.location.hash === '#/report') {
+    return (
+      <ToastProvider>
+        <ReportView />
+      </ToastProvider>
+    )
+  }
+
   return (
     <ToastProvider>
       <GlobalErrorBoundary />
