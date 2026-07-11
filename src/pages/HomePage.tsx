@@ -37,15 +37,19 @@ function InsightsPanel({
     return () => clearInterval(id)
   }, [])
 
-  // Last feeding elapsed
+  // Last feeding: clock time as main value, elapsed as muted suffix
+  let lastFeedingTime: string | null = null
+  let lastFeedingAgo: string | null = null
   let lastFeedingLabel = t('home.noFeedingYet')
   if (lastFeeding) {
-    const mins = differenceInMinutes(new Date(), parseISO(lastFeeding.at))
+    lastFeedingTime = format(parseISO(lastFeeding.at), 'HH:mm')
+    const mins = Math.max(0, differenceInMinutes(new Date(), parseISO(lastFeeding.at)))
     const hours = Math.floor(mins / 60)
     const m = mins % 60
-    lastFeedingLabel = hours > 0
-      ? t('home.durationHoursMins', { hours, mins: m })
-      : t('home.durationMins', { mins: m })
+    lastFeedingAgo = hours > 0
+      ? t('home.hoursMinutesAgo', { hours, mins: m })
+      : t('home.minutesAgo', { mins: m })
+    lastFeedingLabel = lastFeedingTime
   }
 
   // Next recommended side
@@ -78,24 +82,28 @@ function InsightsPanel({
       bg: 'var(--blush)',
       label: t('home.lastFeedingLabel'),
       value: lastFeedingLabel,
+      ago: lastFeedingAgo,
     },
     {
       icon: '🤱',
       bg: 'var(--sky)',
       label: t('home.nextBreastLabel'),
       value: nextSideLabel,
+      ago: null,
     },
     {
       icon: '💧',
       bg: 'var(--mint)',
       label: t('home.todayDiaperLabel'),
       value: `${t('quickBtn.pee')} ${todayPeeCount} / ${t('quickBtn.poop')} ${todayPoopCount}`,
+      ago: null,
     },
     {
       icon: '🌡',
       bg: 'var(--butter)',
       label: t('home.recentTempLabel'),
       value: tempLabel,
+      ago: null,
     },
   ]
 
@@ -113,7 +121,14 @@ function InsightsPanel({
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="insight-label">{row.label}</div>
-            <div className="insight-value">{row.value}</div>
+            <div className="insight-value">
+              {row.value}
+              {row.ago && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 5 }}>
+                  ({row.ago})
+                </span>
+              )}
+            </div>
           </div>
         </div>
       ))}

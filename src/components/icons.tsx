@@ -42,8 +42,7 @@ export function IconThermometer({ size = defaults.size, color = 'currentColor', 
 export function IconHeart({ size = defaults.size, color = 'currentColor', strokeWidth = defaults.strokeWidth, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
-      <path d="M12 20C12 20 4 14.5 4 9C4 6.239 6.239 4 9 4C10.476 4 11.803 4.65 12.727 5.682C12.882 5.855 13.118 5.855 13.273 5.682C14.197 4.65 15.524 4 17 4C19.761 4 22 6.239 22 9" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"/>
-      <path d="M12 20C12 20 20 14.5 20 9" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round"/>
+      <path d="M12 20.5C7 16 3.5 12.8 3.5 9.2C3.5 6.6 5.5 4.8 7.8 4.8C9.5 4.8 11 5.7 12 7.2C13 5.7 14.5 4.8 16.2 4.8C18.5 4.8 20.5 6.6 20.5 9.2C20.5 12.8 17 16 12 20.5Z" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   )
 }
