@@ -4,7 +4,7 @@ import {
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, configure, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
-import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND } from '../sync/syncEngine'
+import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN } from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
@@ -230,6 +230,14 @@ function NoFamilyView() {
   const name = settings?.profile?.name || ''
   const role = settings?.profile?.role ?? 'mom'
 
+  /** Map engine error messages to user-friendly localized strings. */
+  const mapSyncError = (e: unknown): string => {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg === ERR_NOT_SIGNED_IN) return t('sync.errorNotSignedIn')
+    if (msg === DETAIL_FAMILY_NOT_FOUND) return t('sync.errorFamilyNotFound')
+    return msg
+  }
+
   const handleCreate = async () => {
     setBusy(true)
     setError(null)
@@ -249,7 +257,7 @@ function NoFamilyView() {
       }
       await saveSettings(updated)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(mapSyncError(e))
     } finally {
       setBusy(false)
     }
@@ -270,8 +278,7 @@ function NoFamilyView() {
       }
       await saveSettings(updated)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg === DETAIL_FAMILY_NOT_FOUND ? t('sync.errorFamilyNotFound') : msg)
+      setError(mapSyncError(e))
     } finally {
       setBusy(false)
     }

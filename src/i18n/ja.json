@@ -258,6 +258,7 @@
     "cancel": "キャンセル",
     "errorInviteCodeLength": "6桁の招待コードを入力してください。",
     "errorFamilyNotFound": "家族が見つかりません。",
+    "errorNotSignedIn": "ログインが切れています — もう一度ログインしてください。",
     "copy": "コピー",
     "copied": "コピー済み",
     "inviteCodeLabel": "招待コード",

@@ -35,6 +35,7 @@ import {
   fbSignIn,
   fbSignUp,
   fbSignOut,
+  getFirebaseAuth,
   FirebaseConfig,
 } from './firebase'
 
@@ -268,11 +269,16 @@ export async function createFamily(
   babyInfo: { babyName: string; babyBirthdate: string; familyName?: string },
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
 ): Promise<{ familyId: string; inviteCode: string }> {
-  if (!_db || !_currentUser) throw new Error(ERR_NOT_SIGNED_IN)
+  // Fallback: if _currentUser was not yet set by onAuthStateChanged (e.g. race on
+  // session restore before the callback fires), grab it directly from the Auth instance.
+  const effectiveUser = _currentUser ?? getFirebaseAuth()?.currentUser ?? null
+  if (!_db || !effectiveUser) throw new Error(ERR_NOT_SIGNED_IN)
+  // Keep _currentUser in sync so subsequent calls don't hit the same race.
+  if (!_currentUser) _currentUser = effectiveUser
 
   // Always use the authenticated user's uid, never the (possibly empty) caller-supplied uid.
-  const authUid = _currentUser.uid
-  const memberName = profile.name || _currentUser.email?.split('@')[0] || 'user'
+  const authUid = effectiveUser.uid
+  const memberName = profile.name || effectiveUser.email?.split('@')[0] || 'user'
   const memberRole = profile.role ?? 'mom'
 
   const inviteCode = generateInviteCode()
@@ -313,11 +319,16 @@ export async function joinFamily(
   inviteCode: string,
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
 ): Promise<string> {
-  if (!_db || !_currentUser) throw new Error(ERR_NOT_SIGNED_IN)
+  // Fallback: if _currentUser was not yet set by onAuthStateChanged (e.g. race on
+  // session restore before the callback fires), grab it directly from the Auth instance.
+  const effectiveUser = _currentUser ?? getFirebaseAuth()?.currentUser ?? null
+  if (!_db || !effectiveUser) throw new Error(ERR_NOT_SIGNED_IN)
+  // Keep _currentUser in sync so subsequent calls don't hit the same race.
+  if (!_currentUser) _currentUser = effectiveUser
 
   // Always use the authenticated user's uid, never the (possibly empty) caller-supplied uid.
-  const authUid = _currentUser.uid
-  const memberName = profile.name || _currentUser.email?.split('@')[0] || 'user'
+  const authUid = effectiveUser.uid
+  const memberName = profile.name || effectiveUser.email?.split('@')[0] || 'user'
   const memberRole = profile.role ?? 'mom'
 
   // F-RULES: direct get() on invites/{code} — no list needed

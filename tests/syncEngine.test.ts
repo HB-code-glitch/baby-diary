@@ -538,3 +538,60 @@ describe('createFamily/joinFamily uid 결정 로직', () => {
     expect(resolveMemberName('', undefined)).toBe('user')
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// 11. Session-restore race: _currentUser null fallback logic
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Simulates the effectiveUser fallback used in createFamily/joinFamily.
+ * When _currentUser is null (e.g. onAuthStateChanged hasn't fired yet on
+ * session restore), the engine falls back to getFirebaseAuth()?.currentUser.
+ */
+function resolveEffectiveUser(
+  currentUser: { uid: string; email: string } | null,
+  authCurrentUser: { uid: string; email: string } | null
+): { uid: string; email: string } | null {
+  return currentUser ?? authCurrentUser ?? null
+}
+
+describe('Session-restore race: effectiveUser 폴백 로직', () => {
+  it('_currentUser가 설정되어 있으면 그것을 사용', () => {
+    const user = { uid: 'uid-from-state', email: 'a@b.com' }
+    const authUser = { uid: 'uid-from-auth', email: 'a@b.com' }
+    const effective = resolveEffectiveUser(user, authUser)
+    expect(effective?.uid).toBe('uid-from-state')
+  })
+
+  it('_currentUser가 null이면 getFirebaseAuth()?.currentUser로 폴백', () => {
+    const authUser = { uid: 'uid-from-auth', email: 'user@example.com' }
+    const effective = resolveEffectiveUser(null, authUser)
+    expect(effective).not.toBeNull()
+    expect(effective?.uid).toBe('uid-from-auth')
+  })
+
+  it('둘 다 null이면 null 반환 → ERR_NOT_SIGNED_IN 발생', () => {
+    const effective = resolveEffectiveUser(null, null)
+    expect(effective).toBeNull()
+    // null이면 guard가 throw해야 함
+    const wouldThrow = !effective
+    expect(wouldThrow).toBe(true)
+  })
+
+  it('_currentUser null 상태에서 폴백 후 _currentUser 업데이트', () => {
+    // Simulate: _currentUser starts null, gets backfilled from auth.currentUser
+    let _currentUser: { uid: string } | null = null
+    const authUser = { uid: 'restored-uid' }
+    const effective = resolveEffectiveUser(_currentUser, authUser)
+    // After the fallback, _currentUser would be set to effectiveUser
+    if (!_currentUser && effective) _currentUser = effective
+    expect(_currentUser?.uid).toBe('restored-uid')
+  })
+
+  it('authUid는 절대로 빈 문자열이 아니어야 함', () => {
+    const authUser = { uid: 'real-firebase-uid', email: 'x@y.com' }
+    const effective = resolveEffectiveUser(null, authUser)
+    expect(effective?.uid).not.toBe('')
+    expect(effective?.uid.length).toBeGreaterThan(0)
+  })
+})
