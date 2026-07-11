@@ -25,3 +25,25 @@ jobs:
             release/*.dmg
             release/*.zip
           if-no-files-found: error
+
+  e2e-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      # renderer + main only (no DMG/installer needed for E2E)
+      - run: npm run build
+      # playwright electron support is built-in — no browser download required
+      - run: node scripts/mac-e2e.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-e2e-screenshots
+          path: |
+            screenshots/
+            e2e-result.json
+          if-no-files-found: warn

@@ -36,6 +36,7 @@
     "concurrently": "^8.2.2",
     "electron": "^31.1.0",
     "electron-builder": "^24.13.3",
+    "playwright": "^1.61.1",
     "png-to-ico": "^3.0.2",
     "postcss": "^8.4.39",
     "sharp": "^0.35.3",

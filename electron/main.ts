@@ -8,9 +8,14 @@ import { DiaryEvent, AppSettings, ExportFormat } from '../shared/types'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 
-// 데이터 경로 영구 고정: 앱 이름/버전이 바뀌어도 기존 기록(%APPDATA%\baby-diary)을 계속 사용한다.
-// 이 줄을 바꾸면 부모가 쌓아온 기록 폴더와 연결이 끊긴다 — 절대 수정 금지.
-app.setPath('userData', path.join(app.getPath('appData'), 'baby-diary'))
+// E2E 전용: 환경변수가 설정된 경우 임시 디렉토리를 userData로 사용한다 (실 데이터 오염 방지).
+if (process.env.BABYDIARY_TEST_USERDATA) {
+  app.setPath('userData', process.env.BABYDIARY_TEST_USERDATA)
+} else {
+  // 데이터 경로 영구 고정: 앱 이름/버전이 바뀌어도 기존 기록(%APPDATA%\baby-diary)을 계속 사용한다.
+  // 이 줄을 바꾸면 부모가 쌓아온 기록 폴더와 연결이 끊긴다 — 절대 수정 금지.
+  app.setPath('userData', path.join(app.getPath('appData'), 'baby-diary'))
+}
 
 // F3: Prevent concurrent instances from writing to the same JSONL files simultaneously.
 // requestSingleInstanceLock() is synchronous and must be called before app is ready.
