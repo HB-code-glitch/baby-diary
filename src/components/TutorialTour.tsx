@@ -151,11 +151,59 @@ const STEPS: TourStep[] = [
 ]
 
 // ---------------------------------------------------------------------------
+// TourBody — renders body text with per-line bullet dots for multi-line strings
+// ---------------------------------------------------------------------------
+
+function TourBody({ text }: { text: string }) {
+  const lines = text.split('\n')
+  const isMulti = lines.length > 1
+
+  if (!isMulti) {
+    return (
+      <div className="tour-body" style={{ fontSize: 13.5, lineHeight: 1.55 }}>
+        {text}
+      </div>
+    )
+  }
+
+  return (
+    <div className="tour-body" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {lines.map((line, i) => (
+        <div
+          key={i}
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 7,
+            fontSize: 13.5,
+            lineHeight: 1.55,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              marginTop: '0.3em',
+              width: 5,
+              height: 5,
+              borderRadius: '50%',
+              background: 'var(--color-accent, #f4b95e)',
+              display: 'inline-block',
+            }}
+          />
+          <span>{line}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------------
 
 const PADDING = 6       // spotlight padding around target
-const TOOLTIP_W = 300   // tooltip card width
+const TOOLTIP_W = 400   // tooltip card width
 const TOOLTIP_H = 180   // estimated tooltip height
 const EDGE_GAP = 12     // minimum gap from viewport edge
 
@@ -511,6 +559,7 @@ export function TutorialTour({ onNavigate, onDone }: TutorialTourProps) {
             position: 'fixed',
             zIndex: 1302,
             width: TOOLTIP_W,
+            maxWidth: `calc(100vw - ${EDGE_GAP * 2}px)`,
             ...tooltipPos,
           }}
           role="dialog"
@@ -526,7 +575,7 @@ export function TutorialTour({ onNavigate, onDone }: TutorialTourProps) {
           <div className="tour-title">{t(step.titleKey)}</div>
 
           {/* Body */}
-          <div className="tour-body">{t(step.bodyKey)}</div>
+          <TourBody text={t(step.bodyKey)} />
 
           {/* Next / Finish button */}
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
