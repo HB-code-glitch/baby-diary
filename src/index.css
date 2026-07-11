@@ -165,6 +165,20 @@
   --amber-shadow: rgba(217,146,10,0.14);
   --rose-shadow: rgba(212,64,96,0.14);
 
+  /* ── Lavender/Indigo palette (sleep + growth icons, chart fills) ── */
+  --lavender-100: #ede9f8;
+  --lavender-200: #d8d1f4;
+  --lavender-300: #b9aeed;
+  --lavender-500: #7c66d4;
+  --lavender-600: #5c44b8;
+  --indigo-100:  #e6eaf8;
+  --indigo-200:  #ccd3f4;
+  --indigo-300:  #a5b1ec;
+  --indigo-500:  #4a60d4;
+  --indigo-600:  #3047b0;
+  --lavender-shadow: rgba(124,102,212,0.14);
+  --indigo-shadow:   rgba(74,96,212,0.14);
+
   /* ── Sidebar ── */
   --sidebar-width: 216px;
 }
@@ -2014,6 +2028,59 @@ body {
 }
 
 /* ══════════════════════════════════════════
+   FLOATING SLEEP TIMER PILL
+   ══════════════════════════════════════════ */
+.floating-sleep-pill {
+  position: fixed;
+  bottom: calc(52px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--lavender-100);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--lavender-200);
+  border-radius: 999px;
+  padding: 8px 16px 8px 14px;
+  box-shadow: 0 4px 16px var(--lavender-shadow), var(--glass-inset-light);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--lavender-600);
+  z-index: 1200;
+  animation: glassAppear var(--dur-spring) var(--spring-snappy);
+  white-space: nowrap;
+}
+.floating-sleep-time {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+.floating-sleep-stop {
+  background: var(--lavender-500);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--dur-snap) var(--spring-snappy);
+  font-family: 'Plus Jakarta Sans', 'Pretendard', sans-serif;
+}
+.floating-sleep-stop:hover { background: var(--lavender-600); }
+@media (prefers-reduced-motion: reduce) {
+  .floating-sleep-pill { animation: none; }
+}
+
+/* 6-button quick row: shrink slots at narrow widths */
+@media (max-width: 1100px) {
+  .quick-record-slot { flex: 1 1 0; min-width: 0; }
+  .quick-btn-circle { padding: 6px 4px; }
+  .quick-btn-circle-label { font-size: 10px; }
+}
+
+/* ══════════════════════════════════════════
    ROLE BUTTON (popover side selector)
    ══════════════════════════════════════════ */
 .role-btn {
@@ -2337,9 +2404,11 @@ body {
   border-radius: 99px;
 }
 
-.cal-chip-sage  { background: var(--sage-100);  color: var(--sage-600); }
-.cal-chip-peach { background: var(--peach-100); color: var(--peach-600); }
-.cal-chip-red   { background: var(--blush);     color: var(--blush-text); }
+.cal-chip-sage    { background: var(--sage-100);     color: var(--sage-600); }
+.cal-chip-peach   { background: var(--peach-100);   color: var(--peach-600); }
+.cal-chip-red     { background: var(--blush);        color: var(--blush-text); }
+.cal-chip-sleep   { background: var(--lavender-100); color: var(--lavender-600); }
+.cal-chip-growth  { background: var(--indigo-100);   color: var(--indigo-600); }
 
 .cal-week-times { font-size: 11px; color: var(--text-muted); white-space: nowrap; text-align: right; }
 
@@ -2623,6 +2692,20 @@ body {
   --peach-shadow: rgba(217,180,90,0.08);
   --amber-shadow: rgba(217,180,90,0.08);
   --rose-shadow:  rgba(224,123,123,0.08);
+
+  /* ── Lavender/Indigo palette — dark tinted ── */
+  --lavender-100: #2a2445;
+  --lavender-200: #3d3560;
+  --lavender-300: #5a4f8a;
+  --lavender-500: #9b87e8;
+  --lavender-600: #b8a8f0;
+  --indigo-100:  #1e2444;
+  --indigo-200:  #2e3860;
+  --indigo-300:  #4a5a8a;
+  --indigo-500:  #7a90e8;
+  --indigo-600:  #a0b0f0;
+  --lavender-shadow: rgba(155,135,232,0.12);
+  --indigo-shadow:   rgba(122,144,232,0.12);
 }
 
 /* Dark mode corner radials — very subtle cool glows */
