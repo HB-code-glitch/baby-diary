@@ -91,6 +91,9 @@ export const DETAIL_FAMILY_NEEDED = 'FAMILY_NEEDED'
 /** Thrown when the families/{familyId} doc is missing during joinFamily. */
 export const DETAIL_FAMILY_NOT_FOUND = 'FAMILY_NOT_FOUND'
 
+/** Thrown when createFamily/joinFamily is called while not signed in. */
+export const ERR_NOT_SIGNED_IN = 'NOT_SIGNED_IN'
+
 // ────────────────────────────────────────────────────────────
 // 내부 상태
 // ────────────────────────────────────────────────────────────
@@ -265,18 +268,23 @@ export async function createFamily(
   babyInfo: { babyName: string; babyBirthdate: string; familyName?: string },
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
 ): Promise<{ familyId: string; inviteCode: string }> {
-  if (!_db || !_currentUser) throw new Error('must be signed in to create family')
+  if (!_db || !_currentUser) throw new Error(ERR_NOT_SIGNED_IN)
+
+  // Always use the authenticated user's uid, never the (possibly empty) caller-supplied uid.
+  const authUid = _currentUser.uid
+  const memberName = profile.name || _currentUser.email?.split('@')[0] || 'user'
+  const memberRole = profile.role ?? 'mom'
 
   const inviteCode = generateInviteCode()
   const familyRef = doc(collection(_db, 'families'))
   const inviteRef = doc(_db, 'invites', inviteCode)
 
   const familyDocData: FamilyDoc = {
-    name: babyInfo.familyName ?? `${profile.name}'s family`,
+    name: babyInfo.familyName ?? `${memberName}'s family`,
     babyName: babyInfo.babyName,
     babyBirthdate: babyInfo.babyBirthdate,
     members: {
-      [profile.uid]: { name: profile.name, role: profile.role },
+      [authUid]: { name: memberName, role: memberRole },
     },
     inviteCode,
     createdAt: serverTimestamp(),
@@ -305,7 +313,12 @@ export async function joinFamily(
   inviteCode: string,
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
 ): Promise<string> {
-  if (!_db || !_currentUser) throw new Error('must be signed in to join family')
+  if (!_db || !_currentUser) throw new Error(ERR_NOT_SIGNED_IN)
+
+  // Always use the authenticated user's uid, never the (possibly empty) caller-supplied uid.
+  const authUid = _currentUser.uid
+  const memberName = profile.name || _currentUser.email?.split('@')[0] || 'user'
+  const memberRole = profile.role ?? 'mom'
 
   // F-RULES: direct get() on invites/{code} — no list needed
   const code = inviteCode.trim().toUpperCase()
@@ -324,14 +337,14 @@ export async function joinFamily(
   const data = familySnap.data() as FamilyDoc
 
   // 이미 멤버인 경우
-  if (data.members[profile.uid]) {
+  if (data.members[authUid]) {
     _familyId = familyId
     return familyId
   }
 
   // members 맵에 본인만 추가 (rules: diff must only affect members key)
   await setDoc(familyRef, {
-    members: { [profile.uid]: { name: profile.name, role: profile.role } }
+    members: { [authUid]: { name: memberName, role: memberRole } }
   }, { merge: true })
 
   _familyId = familyId

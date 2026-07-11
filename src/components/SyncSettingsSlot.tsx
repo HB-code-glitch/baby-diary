@@ -118,6 +118,7 @@ function SignedOutView() {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { settings, saveSettings } = useAppStore()
   const { t } = useTranslation()
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -125,10 +126,22 @@ function SignedOutView() {
     setError(null)
     setBusy(true)
     try {
-      if (mode === 'login') {
-        await signIn(email, password)
-      } else {
-        await signUp(email, password)
+      const user = mode === 'login'
+        ? await signIn(email, password)
+        : await signUp(email, password)
+
+      // Persist the real Firebase uid into settings.profile so that future
+      // events and family membership use the authoritative uid, not the
+      // locally-generated placeholder that may be empty on a fresh install.
+      if (user?.uid && settings?.profile?.uid !== user.uid) {
+        const updated: AppSettings = {
+          ...(settings ?? { baby: { name: '', birthdate: '' }, firebase: null, familyId: '' }),
+          profile: {
+            ...(settings?.profile ?? { name: '', role: 'mom' as const }),
+            uid: user.uid,
+          },
+        }
+        await saveSettings(updated).catch(() => { /* best-effort */ })
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

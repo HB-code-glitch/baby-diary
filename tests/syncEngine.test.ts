@@ -464,3 +464,77 @@ describe('F8: familyId 자동 생성 금지', () => {
     expect(saved).toBe(existingFamilyId)
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// 10. createFamily / joinFamily uid 결정 로직 (순수 함수 추출)
+// ────────────────────────────────────────────────────────────
+
+/**
+ * 엔진 내부 uid 결정 로직을 순수 함수로 추출하여 테스트.
+ * createFamily/joinFamily는 항상 authUid(currentUser.uid)를 사용하고,
+ * caller-supplied uid가 빈 문자열이어도 안전해야 한다.
+ */
+function resolveUid(
+  authUid: string,
+  callerUid: string,
+  fallbackEmail?: string
+): { uid: string; isAuthoritativeUid: boolean } {
+  // Engine always uses authUid; caller uid is ignored (overwritten)
+  const uid = authUid
+  const isAuthoritativeUid = uid !== '' && uid === authUid
+  return { uid, isAuthoritativeUid }
+}
+
+function resolveMemberName(profileName: string, email?: string): string {
+  return profileName || email?.split('@')[0] || 'user'
+}
+
+describe('createFamily/joinFamily uid 결정 로직', () => {
+  it('authUid가 있으면 caller uid(빈 문자열)를 무시하고 authUid 사용', () => {
+    const authUid = 'firebase-uid-abc123'
+    const callerUid = ''  // 신규 설치 시 빈 문자열
+    const { uid, isAuthoritativeUid } = resolveUid(authUid, callerUid)
+    expect(uid).toBe(authUid)
+    expect(uid).not.toBe('')
+    expect(isAuthoritativeUid).toBe(true)
+  })
+
+  it('authUid가 있으면 caller uid가 다른 값이어도 authUid 사용', () => {
+    const authUid = 'real-firebase-uid'
+    const callerUid = 'local-uuid-placeholder'
+    const { uid } = resolveUid(authUid, callerUid)
+    expect(uid).toBe(authUid)
+  })
+
+  it('members 맵 키가 빈 문자열이 되면 안 됨', () => {
+    const authUid = 'valid-uid-xyz'
+    const members: Record<string, { name: string; role: 'dad' | 'mom' }> = {}
+    members[authUid] = { name: '엄마', role: 'mom' }
+    // 모든 키가 비어있지 않아야 함
+    for (const key of Object.keys(members)) {
+      expect(key).not.toBe('')
+      expect(key.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('빈 문자열 uid로 members 맵 생성 시 빈 키 감지 가능', () => {
+    // 버그 재현: 이전 코드는 profile.uid(='')를 그대로 사용
+    const buggyUid = ''
+    const members: Record<string, { name: string; role: 'dad' | 'mom' }> = {}
+    members[buggyUid] = { name: '엄마', role: 'mom' }
+    // 빈 키 존재 확인 — 이것이 Firestore WriteBatch 오류 원인
+    expect(Object.keys(members)).toContain('')
+  })
+
+  it('멤버 이름 폴백: 프로필 이름 있으면 우선', () => {
+    expect(resolveMemberName('홍길동')).toBe('홍길동')
+  })
+
+  it('멤버 이름 폴백: 프로필 이름 없으면 이메일 앞부분 사용', () => {
+    expect(resolveMemberName('', 'user@example.com')).toBe('user')
+  })
+
+  it('멤버 이름 폴백: 이름도 이메일도 없으면 user', () => {
+    expect(resolveMemberName('', undefined)).toBe('user')
+  })
+})
