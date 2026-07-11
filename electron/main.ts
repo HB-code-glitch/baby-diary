@@ -198,15 +198,13 @@ app.whenReady().then(() => {
   })
 })
 
-// V3: best-effort backup on quit (covers Cmd+Q, system shutdown, etc.)
-app.on('before-quit', () => {
-  try {
-    backupManager.backup().catch(err =>
-      console.error('[Backup] before-quit backup failed:', err)
-    )
-  } catch (err) {
-    console.error('[Backup] before-quit backup error:', err)
-  }
+// P9 + V3: defer quit until backup() has fully settled so a crash mid-backup
+// cannot leave a corrupt or partial backup file as the newest copy.
+app.on('before-quit', (event) => {
+  event.preventDefault()
+  backupManager.backup()
+    .catch(err => console.error('[Backup] before-quit failed:', err))
+    .finally(() => app.exit(0))
 })
 
 app.on('window-all-closed', () => {

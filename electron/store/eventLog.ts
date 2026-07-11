@@ -92,8 +92,14 @@ export class EventLog {
         } else if (event.rev > existing.rev) {
           this.index.set(event.id, event)
         } else if (event.rev === existing.rev) {
-          if (new Date(event.updatedAt) > new Date(existing.updatedAt)) {
+          // P3 defense-in-depth (loadAll): at equal rev, tombstone wins over non-deleted
+          if (event.deleted && !existing.deleted) {
             this.index.set(event.id, event)
+          } else if (!event.deleted || existing.deleted) {
+            // neither is a new tombstone — fall back to updatedAt tie-break
+            if (new Date(event.updatedAt) > new Date(existing.updatedAt)) {
+              this.index.set(event.id, event)
+            }
           }
         }
       }
@@ -119,7 +125,9 @@ export class EventLog {
 
     const existing = this.index.get(event.id)
     if (existing && existing.rev === event.rev) {
-      return 'duplicate'
+      // P3: allow a tombstone (deleted:true) to propagate even at the same rev
+      // as a non-deleted local copy — the deletion must win and be written to disk.
+      if (!(event.deleted && !existing.deleted)) return 'duplicate'
     }
 
     const filePath = this.getMonthFile(event.at)
@@ -151,8 +159,11 @@ export class EventLog {
           }
         }
       }
-    } catch {
-      // File doesn't exist yet — will be created by the 'a' open below; no action needed.
+    } catch (err: unknown) {
+      // P1: only swallow ENOENT (file doesn't exist yet — will be created by the
+      // 'a' open below). Any other error (EACCES, EIO, lock, …) must propagate so
+      // callers know the write cannot proceed safely.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
 
     try {
