@@ -1,0 +1,31 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fdf3e9"/>
+      <stop offset="1" stop-color="#f9e0cd"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd8bf"/>
+      <stop offset="1" stop-color="#fec4a6"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="#f0cdb2" stroke-width="6"/>
+  <!-- hair curl -->
+  <path d="M256 118 C 250 92, 282 82, 296 100 C 306 113, 297 130, 283 129" fill="none" stroke="#c98d66" stroke-width="17" stroke-linecap="round"/>
+  <!-- face -->
+  <circle cx="256" cy="278" r="150" fill="url(#face)"/>
+  <!-- ears -->
+  <circle cx="106" cy="278" r="34" fill="#fec4a6"/>
+  <circle cx="406" cy="278" r="34" fill="#fec4a6"/>
+  <!-- closed happy eyes -->
+  <path d="M182 268 q 22 26 44 0" fill="none" stroke="#7a5137" stroke-width="15" stroke-linecap="round"/>
+  <path d="M286 268 q 22 26 44 0" fill="none" stroke="#7a5137" stroke-width="15" stroke-linecap="round"/>
+  <!-- blush -->
+  <circle cx="164" cy="318" r="22" fill="#fba58c" opacity="0.55"/>
+  <circle cx="348" cy="318" r="22" fill="#fba58c" opacity="0.55"/>
+  <!-- smile -->
+  <path d="M236 340 q 20 18 40 0" fill="none" stroke="#7a5137" stroke-width="13" stroke-linecap="round"/>
+  <!-- star accent -->
+  <path d="M400 96 l 9 22 22 3 -16 16 4 23 -19 -11 -19 11 4 -23 -16 -16 22 -3 z" fill="#f4b95e"/>
+</svg>
