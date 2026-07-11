@@ -195,8 +195,11 @@ function GrowthChartSection({ metric, sex, birthdate, events, dateFnsLocale }: G
   const unit  = metric === 'weight' ? 'kg' : 'cm'
 
   const yDomain = metric === 'weight'
-    ? [2, 18] as [number, number]
-    : [44, 92] as [number, number]
+    ? ([2, 18] as [number, number])
+    : ([44, 95] as [number, number])
+  const yTicks = metric === 'weight'
+    ? [2, 6, 10, 14, 18]
+    : [44, 54, 64, 74, 84, 95]
 
   const lang = inst.language
 
@@ -236,8 +239,9 @@ function GrowthChartSection({ metric, sex, birthdate, events, dateFnsLocale }: G
           />
           <YAxis
             domain={yDomain}
+            ticks={yTicks}
             tick={{ fontSize: 11, fill: 'var(--text-muted)' }}
-            tickFormatter={(v: number) => `${v}${unit}`}
+            tickFormatter={(v: number) => `${Math.round(v)}${unit}`}
           />
           <Tooltip
             contentStyle={TOOLTIP_STYLE}
