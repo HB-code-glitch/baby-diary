@@ -173,7 +173,7 @@ export function DiaryPage() {
   }
 
   return (
-    <div className="page-container">
+    <div className="page-container" data-tour="diary">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div className="page-title">{t('diary.title')}</div>
         <button

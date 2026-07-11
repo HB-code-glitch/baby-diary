@@ -90,6 +90,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
               key={id}
               className={`nav-item${isActive ? ' active' : ''}`}
               onClick={() => onNavigate(id)}
+              data-tour={`nav-${id}`}
             >
               <Icon
                 size={18}

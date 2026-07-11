@@ -13,7 +13,11 @@ import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 
-export function SettingsPage() {
+interface SettingsPageProps {
+  onStartTour?: () => void
+}
+
+export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const { settings, saveSettings, loadDataInfo, dataInfo } = useAppStore()
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
@@ -145,7 +149,7 @@ export function SettingsPage() {
   const currentLang = i18nInstance.language as Language
 
   return (
-    <div className="page-container" style={{ maxWidth: 560 }}>
+    <div className="page-container" style={{ maxWidth: 560 }} data-tour="settings-main">
       <div className="page-header">
         <div className="page-title">{t('settings.title')}</div>
       </div>
@@ -347,6 +351,21 @@ export function SettingsPage() {
           </div>
         </div>
       </div>
+
+      {/* Tutorial replay */}
+      {onStartTour && (
+        <div className="settings-section">
+          <div className="card" style={{ padding: '10px 14px' }}>
+            <button
+              className="btn-secondary"
+              style={{ width: '100%', textAlign: 'center' }}
+              onClick={onStartTour}
+            >
+              {t('tour.replayBtn')}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Sync section */}
       <div className="settings-section">

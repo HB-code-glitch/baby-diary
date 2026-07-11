@@ -556,7 +556,7 @@ export function HistoryPage() {
   ]
 
   return (
-    <div className="page-container">
+    <div className="page-container" data-tour="calendar">
       <div className="page-header" style={{ marginBottom: 12 }}>
         <div className="page-title">{t('history.title')}</div>
       </div>

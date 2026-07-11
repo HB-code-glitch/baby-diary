@@ -174,7 +174,7 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="page-container">
+    <div className="page-container" data-tour="messages">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
         <div>
           <div className="page-title">{t('messages.title')}</div>

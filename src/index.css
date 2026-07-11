@@ -3218,3 +3218,144 @@ body {
     background: rgba(90, 55, 0, 0.93);
   }
 }
+
+/* ══════════════════════════════════════════
+   TUTORIAL TOUR — spotlight coachmark
+   ══════════════════════════════════════════ */
+
+/* Overlay strips (four panels forming the dim) */
+.tour-overlay,
+.tour-overlay-full {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  pointer-events: auto;
+}
+
+.tour-overlay-strip {
+  position: fixed;
+  z-index: 1300;
+  pointer-events: auto;
+}
+
+/* Tooltip card — light theme defaults */
+.tour-tooltip {
+  --tour-card-bg:     #ffffff;
+  --tour-card-text:   #161513;
+  --tour-card-sub:    #6b6660;
+  --tour-card-border: rgba(40,40,60,0.10);
+  background: var(--tour-card-bg);
+  color: var(--tour-card-text);
+  border-radius: 14px;
+  padding: 18px 18px 16px;
+  box-shadow:
+    0 4px 24px rgba(20,18,15,0.14),
+    0 1px 4px  rgba(20,18,15,0.08),
+    inset 0 1px 0 rgba(255,255,255,0.9);
+  border: 1px solid var(--tour-card-border);
+  pointer-events: auto;
+}
+
+/* Animate: opacity + slight Y lift only (never overrides transform-based positioning) */
+@keyframes tourTooltipIn {
+  from { opacity: 0; margin-top: 6px; }
+  to   { opacity: 1; margin-top: 0px; }
+}
+.tour-tooltip-animate {
+  animation: tourTooltipIn 220ms var(--ease-out-smooth, cubic-bezier(0.16,1,0.3,1)) both;
+}
+
+/* Counter pill */
+.tour-counter {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tour-card-sub, #6b6660);
+  letter-spacing: 0.03em;
+  margin-bottom: 8px;
+  opacity: 0.75;
+}
+
+/* Title */
+.tour-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--tour-card-text, #161513);
+  line-height: 1.3;
+  margin-bottom: 7px;
+}
+
+/* Body */
+.tour-body {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--tour-card-sub, #6b6660);
+  line-height: 1.6;
+}
+
+/* Progress dots — bottom-center */
+.tour-progress-dots {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.38);
+  transition: background 200ms, transform 200ms;
+}
+
+.tour-dot.active {
+  background: rgba(255,255,255,0.92);
+  transform: scale(1.3);
+}
+
+/* Skip pill — bottom-left */
+.tour-skip-pill {
+  position: fixed;
+  bottom: 16px;
+  left: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.7);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 8px;
+  pointer-events: auto;
+  transition: color 160ms, background 160ms;
+  letter-spacing: 0.01em;
+}
+
+.tour-skip-pill:hover {
+  color: rgba(255,255,255,0.95);
+  background: rgba(255,255,255,0.08);
+}
+
+/* ── Dark theme overrides ── */
+[data-theme="dark"] .tour-tooltip {
+  --tour-card-bg:     #26262a;
+  --tour-card-text:   #ececec;
+  --tour-card-sub:    #b0b0b8;
+  --tour-card-border: rgba(255,255,255,0.14);
+  box-shadow:
+    0 4px 28px rgba(0,0,0,0.44),
+    0 1px 4px  rgba(0,0,0,0.28),
+    inset 0 1px 0 rgba(255,255,255,0.08);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .tour-tooltip-animate {
+    animation: none !important;
+  }
+}

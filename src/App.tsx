@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import { ToastProvider, useToast } from './components/Toast'
 import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
 import { useSyncLifecycle } from './sync/useSync'
 import { setLanguage, initLangAttr } from './i18n'
 import i18n from './i18n'
+import { TutorialTour, isTutorialDone } from './components/TutorialTour'
 
 import { HomePage }     from './pages/HomePage'
 import { HistoryPage }  from './pages/HistoryPage'
@@ -13,14 +14,14 @@ import { DiaryPage }    from './pages/DiaryPage'
 import { MessagesPage } from './pages/MessagesPage'
 import { SettingsPage } from './pages/SettingsPage'
 
-function PageContent({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => void }) {
+function PageContent({ page, onNavigate, onStartTour }: { page: Page; onNavigate: (p: Page) => void; onStartTour: () => void }) {
   switch (page) {
     case 'home':     return <HomePage onNavigate={onNavigate} />
     case 'history':  return <HistoryPage />
     case 'stats':    return <StatsPage />
     case 'diary':    return <DiaryPage />
     case 'messages': return <MessagesPage />
-    case 'settings': return <SettingsPage />
+    case 'settings': return <SettingsPage onStartTour={onStartTour} />
     default:         return <HomePage onNavigate={onNavigate} />
   }
 }
@@ -68,6 +69,17 @@ function AppInner() {
   const init = useAppStore(s => s.init)
   const settings = useAppStore(s => s.settings)
   const [currentPage, setCurrentPage] = useState<Page>('home')
+  const [tourActive, setTourActive] = useState(false)
+
+  const startTour = useCallback(() => {
+    setCurrentPage('home')
+    setTourActive(true)
+  }, [])
+
+  const endTour = useCallback(() => {
+    setTourActive(false)
+    setCurrentPage('home')
+  }, [])
 
   // Start sync engine on mount; stop on unmount.
   // Works in both Electron (real Firebase) and browser (mock ipc, no Firebase).
@@ -108,12 +120,28 @@ function AppInner() {
     return () => mq.removeEventListener('change', handler)
   }, [settings?.theme])
 
+  // First-launch: start tutorial after 300ms if not done
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (!isTutorialDone()) {
+        setTourActive(true)
+      }
+    }, 300)
+    return () => clearTimeout(id)
+  }, [])
+
   return (
     <div className="app-shell">
       <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} />
       <main className="main-content">
-        <PageContent page={currentPage} onNavigate={setCurrentPage} />
+        <PageContent page={currentPage} onNavigate={setCurrentPage} onStartTour={startTour} />
       </main>
+      {tourActive && (
+        <TutorialTour
+          onNavigate={setCurrentPage}
+          onDone={endTour}
+        />
+      )}
     </div>
   )
 }

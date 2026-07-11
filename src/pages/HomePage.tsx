@@ -251,7 +251,7 @@ function InsightsPanel({
   ]
 
   return (
-    <div className="insights-panel">
+    <div className="insights-panel" data-tour="insights">
       <div className="insights-title">{t('home.insightsTitle')}</div>
       {rows.map((row, i) => {
         const RowIcon = row.Icon
@@ -1163,7 +1163,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
     <div className="page-container">
 
       {/* ── Header row ── */}
-      <div className="home-header-row">
+      <div className="home-header-row" data-tour="hero">
         <div className="home-header-left">
           <div className="home-hero-date">{dateStr}</div>
           <div className="home-hero-title">{t('nav.home')}</div>
@@ -1203,7 +1203,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
       )}
 
       {/* ── Quick record banners ── */}
-      <div className="quick-record-row" ref={quickRecordRef} id="quick-record-row">
+      <div className="quick-record-row" ref={quickRecordRef} id="quick-record-row" data-tour="quick-row">
         {quickBtns.map(({ cls, Icon, label, badge, onClick }, i) => (
           <div
             key={badge}

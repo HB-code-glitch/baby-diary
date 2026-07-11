@@ -74,7 +74,7 @@ export function StatsPage() {
   const tempData    = data.filter(d => d.avgTemp != null)
 
   return (
-    <div className="page-container">
+    <div className="page-container" data-tour="stats">
       <div className="page-header">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div className="page-title">{t('stats.title')}</div>
