@@ -28,8 +28,8 @@ function ageDayStr(birthdate: string, ageInDays: number): string {
 // ---------------------------------------------------------------------------
 
 describe('GUIDANCE_MARKERS dataset', () => {
-  it('has exactly 13 markers', () => {
-    expect(GUIDANCE_MARKERS).toHaveLength(13)
+  it('has exactly 14 markers (P34: formula_1_3mo split into 2)', () => {
+    expect(GUIDANCE_MARKERS).toHaveLength(14)
   })
 
   it('all markers have required fields', () => {
@@ -46,10 +46,12 @@ describe('GUIDANCE_MARKERS dataset', () => {
     }
   })
 
-  it('contains the 4 calendar markers (startDay > 0)', () => {
+  it('contains the 5 calendar markers (startDay > 0; P34 split)', () => {
+    // P34: formula_1_3mo split into formula_1_2mo + formula_2_3mo → now 5 cal markers
     const calMarkers = GUIDANCE_MARKERS.filter(m => m.startDay > 0)
     const ids = calMarkers.map(m => m.id)
-    expect(ids).toContain('formula_1_3mo')
+    expect(ids).toContain('formula_1_2mo')
+    expect(ids).toContain('formula_2_3mo')
     expect(ids).toContain('formula_3_6mo')
     expect(ids).toContain('weaning_start_readiness')
     expect(ids).toContain('allergen_early_intro')
@@ -96,10 +98,10 @@ describe('getGuidanceForAge — formula band selection', () => {
     expect(formula?.id).toBe('formula_0_1mo')
   })
 
-  it('day 45 → formula_1_3mo (startDay 30 is highest <= 45)', () => {
+  it('day 45 → formula_1_2mo (startDay 30 is highest <= 45; P34)', () => {
     const markers = getGuidanceForAge(birth, ageDayStr(birth, 45))
     const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_1_3mo')
+    expect(formula?.id).toBe('formula_1_2mo')
   })
 
   it('day 100 → formula_3_6mo (startDay 90 is highest <= 100)', () => {
@@ -120,10 +122,10 @@ describe('getGuidanceForAge — formula band selection', () => {
     expect(formula?.id).toBe('formula_0_1mo')
   })
 
-  it('day 30 → formula_1_3mo (startDay 30 exactly reached)', () => {
+  it('day 30 → formula_1_2mo (startDay 30 exactly reached; P34)', () => {
     const markers = getGuidanceForAge(birth, ageDayStr(birth, 30))
     const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_1_3mo')
+    expect(formula?.id).toBe('formula_1_2mo')
   })
 
   it('day 90 → formula_3_6mo (startDay 90 exactly reached)', () => {
@@ -191,11 +193,19 @@ describe('getCalendarGuidance', () => {
     expect(allergen?.date).toBe('2026-05-01')
   })
 
-  it('birth 2026-01-01 → formula_1_3mo on 2026-01-31 (day 30)', () => {
+  it('birth 2026-01-01 → formula_1_2mo on 2026-01-31 (day 30; P34)', () => {
     const items = getCalendarGuidance('2026-01-01')
-    const f = items.find(i => i.marker.id === 'formula_1_3mo')
+    const f = items.find(i => i.marker.id === 'formula_1_2mo')
     expect(f).toBeDefined()
     expect(f?.date).toBe('2026-01-31')
+  })
+
+  it('birth 2026-01-01 → formula_2_3mo on 2026-03-02 (day 60; P34)', () => {
+    const items = getCalendarGuidance('2026-01-01')
+    const f = items.find(i => i.marker.id === 'formula_2_3mo')
+    expect(f).toBeDefined()
+    // Jan 1 + 60 days = March 2
+    expect(f?.date).toBe('2026-03-02')
   })
 
   it('birth 2026-01-01 → formula_3_6mo on 2026-04-01 (day 90)', () => {
@@ -211,9 +221,11 @@ describe('getCalendarGuidance', () => {
     expect(day0Items).toHaveLength(0)
   })
 
-  it('returns exactly 4 items (the 4 startDay>0 markers)', () => {
+  it('returns exactly 5 items (the 5 startDay>0 markers after P34 split)', () => {
+    // P34: formula_1_3mo split into formula_1_2mo (startDay 30) + formula_2_3mo (startDay 60)
+    // Total startDay>0: formula_1_2mo, formula_2_3mo, formula_3_6mo, weaning_start_readiness, allergen_early_intro = 5
     const items = getCalendarGuidance('2026-01-01')
-    expect(items).toHaveLength(4)
+    expect(items).toHaveLength(5)
   })
 
   it('empty birthdate → empty result', () => {

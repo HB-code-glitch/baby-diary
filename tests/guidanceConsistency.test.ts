@@ -32,9 +32,23 @@ describe('FEEDING_BANDS consistency with marker prose', () => {
     expect(band.dailyMaxMl).toBeNull()
   })
 
-  it('formula_1_3mo band numbers appear in marker bodyKo', () => {
-    const marker = GUIDANCE_MARKERS.find(m => m.id === 'formula_1_3mo')!
-    const band = FEEDING_BANDS.find(b => b.id === 'formula_1_3mo')!
+  // P34: formula_1_3mo split into formula_1_2mo (30-59d, max 160) + formula_2_3mo (60-89d, max 180)
+  it('formula_1_2mo band numbers appear in marker bodyKo', () => {
+    const marker = GUIDANCE_MARKERS.find(m => m.id === 'formula_1_2mo')!
+    const band = FEEDING_BANDS.find(b => b.id === 'formula_1_2mo')!
+    expect(marker).toBeDefined()
+    expect(band).toBeDefined()
+    // perFeedMlMin=120, perFeedMlMax=160
+    expect(marker.bodyKo).toContain('120')
+    expect(marker.bodyKo).toContain('160')
+    // feedsPerDay 6-7
+    expect(marker.bodyKo).toContain(`${band.feedsPerDayMin}~${band.feedsPerDayMax}`)
+    expect(band.dailyMaxMl).toBeNull()
+  })
+
+  it('formula_2_3mo band numbers appear in marker bodyKo', () => {
+    const marker = GUIDANCE_MARKERS.find(m => m.id === 'formula_2_3mo')!
+    const band = FEEDING_BANDS.find(b => b.id === 'formula_2_3mo')!
     expect(marker).toBeDefined()
     expect(band).toBeDefined()
     // perFeedMlMin=120, perFeedMlMax=180
@@ -75,11 +89,18 @@ describe('getFeedingBand', () => {
   it('ageDays 29 → formula_0_1mo', () => {
     expect(getFeedingBand(29)?.id).toBe('formula_0_1mo')
   })
-  it('ageDays 30 → formula_1_3mo', () => {
-    expect(getFeedingBand(30)?.id).toBe('formula_1_3mo')
+  // P34: formula_1_3mo → formula_1_2mo (30-59d) + formula_2_3mo (60-89d)
+  it('ageDays 30 → formula_1_2mo', () => {
+    expect(getFeedingBand(30)?.id).toBe('formula_1_2mo')
   })
-  it('ageDays 89 → formula_1_3mo', () => {
-    expect(getFeedingBand(89)?.id).toBe('formula_1_3mo')
+  it('ageDays 59 → formula_1_2mo', () => {
+    expect(getFeedingBand(59)?.id).toBe('formula_1_2mo')
+  })
+  it('ageDays 60 → formula_2_3mo', () => {
+    expect(getFeedingBand(60)?.id).toBe('formula_2_3mo')
+  })
+  it('ageDays 89 → formula_2_3mo', () => {
+    expect(getFeedingBand(89)?.id).toBe('formula_2_3mo')
   })
   it('ageDays 90 → formula_3_6mo', () => {
     expect(getFeedingBand(90)?.id).toBe('formula_3_6mo')
@@ -87,8 +108,9 @@ describe('getFeedingBand', () => {
   it('ageDays 180 → formula_3_6mo', () => {
     expect(getFeedingBand(180)?.id).toBe('formula_3_6mo')
   })
-  it('ageDays 181 → null (beyond all bands)', () => {
-    expect(getFeedingBand(181)).toBeNull()
+  // P33: no upper cutoff — 181+ still returns formula_3_6mo
+  it('ageDays 181 → formula_3_6mo (P33: no upper cutoff)', () => {
+    expect(getFeedingBand(181)?.id).toBe('formula_3_6mo')
   })
   it('ageDays -1 → null', () => {
     expect(getFeedingBand(-1)).toBeNull()
