@@ -12,13 +12,14 @@ import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
+import { DeleteAllModal } from '../components/DeleteAllModal'
 
 interface SettingsPageProps {
   onStartTour?: () => void
 }
 
 export function SettingsPage({ onStartTour }: SettingsPageProps) {
-  const { settings, saveSettings, loadDataInfo, dataInfo } = useAppStore()
+  const { settings, saveSettings, loadDataInfo, dataInfo, softDeleteAllEvents } = useAppStore()
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
 
@@ -32,6 +33,8 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [myRole,     setMyRole]     = useState<'mom' | 'dad'>(settings?.profile?.role ?? 'mom')
   const [saving, setSaving] = useState(false)
   const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'system'>(settings?.theme ?? 'system')
+  const [showDeleteAllModal, setShowDeleteAllModal] = useState(false)
+  const [deletingAll, setDeletingAll] = useState(false)
 
   // Sync local form when settings load
   useEffect(() => {
@@ -131,6 +134,20 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       } else {
         showToast({ message: t('settings.toastExportFail') })
       }
+    }
+  }
+
+  const handleDeleteAll = async () => {
+    setDeletingAll(true)
+    try {
+      const count = await softDeleteAllEvents()
+      setShowDeleteAllModal(false)
+      showToast({ message: t('settings.deleteAllToastSuccess', { count }) })
+      await loadDataInfo()
+    } catch {
+      showToast({ message: t('settings.deleteAllToastPartial', { count: 0 }) })
+    } finally {
+      setDeletingAll(false)
     }
   }
 
@@ -349,8 +366,26 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
               </button>
             </div>
           </div>
+          <div className="settings-row">
+            <span style={{ fontSize: 13, color: 'var(--stone-600)' }}>&nbsp;</span>
+            <button
+              className="btn-danger-text"
+              onClick={() => setShowDeleteAllModal(true)}
+            >
+              {t('settings.deleteAllRecords')}
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Delete all records modal */}
+      {showDeleteAllModal && (
+        <DeleteAllModal
+          onConfirm={handleDeleteAll}
+          onClose={() => !deletingAll && setShowDeleteAllModal(false)}
+          busy={deletingAll}
+        />
+      )}
 
       {/* Tutorial replay */}
       {onStartTour && (

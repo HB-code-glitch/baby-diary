@@ -58,9 +58,10 @@ interface AppState {
   todayFormulaTotalMl: () => number
 
   // Mutations
-  addEvent:        (event: DiaryEvent) => Promise<DiaryEvent>
-  editEvent:       (original: DiaryEvent, patch: Partial<Pick<DiaryEvent, 'at' | 'data' | 'deleted'>>) => Promise<DiaryEvent>
-  softDeleteEvent: (event: DiaryEvent) => Promise<DiaryEvent>
+  addEvent:            (event: DiaryEvent) => Promise<DiaryEvent>
+  editEvent:           (original: DiaryEvent, patch: Partial<Pick<DiaryEvent, 'at' | 'data' | 'deleted'>>) => Promise<DiaryEvent>
+  softDeleteEvent:     (event: DiaryEvent) => Promise<DiaryEvent>
+  softDeleteAllEvents: () => Promise<number>
 
   // Quick-add helpers
   addPee:     (atOverride?: string) => Promise<DiaryEvent>
@@ -217,6 +218,37 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   softDeleteEvent: async (event: DiaryEvent) => {
     return get().editEvent(event, { deleted: true })
+  },
+
+  softDeleteAllEvents: async () => {
+    const { events, editEvent } = get()
+    // Collect latest-rev non-deleted events (store already holds resolved view)
+    const targets = events.filter(e => !e.deleted)
+    let count = 0
+    for (const event of targets) {
+      const result = await ipc.appendEvent({
+        ...event,
+        deleted: true,
+        updatedAt: now(),
+        rev: event.rev + 1,
+      })
+      if (result === 'error') {
+        // Abort on first error; return partial count so caller can report it
+        return count
+      }
+      const tombstone: DiaryEvent = {
+        ...event,
+        deleted: true,
+        updatedAt: new Date().toISOString(),
+        rev: event.rev + 1,
+      }
+      enqueue(tombstone)
+      set(state => ({
+        events: mergeEventIntoList(state.events, tombstone),
+      }))
+      count++
+    }
+    return count
   },
 
   // -----------------------------------------------------------------------

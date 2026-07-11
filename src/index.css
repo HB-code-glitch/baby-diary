@@ -3220,6 +3220,164 @@ body {
 }
 
 /* ══════════════════════════════════════════
+   DELETE ALL RECORDS MODAL
+   ══════════════════════════════════════════ */
+@keyframes deleteModalAppear {
+  from { opacity: 0; margin-top: 12px; }
+  to   { opacity: 1; margin-top: 0; }
+}
+
+.delete-all-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.delete-all-modal {
+  width: min(440px, 100%);
+  max-height: min(88vh, 640px);
+  overflow-y: auto;
+  border-radius: 20px;
+  padding: 22px 20px 20px;
+  background: var(--surface);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-inset-light),
+              0 16px 48px rgba(22, 21, 19, 0.22),
+              0 4px 12px rgba(22, 21, 19, 0.10);
+  border: 1px solid rgba(200, 200, 220, 0.20);
+  animation: deleteModalAppear 0.28s var(--spring-snappy) both;
+}
+
+[data-theme="dark"] .delete-all-modal {
+  background: rgba(28, 26, 24, 0.92);
+  border-color: rgba(255, 255, 255, 0.10);
+  box-shadow: var(--glass-inset-dark),
+              0 16px 48px rgba(0, 0, 0, 0.50);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .delete-all-modal { animation: none; }
+}
+
+.delete-all-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.delete-all-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  line-height: 1.3;
+}
+
+.delete-all-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.delete-all-body {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+}
+
+.delete-all-confirm-section {
+  margin-bottom: 18px;
+}
+
+.delete-all-confirm-hint {
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.delete-all-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Danger button — muted red */
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 16px;
+  border-radius: 10px;
+  border: none;
+  background: rgba(180, 40, 40, 0.90);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--dur-micro) ease,
+              opacity var(--dur-micro) ease;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(200, 50, 50, 0.95);
+}
+
+.btn-danger:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+[data-theme="dark"] .btn-danger {
+  background: rgba(200, 50, 50, 0.80);
+}
+
+[data-theme="dark"] .btn-danger:hover:not(:disabled) {
+  background: rgba(220, 60, 60, 0.90);
+}
+
+/* Danger-text link style for the settings row button */
+.btn-danger-text {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(160, 30, 30, 0.88);
+  padding: 0;
+  font-family: inherit;
+  text-decoration: none;
+}
+
+.btn-danger-text:hover {
+  color: rgba(180, 40, 40, 1);
+  text-decoration: underline;
+}
+
+[data-theme="dark"] .btn-danger-text {
+  color: rgba(220, 90, 90, 0.90);
+}
+
+[data-theme="dark"] .btn-danger-text:hover {
+  color: rgba(240, 100, 100, 1);
+}
+
+/* ══════════════════════════════════════════
    TUTORIAL TOUR — spotlight coachmark
    ══════════════════════════════════════════ */
 

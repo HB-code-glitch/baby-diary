@@ -223,7 +223,17 @@
     "toastExportFail": "내보내기에 실패했습니다.",
     "toastOpenFolderFail": "폴더를 열 수 없습니다.",
     "electronOnly": "이 기능은 데스크톱 앱에서만 사용할 수 있어요",
-    "syncSection": "가족 동기화"
+    "syncSection": "가족 동기화",
+    "deleteAllRecords": "모든 기록 삭제",
+    "deleteAllTitle": "모든 기록을 삭제할까요?",
+    "deleteAllBody": "소변·수유·체온·일기·편지 등 모든 기록이 이 기기와 연결된 모든 기기에서 삭제돼요.\n아기 정보·프로필·가족 연결·로그인은 그대로 유지돼요.",
+    "deleteAllConfirmHint": "계속하려면 아래에 \"삭제\"를 입력하세요",
+    "deleteAllConfirmWord": "삭제",
+    "deleteAllConfirmPlaceholder": "삭제",
+    "deleteAllCancel": "취소",
+    "deleteAllConfirmBtn": "모두 삭제",
+    "deleteAllToastSuccess": "기록 {{count}}개를 삭제했어요",
+    "deleteAllToastPartial": "기록 {{count}}개를 삭제하다가 오류가 발생했어요"
   },
   "sync": {
     "noConfigTitle": "Firebase 설정",

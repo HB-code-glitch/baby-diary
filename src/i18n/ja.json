@@ -223,7 +223,17 @@
     "toastExportFail": "書き出しに失敗しました。",
     "toastOpenFolderFail": "フォルダを開けません。",
     "electronOnly": "この機能はデスクトップアプリでのみ使用できます",
-    "syncSection": "家族の同期"
+    "syncSection": "家族の同期",
+    "deleteAllRecords": "すべての記録を削除",
+    "deleteAllTitle": "すべての記録を削除しますか？",
+    "deleteAllBody": "おしっこ・授乳・体温・日記・手紙など、すべての記録がこのデバイスと連携しているすべてのデバイスから削除されます。\n赤ちゃんの情報・プロフィール・家族の連携・ログインはそのまま保たれます。",
+    "deleteAllConfirmHint": "続けるには「削除」と入力してください",
+    "deleteAllConfirmWord": "削除",
+    "deleteAllConfirmPlaceholder": "削除",
+    "deleteAllCancel": "キャンセル",
+    "deleteAllConfirmBtn": "すべて削除",
+    "deleteAllToastSuccess": "記録{{count}}件を削除しました",
+    "deleteAllToastPartial": "記録{{count}}件を削除中にエラーが発生しました"
   },
   "sync": {
     "noConfigTitle": "Firebase設定",
