@@ -119,6 +119,9 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       } else {
         showToast({ message: t('settings.toastSaved') })
       }
+    } catch {
+      // P5: surface fs/IPC errors — user must know the save failed
+      showToast({ message: t('settings.toastSaveFail') })
     } finally {
       setSaving(false)
     }
@@ -126,16 +129,14 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 
   const handleLanguageChange = async (lang: Language) => {
     setLanguage(lang)
-    // Persist immediately
-    const updated: AppSettings = {
-      baby:     settings?.baby     ?? { name: '', birthdate: '' },
-      profile:  settings?.profile  ?? { uid: uuidv4(), name: '', role: 'mom' },
-      familyId: settings?.familyId ?? '',
-      firebase:  settings?.firebase  ?? null,
-      language:  lang,
-      theme:     currentTheme,
+    // P4: always fetch fresh settings from disk before merging — never reconstruct
+    // sub-objects from possibly-null Zustand snapshot (would overwrite baby name/uid).
+    try {
+      const current = await ipc.getSettings()
+      await saveSettings({ ...current, language: lang })
+    } catch {
+      showToast({ message: t('settings.toastSaveFail') })
     }
-    await saveSettings(updated)
   }
 
   const handleThemeChange = async (theme: 'light' | 'dark' | 'system') => {
@@ -148,16 +149,14 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       resolved = theme
     }
     document.documentElement.setAttribute('data-theme', resolved)
-    // Persist immediately
-    const updated: AppSettings = {
-      baby:     settings?.baby     ?? { name: '', birthdate: '' },
-      profile:  settings?.profile  ?? { uid: uuidv4(), name: '', role: 'mom' },
-      familyId: settings?.familyId ?? '',
-      firebase:  settings?.firebase  ?? null,
-      language:  (i18nInstance.language as Language) ?? 'ko',
-      theme,
+    // P4: always fetch fresh settings from disk before merging — never reconstruct
+    // sub-objects from possibly-null Zustand snapshot (would overwrite baby name/uid).
+    try {
+      const current = await ipc.getSettings()
+      await saveSettings({ ...current, theme })
+    } catch {
+      showToast({ message: t('settings.toastSaveFail') })
     }
-    await saveSettings(updated)
   }
 
   const handleExportJson = async () => {
@@ -360,7 +359,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
             <button
               className="btn-primary"
               onClick={handleSave}
-              disabled={saving}
+              disabled={!settings || saving}
               style={{ width: '100%', padding: '11px' }}
             >
               {saving ? t('settings.saving') : t('settings.save')}

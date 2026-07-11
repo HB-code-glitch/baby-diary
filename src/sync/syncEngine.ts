@@ -157,8 +157,29 @@ function loadPending(): PendingItem[] {
   try {
     const raw = localStorage.getItem(PENDING_KEY)
     if (!raw) return []
-    return JSON.parse(raw) as PendingItem[]
-  } catch {
+    const parsed = JSON.parse(raw)
+    // P8: validate shape — drop items that don't have the required structure
+    if (!Array.isArray(parsed)) {
+      console.error('[syncEngine] loadPending: expected array, got', typeof parsed, '— discarding')
+      return []
+    }
+    const valid: PendingItem[] = []
+    for (const item of parsed) {
+      if (
+        item &&
+        typeof item === 'object' &&
+        item.event &&
+        typeof item.attempts === 'number' &&
+        typeof item.nextRetry === 'number'
+      ) {
+        valid.push(item as PendingItem)
+      } else {
+        console.warn('[syncEngine] loadPending: dropping malformed item', item)
+      }
+    }
+    return valid
+  } catch (err) {
+    console.error('[syncEngine] loadPending: parse error — discarding pending queue', err)
     return []
   }
 }
@@ -166,7 +187,11 @@ function loadPending(): PendingItem[] {
 function savePending(items: PendingItem[]): void {
   try {
     localStorage.setItem(PENDING_KEY, JSON.stringify(items))
-  } catch { /* localStorage 가득 찬 경우 무시 */ }
+  } catch (err) {
+    // P8: log quota/serialization failures so operators can observe and diagnose.
+    // In-memory _pending is still intact; reconcile rescues on restart via ipc.listEvents().
+    console.error('[syncEngine] savePending failed — pending may be lost on restart:', err)
+  }
 }
 
 let _pending: PendingItem[] = loadPending()
@@ -304,6 +329,9 @@ export async function createFamily(
 
   _familyId = familyRef.id
   setState({ inviteCode })
+  // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
+  // manually kick reconcile/snapshot so pending events drain without a restart.
+  if (_currentUser) void onUserSignedIn(_currentUser)
   return { familyId: familyRef.id, inviteCode }
 }
 
@@ -359,6 +387,9 @@ export async function joinFamily(
   }, { merge: true })
 
   _familyId = familyId
+  // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
+  // manually kick reconcile/snapshot so pending events drain without a restart.
+  if (_currentUser) void onUserSignedIn(_currentUser)
   return familyId
 }
 
@@ -599,15 +630,18 @@ async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | '
 }
 
 /**
- * F6 + F7: Batch upload with per-doc fallback.
+ * P2 + F6 + F7: Batch upload with per-doc fallback.
  * 1. Try a full batch. On failure fall back to per-doc writes.
  * 2. Docs that already exist remotely (create-conflict) → remote won: fetch remote,
- *    apply locally, remove from pending (converged).
+ *    apply locally, converge (treat as uploaded).
  * 3. Other failing docs are quarantined: kept in pending for retry with backoff.
  * Returns Set of docIds that were successfully uploaded OR converged remotely.
+ * drainQueue uses the returned set to remove only confirmed-ok docs from _pending,
+ * so partial-failure events are never silently dropped.
  */
-async function batchUpload(events: DiaryEvent[]): Promise<void> {
-  if (!_db || !_familyId || events.length === 0) return
+async function batchUpload(events: DiaryEvent[]): Promise<Set<string>> {
+  const uploaded = new Set<string>()
+  if (!_db || !_familyId || events.length === 0) return uploaded
 
   for (let i = 0; i < events.length; i += BATCH_SIZE) {
     const chunk = events.slice(i, i + BATCH_SIZE)
@@ -621,14 +655,18 @@ async function batchUpload(events: DiaryEvent[]): Promise<void> {
 
     try {
       await batch.commit()
+      // Full batch succeeded — all docs in this chunk are uploaded
+      for (const event of chunk) uploaded.add(makeDocId(event))
     } catch {
       // F7: batch failed — fall back to per-doc so one poison doc can't block the rest
       for (const event of chunk) {
+        const docId = makeDocId(event)
         const result = await uploadOne(event)
-        if (result === 'already-exists') {
+        if (result === 'ok') {
+          uploaded.add(docId)
+        } else if (result === 'already-exists') {
           // F6: remote won — fetch it and apply locally, then converge
           try {
-            const docId = makeDocId(event)
             const ref = doc(_db, 'families', _familyId, 'events', docId)
             const remoteSnap = await getDoc(ref)
             if (remoteSnap.exists()) {
@@ -639,13 +677,15 @@ async function batchUpload(events: DiaryEvent[]): Promise<void> {
           } catch {
             // best-effort; local already has our version, remote won will propagate via snapshot
           }
-          // remove from pending — converged (remote version wins by id_rev)
-          _pending = _pending.filter(p => makeDocId(p.event) !== makeDocId(event))
+          // Converged — treat as uploaded so drain removes it from pending
+          uploaded.add(docId)
         }
-        // 'error' docs stay in pending and will be retried with backoff
+        // 'error' docs: NOT added to uploaded → drain keeps them in pending for retry
       }
     }
   }
+
+  return uploaded
 }
 
 /** 업로드 큐 드레인 */
@@ -659,14 +699,27 @@ async function drainQueue(): Promise<void> {
   const toUpload = ready.map(p => p.event)
 
   try {
-    await batchUpload(toUpload)
-    // 성공: 큐에서 제거
-    const uploadedIds = new Set(toUpload.map(makeDocId))
+    // P2: batchUpload now returns only the set of docIds that succeeded or converged.
+    // We filter _pending by that set so partial-failure docs stay for retry.
+    const uploadedIds = await batchUpload(toUpload)
     _pending = _pending.filter(p => !uploadedIds.has(makeDocId(p.event)))
+    // Apply backoff to any docs that were attempted but NOT confirmed (still in pending)
+    const attemptedDocIds = new Set(toUpload.map(makeDocId))
+    _pending = _pending.map(p => {
+      if (!attemptedDocIds.has(makeDocId(p.event))) return p
+      const attempts = p.attempts + 1
+      const backoff = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempts - 1), MAX_BACKOFF_MS)
+      return { ...p, attempts, nextRetry: Date.now() + backoff }
+    })
     savePending(_pending)
     syncPendingCount()
-    setState({ status: 'online', detail: _currentUser?.email ? `${_currentUser.email} connected` : 'connected', pendingCount: _pending.length })
+    if (_pending.length === 0) {
+      setState({ status: 'online', detail: _currentUser?.email ? `${_currentUser.email} connected` : 'connected', pendingCount: 0 })
+    } else {
+      scheduleRetry()
+    }
   } catch {
+    // batchUpload itself threw (e.g. network-level error before any doc processed)
     // 실패: 지수 백오프로 재시도 시간 설정
     _pending = _pending.map(p => {
       if (!toUpload.some(e => makeDocId(e) === makeDocId(p.event))) return p

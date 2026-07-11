@@ -221,10 +221,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   softDeleteAllEvents: async () => {
-    const { events, editEvent } = get()
     // Collect latest-rev non-deleted events (store already holds resolved view)
-    const targets = events.filter(e => !e.deleted)
+    const targets = get().events.filter(e => !e.deleted)
     let count = 0
+    let partial = false
     for (const event of targets) {
       const result = await ipc.appendEvent({
         ...event,
@@ -233,8 +233,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         rev: event.rev + 1,
       })
       if (result === 'error') {
-        // Abort on first error; return partial count so caller can report it
-        return count
+        // P12(a): abort on first error; record partial state flag
+        partial = true
+        break
       }
       const tombstone: DiaryEvent = {
         ...event,
@@ -247,6 +248,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         events: mergeEventIntoList(state.events, tombstone),
       }))
       count++
+    }
+    if (partial) {
+      // P12(b): resync UI to true disk state after partial failure so store
+      // matches what's actually on disk (avoids ghost-deleted entries in memory).
+      await get().loadEvents()
     }
     return count
   },
@@ -318,6 +324,12 @@ function mergeEventIntoList(list: DiaryEvent[], incoming: DiaryEvent): DiaryEven
   }
   const existing = list[idx]
   if (incoming.rev > existing.rev) {
+    const next = [...list]
+    next[idx] = incoming
+    return next
+  }
+  // P3 defense-in-depth: at equal rev, prefer deleted:true (tombstone wins)
+  if (incoming.rev === existing.rev && incoming.deleted && !existing.deleted) {
     const next = [...list]
     next[idx] = incoming
     return next

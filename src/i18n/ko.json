@@ -234,7 +234,8 @@
     "deleteAllConfirmBtn": "모두 삭제",
     "deleteAllToastSuccess": "기록 {{count}}개를 삭제했어요",
     "deleteAllToastPartial": "기록 {{count}}개를 삭제하다가 오류가 발생했어요",
-    "restoredFromDisk": "저장된 정보를 다시 불러왔어요"
+    "restoredFromDisk": "저장된 정보를 다시 불러왔어요",
+    "toastSaveFail": "설정 저장에 실패했습니다"
   },
   "sync": {
     "noConfigTitle": "Firebase 설정",
