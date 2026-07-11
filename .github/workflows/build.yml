@@ -16,7 +16,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm test
-      - run: npm run build:mac
+      # electron-builder는 CI에서 자동 게시를 시도함(GH_TOKEN 필요) — 아티팩트 업로드만 쓰므로 게시 비활성화
+      - run: npm run build:mac -- --publish=never
       - uses: actions/upload-artifact@v4
         with:
           name: baby-diary-mac
