@@ -81,3 +81,9 @@ jobs:
       - run: npm run build && npx electron-builder --mac --publish always
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      # 엄마용 쉬운 이름 사본 — 고정 링크(/releases/latest/download/INSTALL-ME-BabyDiary-Mac.dmg)용
+      - run: |
+          cp release/*universal.dmg INSTALL-ME-BabyDiary-Mac.dmg
+          gh release upload "${GITHUB_REF_NAME}" INSTALL-ME-BabyDiary-Mac.dmg --repo HB-code-glitch/baby-diary-releases --clobber
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
