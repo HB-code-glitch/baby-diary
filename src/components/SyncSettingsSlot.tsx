@@ -3,7 +3,7 @@ import {
   Cloud, CloudOff, AlertCircle, Copy, Check, LogOut,
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
-import { useSyncStatus, configure, signIn, signUp, signOutSync, createFamily, joinFamily, start } from '../sync/useSync'
+import { useSyncStatus, restartSync, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
 import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN } from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
@@ -56,7 +56,7 @@ function NoConfigView() {
         language: settings?.language,
       }
       await saveSettings(updated)
-      configure(updated.firebase, updated.familyId)
+      await restartSync(updated.firebase!, updated.familyId)
     } catch (e) {
       setError(t('sync.errorSaveFailed'))
     } finally {
@@ -519,12 +519,12 @@ function ErrorView({ detail }: { detail: string }) {
   const { settings } = useAppStore()
   const { t } = useTranslation()
 
-  const handleRetry = () => {
+  const handleRetry = async () => {
     const cfg = settings?.firebase ?? null
     const fid = settings?.familyId ?? ''
-    configure(cfg, fid)
-    // P7: configure() resets _started so auth listener is gone; start() re-registers it.
-    start()
+    if (cfg) {
+      await restartSync(cfg, fid)
+    }
   }
 
   return (

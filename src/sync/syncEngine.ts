@@ -457,6 +457,27 @@ export function stop(): void {
   setState({ status: 'off', detail: 'sync stopped', pendingCount: _pending.length })
 }
 
+/**
+ * SYNC-07: Cleanly restart the sync engine with a new config.
+ * Safe to call even when the engine was never started (idempotent stop).
+ * Guards against concurrent calls with an in-flight flag.
+ *
+ * Sequence: stop() → configure(cfg, familyId) → start()
+ */
+let _restarting = false
+
+export async function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
+  if (_restarting) return
+  _restarting = true
+  try {
+    stop()
+    configure(cfg, familyId)
+    start()
+  } finally {
+    _restarting = false
+  }
+}
+
 /** 현재 동기화 상태 반환 */
 export function getStatus(): SyncState {
   return { ..._state }

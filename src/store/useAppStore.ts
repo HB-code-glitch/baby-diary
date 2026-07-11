@@ -148,6 +148,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Derived selectors
   // -----------------------------------------------------------------------
 
+  // ── Timezone note (P23) ──────────────────────────────────────────────────
+  // All date grouping uses device-local time via date-fns (isToday, isSameDay,
+  // startOfDay, parseISO).  Both parents use UTC+9 (KST = dad/Windows, JST =
+  // mom/Mac) with no DST offset, so grouping by device-local date is provably
+  // consistent for this family.  If the family ever relocates to a different
+  // timezone, introduce a `localDate` field on DiaryEvent (YYYY-MM-DD, stored
+  // at write time in the user's local timezone) and group by that field instead.
+  // ─────────────────────────────────────────────────────────────────────────
   todayEvents: () => {
     return get().events
       .filter(e => !e.deleted && isToday(parseISO(e.at)))

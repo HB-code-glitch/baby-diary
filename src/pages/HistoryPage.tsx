@@ -33,6 +33,8 @@ interface DayIndicators {
   growthCount: number
 }
 
+// Timezone note (P23): isSameDay uses device-local time.  Consistent for
+// this family (dad=KST UTC+9, mom=JST UTC+9, no DST).  See useAppStore.ts.
 function useDayIndicators(events: DiaryEvent[], date: Date): DayIndicators {
   return useMemo(() => {
     const dayEvents = events.filter(e => !e.deleted && isSameDay(parseISO(e.at), date))

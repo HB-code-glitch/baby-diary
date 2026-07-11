@@ -17,6 +17,7 @@ import {
   enqueue,
   start,
   stop,
+  restartSync,
 } from './syncEngine'
 import { ipc } from '../lib/ipc'
 import { DiaryEvent } from '../../shared/types'
@@ -81,6 +82,7 @@ export {
   stop,
   getStatus,
   subscribeStatus,
+  restartSync,
 }
 
 /**

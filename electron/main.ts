@@ -5,7 +5,7 @@ import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
 import { DiaryEvent, AppSettings, ExportFormat } from '../shared/types'
-import { setupUpdater } from './updater'
+import { setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 
@@ -206,6 +206,8 @@ app.whenReady().then(() => {
       // doesn't reach here, but on macOS it does), restart it so the 6-hour
       // cycle resumes after dock-reopen.
       if (!backupManager.isRunning()) backupManager.start()
+      // P22: Restart updater timer if stopped (idempotent — no-op if already running).
+      setupUpdater()
     }
   })
 })
@@ -214,6 +216,8 @@ app.whenReady().then(() => {
 // cannot leave a corrupt or partial backup file as the newest copy.
 app.on('before-quit', (event) => {
   event.preventDefault()
+  // P22: Stop the updater timer so it cannot fire during shutdown.
+  stopUpdater()
   backupManager.backup()
     .catch(err => console.error('[Backup] before-quit failed:', err))
     .finally(() => app.exit(0))

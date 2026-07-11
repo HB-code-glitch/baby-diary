@@ -23,8 +23,31 @@ function getWindow(): BrowserWindow | null {
   return wins.length > 0 ? wins[0] : null
 }
 
+// P22: Module-level timer handles so stopUpdater() can cancel them.
+let _initialTimeout: ReturnType<typeof setTimeout> | null = null
+let _intervalHandle: ReturnType<typeof setInterval> | null = null
+
+/** P22: Returns true if the periodic updater interval is currently active. */
+export function isUpdaterRunning(): boolean {
+  return _intervalHandle !== null
+}
+
+/** P22: Stop the updater timers (idempotent — safe when never started). */
+export function stopUpdater(): void {
+  if (_initialTimeout !== null) {
+    clearTimeout(_initialTimeout)
+    _initialTimeout = null
+  }
+  if (_intervalHandle !== null) {
+    clearInterval(_intervalHandle)
+    _intervalHandle = null
+  }
+}
+
 export function setupUpdater(): void {
   if (!shouldCheck()) return
+  // P22: Idempotent — skip if already running (e.g. after activate re-call).
+  if (_intervalHandle !== null) return
 
   const isMac = process.platform === 'darwin'
 
@@ -90,8 +113,10 @@ export function setupUpdater(): void {
   }
 
   // First check: 15 s after ready (app already emitted ready when this runs)
-  setTimeout(runCheck, 15_000)
+  // P22: store handle so stopUpdater() can cancel it.
+  _initialTimeout = setTimeout(runCheck, 15_000)
 
   // Subsequent checks: every 6 hours
-  setInterval(runCheck, 6 * 60 * 60 * 1_000)
+  // P22: store handle so stopUpdater() can cancel it.
+  _intervalHandle = setInterval(runCheck, 6 * 60 * 60 * 1_000)
 }
