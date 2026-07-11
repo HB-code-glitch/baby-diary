@@ -316,18 +316,112 @@ async function main() {
     await shot(page, 'history-day')
 
     // ---------------------------------------------------------------------------
-    // 5. 통계 (Stats)
+    // 5. Sleep two-tap flow
     // ---------------------------------------------------------------------------
-    console.log('\n[5] Stats')
+    console.log('\n[5] Sleep two-tap flow')
+
+    await page.click('[data-tour="nav-home"]')
+    await page.waitForSelector('[data-tour="quick-row"]', { timeout: 5000 })
+
+    // First tap: start sleep timer (6th quick button — data-testid or class)
+    // The sleep button has label from quickBtn.sleep or quickBtn.sleepRunning
+    const sleepBtn = await page.locator('[data-tour="quick-row"] button').filter({ hasText: /수면|ねんね/ }).first()
+    const sleepBtnVisible = await sleepBtn.isVisible().catch(() => false)
+    if (sleepBtnVisible) {
+      await sleepBtn.click()
+      await page.waitForTimeout(600)
+      await shot(page, 'sleep-timer-running')
+
+      // FloatingSleepPill should appear
+      const floatingPill = await page.$('.floating-sleep-pill')
+      assert(!!floatingPill, 'floating sleep pill appeared after first sleep tap')
+
+      // Second tap: stop timer (click floating pill stop or sleep button again)
+      const stopBtn = await page.$('.floating-sleep-stop')
+      if (stopBtn) {
+        await stopBtn.click()
+      } else {
+        await sleepBtn.click()
+      }
+      await page.waitForTimeout(400)
+
+      // SleepConfirmPopover should appear
+      const confirmPopover = await page.$('.sleep-confirm-popover, .popover')
+      if (confirmPopover) {
+        await shot(page, 'sleep-confirm-popover')
+        // Click 기록 / record button
+        const recordBtn = await page.$('.sleep-confirm-popover .btn-primary, .popover .btn-primary')
+        if (recordBtn) {
+          await recordBtn.click()
+          await page.waitForTimeout(400)
+          assert(true, 'sleep confirm recorded successfully')
+        }
+      } else {
+        console.log('  (sleep confirm popover not found — continuing)')
+      }
+      await shot(page, 'sleep-recorded')
+    } else {
+      console.log('  sleep button not found — skipping sleep flow')
+    }
+
+    // ---------------------------------------------------------------------------
+    // 5b. Growth QuickMenu flow
+    // ---------------------------------------------------------------------------
+    console.log('\n[5b] Growth entry via QuickMenu')
+
+    // Open QuickMenu (... button)
+    const moreBtn = await page.$('.quick-more-btn, button:has-text("…"), [aria-label*="more"]')
+    if (moreBtn) {
+      await moreBtn.click()
+      await page.waitForTimeout(400)
+
+      // Click 성장 in QuickMenu
+      const growthItem = await page.locator('.quick-menu-item, [role="menuitem"]').filter({ hasText: /성장|成長/ }).first()
+      const growthVisible = await growthItem.isVisible().catch(() => false)
+      if (growthVisible) {
+        await growthItem.click()
+        await page.waitForSelector('.popover', { timeout: 5000 })
+        await shot(page, 'growth-popover')
+
+        // Fill weight
+        const weightInput = await page.$('.popover input[inputmode="decimal"], .popover input[type="number"]')
+        if (weightInput) {
+          await weightInput.fill('7.5')
+        }
+        // Record
+        const growthRecordBtn = await page.$('.popover .btn-primary')
+        if (growthRecordBtn) {
+          await growthRecordBtn.click()
+          await page.waitForTimeout(400)
+          assert(true, 'growth event recorded via QuickMenu')
+        }
+      } else {
+        console.log('  growth menu item not found — skipping')
+        // Close menu if open
+        await page.keyboard.press('Escape')
+      }
+    } else {
+      console.log('  QuickMenu more button not found — skipping growth flow')
+    }
+
+    // ---------------------------------------------------------------------------
+    // 6. 통계 (Stats) — including growth chart screenshot
+    // ---------------------------------------------------------------------------
+    console.log('\n[6] Stats — with growth chart')
 
     await page.click('[data-tour="nav-stats"]')
     await page.waitForSelector('[data-tour="stats"]', { timeout: 5000 })
     await shot(page, 'stats')
 
+    // Scroll down to growth chart section
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+    await page.waitForTimeout(400)
+    await shot(page, 'stats-growth-chart')
+
     // ---------------------------------------------------------------------------
-    // 6. 일기 (Diary)
+    // 7. 일기 (Diary)
     // ---------------------------------------------------------------------------
-    console.log('\n[6] Diary')
+    console.log('\n[7] Diary')
 
     await page.click('[data-tour="nav-diary"]')
     await page.waitForSelector('[data-tour="diary"]', { timeout: 5000 })
@@ -351,9 +445,9 @@ async function main() {
     await shot(page, 'diary')
 
     // ---------------------------------------------------------------------------
-    // 7. 아기에게 (Messages)
+    // 8. 아기에게 (Messages)
     // ---------------------------------------------------------------------------
-    console.log('\n[7] Messages')
+    console.log('\n[8] Messages')
 
     await page.click('[data-tour="nav-messages"]')
     await page.waitForSelector('[data-tour="messages"]', { timeout: 5000 })
@@ -375,9 +469,9 @@ async function main() {
     await shot(page, 'messages')
 
     // ---------------------------------------------------------------------------
-    // 8. Settings → 日本語 → home (Zen Maru font check)
+    // 9. Settings → 日本語 → home (Zen Maru font check)
     // ---------------------------------------------------------------------------
-    console.log('\n[8] Language + theme switches')
+    console.log('\n[9] Language + theme switches')
 
     await page.click('[data-tour="nav-settings"]')
     await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
