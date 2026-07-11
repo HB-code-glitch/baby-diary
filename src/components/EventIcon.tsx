@@ -1,5 +1,5 @@
 import React from 'react'
-import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconBook, IconEnvelopeHeart } from './icons'
+import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconBook, IconEnvelopeHeart, IconMoon, IconRuler } from './icons'
 import { EventType } from '../../shared/types'
 import i18n from '../i18n'
 
@@ -9,13 +9,15 @@ interface EventIconProps {
 }
 
 const COLOR_MAP: Record<EventType, { bg: string; color: string; ring: string }> = {
-  pee:     { bg: 'var(--sage-100)',   color: 'var(--sage-600)',   ring: 'var(--sage-200)' },
-  poop:    { bg: 'var(--sage-100)',   color: 'var(--sage-500)',   ring: 'var(--sage-200)' },
-  temp:    { bg: 'var(--amber-100)',  color: 'var(--amber-600)',  ring: 'var(--amber-200)' },
-  breast:  { bg: 'var(--peach-100)', color: 'var(--peach-600)',  ring: 'var(--peach-200)' },
-  formula: { bg: 'var(--peach-100)', color: 'var(--peach-500)',  ring: 'var(--peach-200)' },
-  diary:   { bg: 'var(--rose-100)',  color: 'var(--rose-500)',   ring: 'var(--rose-200)' },
-  message: { bg: 'var(--rose-100)',  color: 'var(--rose-500)',   ring: 'var(--rose-200)' },
+  pee:     { bg: 'var(--sage-100)',      color: 'var(--sage-600)',      ring: 'var(--sage-200)' },
+  poop:    { bg: 'var(--sage-100)',      color: 'var(--sage-500)',      ring: 'var(--sage-200)' },
+  temp:    { bg: 'var(--amber-100)',     color: 'var(--amber-600)',     ring: 'var(--amber-200)' },
+  breast:  { bg: 'var(--peach-100)',    color: 'var(--peach-600)',     ring: 'var(--peach-200)' },
+  formula: { bg: 'var(--peach-100)',    color: 'var(--peach-500)',     ring: 'var(--peach-200)' },
+  diary:   { bg: 'var(--rose-100)',     color: 'var(--rose-500)',      ring: 'var(--rose-200)' },
+  message: { bg: 'var(--rose-100)',     color: 'var(--rose-500)',      ring: 'var(--rose-200)' },
+  sleep:   { bg: 'var(--lavender-100)', color: 'var(--lavender-600)',  ring: 'var(--lavender-200)' },
+  growth:  { bg: 'var(--indigo-100)',   color: 'var(--indigo-600)',    ring: 'var(--indigo-200)' },
 }
 
 type IconComponent = React.ComponentType<{ size?: number; color?: string }>
@@ -28,6 +30,8 @@ const ICON_MAP: Record<EventType, IconComponent> = {
   formula: IconBottle,
   diary:   IconBook,
   message: IconEnvelopeHeart,
+  sleep:   IconMoon,
+  growth:  IconRuler,
 }
 
 export function EventIcon({ type, size = 15 }: EventIconProps) {
@@ -57,6 +61,8 @@ export function eventLabel(type: EventType): string {
     formula: 'event.formula',
     diary:   'event.diary',
     message: 'event.message',
+    sleep:   'event.sleep',
+    growth:  'event.growth',
   }
   return t(KEY_MAP[type] ?? type)
 }

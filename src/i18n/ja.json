@@ -31,7 +31,8 @@
     "todayDiaperLabel": "今日のおむつ",
     "recentTempLabel": "最近の体温",
     "backupLabel": "バックアップ状態",
-    "guidanceRowAriaLabel": "育児ガイドを詳しく見る（設定へ移動）"
+    "guidanceRowAriaLabel": "育児ガイドを詳しく見る（設定へ移動）",
+    "todaySleepLabel": "今日のねんね"
   },
   "stat": {
     "formulaLabel": "ミルク合計",
@@ -44,14 +45,19 @@
     "pee": "おしっこ {{count}}回",
     "poop": "うんち {{count}}回",
     "feeding": "授乳 {{count}}回",
-    "formulaTotal": "ミルク 計{{ml}}ml"
+    "formulaTotal": "ミルク 計{{ml}}ml",
+    "sleep": "ねんね {{count}}回・{{totalMin}}分",
+    "growth": "成長 {{count}}回"
   },
   "quickBtn": {
     "pee": "おしっこ",
     "poop": "うんち",
     "temp": "体温",
     "breast": "母乳",
-    "formula": "ミルク"
+    "formula": "ミルク",
+    "sleep": "ねんね",
+    "sleepRunning": "ねんね中",
+    "growth": "成長"
   },
   "popover": {
     "tempInput": "体温を入力",
@@ -79,7 +85,9 @@
     "breast": "母乳",
     "formula": "ミルク",
     "diary": "日記",
-    "message": "赤ちゃんへ"
+    "message": "赤ちゃんへ",
+    "sleep": "ねんね",
+    "growth": "成長"
   },
   "eventValue": {
     "breastSide": "{{side}}",
@@ -112,7 +120,29 @@
     "cancel": "キャンセル",
     "confirm": "確認"
   },
-  "quickBtnHint": "ショートカット 1〜5",
+  "quickBtnHint": "ショートカット 1〜6",
+  "sleep": {
+    "startLabel": "ねんね開始",
+    "confirmTitle": "ねんね記録",
+    "startTime": "開始時刻",
+    "duration": "睡眠時間",
+    "discardTitle": "ねんね記録を削除",
+    "discardBody": "16時間が経過したねんね記録は自動削除されます。",
+    "floatingLabel": "ねんね中 {{mm}}:{{ss}}",
+    "floatingStop": "終了",
+    "cancel": "キャンセル",
+    "record": "記録"
+  },
+  "growth": {
+    "title": "成長記録",
+    "weightLabel": "体重",
+    "weightUnit": "kg",
+    "heightLabel": "身長",
+    "heightUnit": "cm",
+    "cancel": "キャンセル",
+    "record": "記録",
+    "atLeastOne": "体重または身長のどちらかを入力してください"
+  },
   "history": {
     "title": "記録",
     "today": "今日",
@@ -133,7 +163,9 @@
     "diaperIndicator": "おむつ",
     "feedingIndicator": "授乳",
     "tempHighIndicator": "体温↑",
-    "diaryIndicator": "日記"
+    "diaryIndicator": "日記",
+    "sleepIndicator": "ねんね",
+    "growthIndicator": "成長"
   },
   "stats": {
     "title": "グラフ",
@@ -151,7 +183,23 @@
     "tempLineLabel": "体温",
     "noTempData": "この期間に体温の記録がありません",
     "countUnit": "{{count}}回",
-    "mlUnit": "{{value}}ml"
+    "mlUnit": "{{value}}ml",
+    "sleepTitle": "睡眠時間（分/日）",
+    "sleepTooltip": "睡眠",
+    "sleepUnit": "{{value}}分",
+    "growthTitle": "成長曲線",
+    "growthWeightTitle": "体重（kg）",
+    "growthHeightTitle": "身長（cm）",
+    "growthNoBirthdate": "設定で生年月日・性別を入力すると成長曲線が表示されます",
+    "growthDisclaimer": "WHO国際成長基準（2006年）。診療の判断は小児科にご相談ください。",
+    "growthPercentile": "最近の{{metric}} {{value}} — P{{pct}}（同月齢100人中{{pct}}番目）",
+    "growthP3": "P3",
+    "growthP15": "P15",
+    "growthP50": "P50",
+    "growthP85": "P85",
+    "growthP97": "P97",
+    "growthMonthUnit": "{{m}}か月",
+    "noGrowthData": "この期間に成長記録がありません"
   },
   "diary": {
     "title": "日記",

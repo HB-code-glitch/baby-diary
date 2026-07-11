@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { DiaryEvent, AppSettings, DataInfo, EventType, BreastData, FormulaData } from '../../shared/types'
+import { DiaryEvent, AppSettings, DataInfo, EventType, BreastData, FormulaData, SleepData, GrowthData } from '../../shared/types'
 import { ipc } from '../lib/ipc'
 import { enqueue } from '../sync/syncEngine'
 import { v4 as uuidv4 } from 'uuid'
@@ -73,6 +73,9 @@ interface AppState {
   addTemp:    (celsius: number, atOverride?: string) => Promise<DiaryEvent>
   addBreast:  (side: 'L' | 'R' | 'both', minutes?: number, atOverride?: string) => Promise<DiaryEvent>
   addFormula: (ml: number, atOverride?: string) => Promise<DiaryEvent>
+  addSleep:   (minutes: number, atOverride?: string) => Promise<DiaryEvent>
+  addGrowth:  (weightKg: number | undefined, heightCm: number | undefined, atOverride?: string) => Promise<DiaryEvent>
+  todaySleepMinutes: () => number
 
   // Settings
   saveSettings: (s: AppSettings) => Promise<void>
@@ -303,6 +306,30 @@ export const useAppStore = create<AppState>((set, get) => ({
     return get().addEvent(e)
   },
 
+  addSleep: async (minutes: number, atOverride?: string) => {
+    const e = makeBase(get().settings, 'sleep')
+    if (atOverride) e.at = atOverride
+    e.data = { minutes } as SleepData
+    return get().addEvent(e)
+  },
+
+  addGrowth: async (weightKg: number | undefined, heightCm: number | undefined, atOverride?: string) => {
+    if (weightKg == null && heightCm == null) throw new Error('growth_requires_at_least_one')
+    const e = makeBase(get().settings, 'growth')
+    if (atOverride) e.at = atOverride
+    const data: GrowthData = {}
+    if (weightKg != null) data.weightKg = weightKg
+    if (heightCm != null) data.heightCm = heightCm
+    e.data = data
+    return get().addEvent(e)
+  },
+
+  todaySleepMinutes: () => {
+    return get().events
+      .filter(e => !e.deleted && e.type === 'sleep' && isToday(parseISO(e.at)))
+      .reduce((sum, e) => sum + ((e.data as SleepData).minutes ?? 0), 0)
+  },
+
   // -----------------------------------------------------------------------
   // Settings
   // -----------------------------------------------------------------------
@@ -392,6 +419,27 @@ export function formatEventValue(e: DiaryEvent): string {
     case 'message': {
       const d = e.data as { text: string }
       return d.text.length > 30 ? d.text.slice(0, 30) + '…' : d.text
+    }
+    case 'sleep': {
+      const d = e.data as SleepData
+      const totalMin = d.minutes
+      const lang = i18n.language
+      if (totalMin >= 60) {
+        const h = Math.floor(totalMin / 60)
+        const m = totalMin % 60
+        if (lang === 'ja') {
+          return m > 0 ? `${h}時間${m}分` : `${h}時間`
+        }
+        return m > 0 ? `${h}시간 ${m}분` : `${h}시간`
+      }
+      return lang === 'ja' ? `${totalMin}分` : `${totalMin}분`
+    }
+    case 'growth': {
+      const d = e.data as GrowthData
+      const parts: string[] = []
+      if (d.weightKg != null) parts.push(`${d.weightKg.toFixed(1)}kg`)
+      if (d.heightCm != null) parts.push(`${d.heightCm.toFixed(1)}cm`)
+      return parts.join(' · ')
     }
     default:
       return ''
