@@ -1,14 +1,133 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react'
-import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconClock } from '../components/icons'
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconClock, IconStar, IconGift, IconInfo, IconX } from '../components/icons'
 import { useAppStore, formatTime, getDDay } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
 import { TimeEditModal } from '../components/TimeEditModal'
 import { DiaryEvent, BreastData, FormulaData, TempData, DataInfo } from '../../shared/types'
-import { differenceInMinutes, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
+import { differenceInMinutes, differenceInDays, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
+import { getMilestones, getUpcoming, Milestone } from '../lib/milestones'
+import { getCurrentFormulaGuidance } from '../lib/guidance'
+
+// ---------------------------------------------------------------------------
+// Milestone dismiss persistence
+// ---------------------------------------------------------------------------
+const MILESTONE_DISMISS_KEY = 'babydiary.milestoneDismiss'
+
+function getDismissed(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(MILESTONE_DISMISS_KEY)
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function setDismissed(id: string, untilDate: string): void {
+  try {
+    const current = getDismissed()
+    // Purge expired entries (past dates)
+    const today = format(new Date(), 'yyyy-MM-dd')
+    const cleaned: Record<string, string> = {}
+    for (const [k, v] of Object.entries(current)) {
+      if (v >= today) cleaned[k] = v
+    }
+    cleaned[id] = untilDate
+    localStorage.setItem(MILESTONE_DISMISS_KEY, JSON.stringify(cleaned))
+  } catch { /* ignore */ }
+}
+
+function isDismissed(id: string, milestoneDate: string): boolean {
+  const dismissed = getDismissed()
+  const today = format(new Date(), 'yyyy-MM-dd')
+  // Dismissed until the milestone date passes (dismiss entry expires day after)
+  const dismissedUntil = dismissed[id]
+  if (!dismissedUntil) return false
+  // If milestone date has passed, auto-clear (no longer relevant)
+  if (milestoneDate < today) return false
+  return true
+}
+
+// ---------------------------------------------------------------------------
+// MilestoneAlertBanners — home page upcoming milestone notifications
+// ---------------------------------------------------------------------------
+interface MilestoneAlertBannersProps {
+  birthdate: string
+  gender?: 'girl' | 'boy'
+  lang: string
+}
+
+function MilestoneAlertBanners({ birthdate, gender, lang }: MilestoneAlertBannersProps) {
+  const { t, i18n: i18nInstance } = useTranslation()
+  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+  const [dismissed, setDismissedState] = useState<Record<string, string>>(getDismissed)
+  const today = format(new Date(), 'yyyy-MM-dd')
+
+  const milestones = useMemo(
+    () => getMilestones(birthdate, gender),
+    [birthdate, gender]
+  )
+
+  const upcoming = useMemo(
+    () => getUpcoming(milestones, today, 7).slice(0, 2),
+    [milestones, today]
+  )
+
+  // Filter out dismissed
+  const visible = upcoming.filter(m => !isDismissed(m.id, m.date))
+
+  if (visible.length === 0) return null
+
+  const handleDismiss = (id: string, milestoneDate: string) => {
+    setDismissed(id, milestoneDate)
+    setDismissedState(getDismissed())
+  }
+
+  return (
+    <>
+      {visible.map(m => {
+        const name = lang === 'ja' ? m.nameJa : m.nameKo
+        const isToday_ = m.daysUntil === 0
+        const dateFormatted = format(parseISO(m.date), t('date.formatLong'), { locale: dateFnsLocale })
+
+        let text: string
+        if (isToday_) {
+          text = lang === 'ja'
+            ? t('milestone.upcomingBannerToday', { name })
+            : t('milestone.upcomingBannerToday', { name })
+        } else {
+          text = lang === 'ja'
+            ? t('milestone.upcomingBanner', { days: m.daysUntil, date: dateFormatted, name })
+            : `D-${m.daysUntil} · ${name} — ${dateFormatted}에 예정되어 있어요`
+        }
+
+        return (
+          <div
+            key={m.id}
+            className={`milestone-alert-banner${isToday_ ? ' milestone-today' : ''}`}
+          >
+            <div className="milestone-alert-icon" aria-hidden="true">
+              <IconStar size={16} color="currentColor" />
+            </div>
+            <div className="milestone-alert-body">
+              <div className="milestone-alert-text">{text}</div>
+            </div>
+            <button
+              className="milestone-alert-dismiss"
+              onClick={() => handleDismiss(m.id, m.date)}
+              aria-label={t('milestone.dismiss')}
+            >
+              <IconX size={14} color="currentColor" />
+            </button>
+          </div>
+        )
+      })}
+    </>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Insight / right-rail panel
@@ -20,6 +139,7 @@ interface InsightsPanelProps {
   todayPeeCount: number
   todayPoopCount: number
   dataInfo: DataInfo | null
+  birthdate?: string
 }
 
 function InsightsPanel({
@@ -28,6 +148,7 @@ function InsightsPanel({
   todayPeeCount,
   todayPoopCount,
   dataInfo,
+  birthdate,
 }: InsightsPanelProps) {
   const { t, i18n: i18nInstance } = useTranslation()
   const [, setTick] = useState(0)
@@ -75,6 +196,16 @@ function InsightsPanel({
   const backupStr = dataInfo?.lastBackupTime
     ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
     : t('settings.noBackup')
+
+  // Current formula guidance
+  const formulaGuidance = useMemo(() => {
+    if (!birthdate) return null
+    const ageInDays = differenceInDays(new Date(), parseISO(birthdate))
+    if (ageInDays < 0) return null
+    return getCurrentFormulaGuidance(ageInDays)
+  }, [birthdate])
+
+  const lang = i18nInstance.language
 
   const rows = [
     {
@@ -139,6 +270,25 @@ function InsightsPanel({
         </div>
         )
       })}
+
+      {/* Current formula guidance row */}
+      {formulaGuidance && (
+        <div className="insight-row">
+          <div
+            className="insight-icon"
+            style={{ background: 'var(--sky)' }}
+            aria-hidden="true"
+          >
+            <IconInfo size={16} color="var(--sky-text)" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="insight-label">{t('guidance.currentFormulaLabel')}</div>
+            <div className="insight-value" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              {lang === 'ja' ? formulaGuidance.bodyJa : formulaGuidance.bodyKo}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Backup card */}
       <div className="backup-card">
@@ -656,7 +806,9 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const babyName = settings?.baby?.name || t('sidebar.defaultBabyName')
   const birthdate = settings?.baby?.birthdate
+  const gender = settings?.baby?.gender
   const dday = birthdate ? getDDay(birthdate) : null
+  const lang = i18nInstance.language
 
   const lastFormulaMl = React.useMemo(() => {
     const formulas = events.filter(e => !e.deleted && e.type === 'formula')
@@ -812,6 +964,15 @@ export function HomePage({ onNavigate }: HomePageProps) {
         </button>
       </div>
 
+      {/* ── Milestone alert banners (within next 7 days, only when birthdate set) ── */}
+      {birthdate && (
+        <MilestoneAlertBanners
+          birthdate={birthdate}
+          gender={gender}
+          lang={lang}
+        />
+      )}
+
       {/* ── Quick record banners ── */}
       <div className="quick-record-row" ref={quickRecordRef} id="quick-record-row">
         {quickBtns.map(({ cls, Icon, label, badge, onClick }, i) => (
@@ -859,6 +1020,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           todayPeeCount={peeCount}
           todayPoopCount={poopCount}
           dataInfo={dataInfo}
+          birthdate={birthdate ?? undefined}
         />
       </div>
 
