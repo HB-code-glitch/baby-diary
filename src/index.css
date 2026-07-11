@@ -642,7 +642,16 @@ body {
 .stat-card-featured {
   grid-row: 1 / 3;
   padding: 20px 18px;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 0;
+}
+
+.stat-card-featured .stat-card-label {
+  margin-bottom: 6px;
+}
+
+.stat-card-featured .stat-card-num {
+  margin-bottom: 8px;
 }
 
 .stat-card-label {

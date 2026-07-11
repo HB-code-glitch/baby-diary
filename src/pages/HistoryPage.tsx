@@ -70,7 +70,7 @@ function MonthView({ selectedDate, displayMonth, allEvents, onSelectDay, onPrevM
   const WEEKDAY_KEYS = ['weekdaySun', 'weekdayMon', 'weekdayTue', 'weekdayWed', 'weekdayThu', 'weekdayFri', 'weekdaySat'] as const
 
   return (
-    <div className="cal-month">
+    <div className="card cal-month">
       {/* Month navigation */}
       <div className="cal-nav">
         <button className="btn-secondary cal-nav-arrow" onClick={onPrevMonth} aria-label="prev month">
@@ -200,7 +200,7 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
   const birthdate = settings?.baby?.birthdate
 
   return (
-    <div className="cal-week">
+    <div className="card cal-week">
       {/* Week navigation */}
       <div className="cal-nav">
         <button className="btn-secondary cal-nav-arrow" onClick={onPrevWeek} aria-label="prev week">
