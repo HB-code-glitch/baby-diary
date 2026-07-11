@@ -10,7 +10,9 @@ import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
 import { getMilestones, getUpcoming, Milestone } from '../lib/milestones'
-import { getCurrentFormulaGuidance, getGuidanceForAge } from '../lib/guidance'
+import { getCurrentFormulaGuidance, getGuidanceForAge, GUIDANCE_MARKERS, evaluateFever, getFeedingBand, FeverLevel } from '../lib/guidance'
+import { FeedingTipPopup } from '../components/FeedingTipPopup'
+import { FeverModal } from '../components/FeverModal'
 import { useSyncStatus } from '../sync/useSync'
 
 // ---------------------------------------------------------------------------
@@ -814,7 +816,17 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
   const [timeEditEvent, setTimeEditEvent] = useState<DiaryEvent | null>(null)
   const [timerTick, setTimerTick] = useState(0)
+  const [feedingTip, setFeedingTip] = useState<{
+    type: 'formula' | 'breast'
+    sourceLabel: string
+  } | null>(null)
+  const [feverModal, setFeverModal] = useState<{
+    celsius: number
+    level: Exclude<FeverLevel, null | 'caution'>
+  } | null>(null)
   const quickRecordRef = useRef<HTMLDivElement>(null)
+  const todayFormulaMlNow = useAppStore(s => s.todayFormulaTotalMl())
+  const todayFeedingCountNow = useAppStore(s => s.todayFeedingCount())
 
   const today = todayEvents()
 
@@ -826,6 +838,11 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const gender = settings?.baby?.gender
   const dday = birthdate ? getDDay(birthdate) : null
   const lang = i18nInstance.language
+
+  const ageDays = React.useMemo<number | null>(() => {
+    if (!birthdate) return null
+    return differenceInDays(new Date(), parseISO(birthdate))
+  }, [birthdate])
 
   const lastFormulaMl = React.useMemo(() => {
     const formulas = events.filter(e => !e.deleted && e.type === 'formula')
@@ -883,18 +900,65 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const handleTempConfirm = async (celsius: number) => {
     setPopover(null)
-    await quickRecord(() => addTemp(celsius), `${t('quickBtn.temp')} ${celsius.toFixed(1)}℃`)
+    const label = `${t('quickBtn.temp')} ${celsius.toFixed(1)}℃`
+    const level = evaluateFever(celsius, ageDays)
+    if (level === 'emergency' || level === 'danger' || level === 'warning') {
+      // Blocking modal — save directly (no undo available while modal is open)
+      try {
+        await addTemp(celsius)
+        setFeverModal({ celsius, level })
+      } catch {
+        showToast({ message: t('toast.saveFailed') })
+      }
+    } else if (level === 'caution') {
+      // Save with undo available + amber hint toast
+      await quickRecord(() => addTemp(celsius), label)
+      showToast({ message: t('feverModal.cautionToast'), className: 'toast-amber' })
+    } else {
+      // Normal
+      await quickRecord(() => addTemp(celsius), label)
+    }
   }
 
   const handleBreastConfirm = async (side: 'L' | 'R' | 'both', minutes?: number, startedAt?: string) => {
     setPopover(null)
     const sideLabel = side === 'L' ? t('breast.left') : side === 'R' ? t('breast.right') : t('breast.both')
-    await quickRecord(() => addBreast(side, minutes, startedAt), `${t('quickBtn.breast')}(${sideLabel})`)
+    const label = `${t('quickBtn.breast')}(${sideLabel})`
+    if (ageDays === null) {
+      // No birthdate — normal toast
+      await quickRecord(() => addBreast(side, minutes, startedAt), label)
+      return
+    }
+    // With birthdate — show feeding tip popup (replaces success toast)
+    try {
+      await addBreast(side, minutes, startedAt)
+      const band = getFeedingBand(ageDays)
+      const marker = band
+        ? GUIDANCE_MARKERS.find(m => m.id === band.id)
+        : GUIDANCE_MARKERS.find(m => m.id === 'formula_0_1mo')
+      setFeedingTip({ type: 'breast', sourceLabel: marker?.sourceLabel ?? 'AAP' })
+    } catch {
+      showToast({ message: t('toast.saveFailed') })
+    }
   }
 
   const handleFormulaConfirm = async (ml: number) => {
     setPopover(null)
-    await quickRecord(() => addFormula(ml), `${t('quickBtn.formula')} ${ml}ml`)
+    const label = `${t('quickBtn.formula')} ${ml}ml`
+    if (ageDays === null) {
+      await quickRecord(() => addFormula(ml), label)
+      return
+    }
+    try {
+      await addFormula(ml)
+      const band = getFeedingBand(ageDays)
+      const marker = band
+        ? GUIDANCE_MARKERS.find(m => m.id === band.id)
+        : GUIDANCE_MARKERS.find(m => m.id === 'formula_0_1mo')
+      setFeedingTip({ type: 'formula', sourceLabel: marker?.sourceLabel ?? 'AAP' })
+    } catch {
+      showToast({ message: t('toast.saveFailed') })
+    }
   }
 
   const handleTimeEditConfirm = async (newAt: string) => {
@@ -1080,6 +1144,31 @@ export function HomePage({ onNavigate }: HomePageProps) {
           currentAt={timeEditEvent.at}
           onConfirm={handleTimeEditConfirm}
           onClose={() => setTimeEditEvent(null)}
+        />
+      )}
+
+      {/* Feeding tip popup */}
+      {feedingTip && ageDays !== null && (
+        <FeedingTipPopup
+          type={feedingTip.type}
+          ageDays={ageDays}
+          lastBreastSide={lastBreastSide}
+          todayFormulaTotalMl={todayFormulaMlNow}
+          todayFeedingCount={todayFeedingCountNow}
+          sourceLabel={feedingTip.sourceLabel}
+          onNavigate={onNavigate}
+          onDismiss={() => setFeedingTip(null)}
+        />
+      )}
+
+      {/* Fever modal */}
+      {feverModal && (
+        <FeverModal
+          celsius={feverModal.celsius}
+          level={feverModal.level}
+          ageDays={ageDays}
+          lang={lang}
+          onConfirm={() => setFeverModal(null)}
         />
       )}
     </div>
