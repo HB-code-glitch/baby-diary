@@ -44,6 +44,9 @@
   "build": {
     "appId": "com.family.babydiary",
     "productName": "Baby Diary",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
