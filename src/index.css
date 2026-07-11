@@ -1169,6 +1169,13 @@ body {
   pointer-events: none;
 }
 
+.toast.toast-amber {
+  background: rgba(70, 45, 5, 0.88);
+  box-shadow: var(--glass-inset-light),
+              0 8px 28px rgba(180, 120, 20, 0.25);
+  border: 1px solid rgba(210, 150, 30, 0.25);
+}
+
 .toast.toast-error {
   background: rgba(61,18,18,0.88);
   box-shadow: var(--glass-inset-light),
@@ -2861,4 +2868,248 @@ body {
   .cal-week-row { transition: none; }
   .cal-week-row:hover { transform: none; box-shadow: var(--shadow-card) !important; }
   .cal-day-cell { transition: none; }
+}
+
+/* ══════════════════════════════════════════
+   FEEDING TIP POPUP — slides up above toast
+   ══════════════════════════════════════════ */
+.feeding-tip-popup {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1090;
+  width: min(360px, calc(100vw - 32px));
+  background: rgba(22, 21, 19, 0.82);
+  color: #ffffff;
+  padding: 14px 16px 10px;
+  border-radius: 18px;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-inset-light), 0 8px 28px rgba(22, 21, 19, 0.32);
+  animation: toastIn var(--dur-appear) var(--spring-snappy) both;
+  pointer-events: auto;
+}
+.feeding-tip-popup-amber {
+  background: rgba(80, 55, 10, 0.88);
+  box-shadow: var(--glass-inset-light), 0 8px 28px rgba(200, 140, 30, 0.25);
+  border: 1px solid rgba(220, 160, 40, 0.28);
+}
+.feeding-tip-dismiss {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: rgba(255, 255, 255, 0.8);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.feeding-tip-dismiss:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+.feeding-tip-main {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  padding-right: 24px;
+  margin-bottom: 6px;
+}
+.feeding-tip-sub {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-bottom: 8px;
+}
+.feeding-tip-footer {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1.4;
+  font-family: inherit;
+}
+.feeding-tip-footer:hover {
+  color: rgba(255, 255, 255, 0.75);
+}
+.feeding-tip-footer-note {
+  opacity: 0.7;
+}
+@media (prefers-reduced-motion: reduce) {
+  .feeding-tip-popup {
+    animation: none;
+  }
+}
+
+/* ══════════════════════════════════════════
+   FEVER MODAL — blocking red/amber alert
+   ══════════════════════════════════════════ */
+.fever-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1200;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.fever-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1201;
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border-radius: 22px;
+  padding: 24px 20px 20px;
+  animation: glassAppear var(--dur-appear) var(--spring-snappy) both;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.fever-modal-red {
+  background: rgba(60, 10, 10, 0.90);
+  border: 1px solid rgba(220, 60, 60, 0.35);
+  box-shadow: var(--glass-inset-light), 0 16px 48px rgba(200, 40, 40, 0.40);
+  color: #fff;
+}
+.fever-modal-amber {
+  background: rgba(70, 45, 5, 0.90);
+  border: 1px solid rgba(220, 150, 30, 0.30);
+  box-shadow: var(--glass-inset-light), 0 16px 48px rgba(200, 120, 20, 0.30);
+  color: #fff;
+}
+.fever-modal-temp {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+.fever-modal-title {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 0 0 12px;
+}
+.fever-modal-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.88);
+  margin: 0 0 14px;
+  border-left: 3px solid rgba(255, 120, 120, 0.6);
+  padding-left: 10px;
+}
+.fever-modal-section {
+  margin-bottom: 12px;
+}
+.fever-modal-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-bottom: 6px;
+}
+.fever-modal-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.fever-modal-list-item {
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.88);
+  padding-left: 14px;
+  position: relative;
+}
+.fever-modal-list-item::before {
+  content: '\00B7';
+  position: absolute;
+  left: 4px;
+  opacity: 0.6;
+}
+.fever-modal-flag-item {
+  color: rgba(255, 200, 200, 0.95);
+}
+.fever-modal-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.65);
+  margin: 0 0 10px;
+}
+.fever-modal-note-rule {
+  font-size: 11.5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+.fever-modal-collapse-btn {
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  margin-bottom: 8px;
+  font-family: inherit;
+}
+.fever-modal-collapse-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.fever-modal-flags {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.fever-modal-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding-top: 10px;
+  margin-top: 8px;
+  margin-bottom: 14px;
+}
+.fever-modal-source {
+  font-size: 10.5px;
+  opacity: 0.5;
+  display: block;
+  margin-bottom: 4px;
+}
+.fever-modal-disclaimer {
+  font-size: 10.5px;
+  opacity: 0.55;
+  line-height: 1.4;
+  margin: 0;
+}
+.fever-modal-confirm {
+  width: 100%;
+  margin-top: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fever-modal {
+    animation: none;
+    transform: translate(-50%, -50%);
+  }
+}
+@media (prefers-color-scheme: light) {
+  .fever-modal-red {
+    background: rgba(80, 8, 8, 0.93);
+  }
+  .fever-modal-amber {
+    background: rgba(90, 55, 0, 0.93);
+  }
 }

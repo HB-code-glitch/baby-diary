@@ -7,6 +7,7 @@ interface ToastItem {
   undoLabel?: string
   onUndo?: () => void
   onTimeEdit?: () => void
+  className?: string
 }
 
 interface ToastContextValue {
@@ -45,7 +46,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
       <div className="toast-container">
         {toasts.map(toast => (
-          <div key={toast.id} className="toast">
+          <div key={toast.id} className={['toast', toast.className].filter(Boolean).join(' ')}>
             <span>{toast.message}</span>
             {toast.onTimeEdit && (
               <button
