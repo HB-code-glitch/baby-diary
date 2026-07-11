@@ -9,11 +9,12 @@ interface NavItem {
   id: Page
   labelKey: string
   Icon: React.ComponentType<{ size?: number; color?: string }>
+  badgeKeys?: ('today' | 'history')
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home',     labelKey: 'nav.home',     Icon: IconHome },
-  { id: 'history',  labelKey: 'nav.history',  Icon: IconCalendar },
+  { id: 'home',     labelKey: 'nav.home',     Icon: IconHome,     badgeKeys: 'today' },
+  { id: 'history',  labelKey: 'nav.history',  Icon: IconCalendar, badgeKeys: 'history' },
   { id: 'stats',    labelKey: 'nav.stats',    Icon: IconChart },
   { id: 'diary',    labelKey: 'nav.diary',    Icon: IconBook },
   { id: 'messages', labelKey: 'nav.messages', Icon: IconMail },
@@ -25,16 +26,15 @@ interface SidebarProps {
   onNavigate: (page: Page) => void
 }
 
-/** Warm palette pairs: [bg, text] using CSS hex values */
+/** Warm palette pairs: [bg, text] */
 const WARM_PALETTE: [string, string][] = [
-  ['#e0edd9', '#3d7535'], // sage
-  ['#fde8df', '#c55c30'], // peach
-  ['#fef0cd', '#b07208'], // amber
-  ['#fde3e8', '#d44060'], // rose
-  ['#faf0d0', '#8c6a1a'], // warm sand
+  ['#e3f3e9', '#1d6636'], // mint
+  ['#fde9e4', '#a83320'], // blush
+  ['#fbf3d8', '#7a5f10'], // butter
+  ['#e7eef8', '#1a4a8a'], // sky
+  ['#e8f0e0', '#3a5e28'], // sage
 ]
 
-/** Deterministic warm color pair from name string */
 function nameToWarmPair(name: string): [string, string] {
   let hash = 0
   for (let i = 0; i < name.length; i++) {
@@ -45,6 +45,7 @@ function nameToWarmPair(name: string): [string, string] {
 
 export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const settings = useAppStore(s => s.settings)
+  const todayCount = useAppStore(s => s.todayEvents().length)
   const { t } = useTranslation()
 
   const babyName = settings?.baby?.name || t('sidebar.defaultBabyName')
@@ -57,13 +58,13 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   return (
     <nav className="sidebar">
       <div className="sidebar-header">
+        {/* Wordmark */}
+        <div className="sidebar-logo">Baby Diary</div>
+
         {/* Baby avatar circle */}
         <div
           className="sidebar-avatar"
-          style={{
-            background: avatarBg,
-            color: avatarFg,
-          }}
+          style={{ background: avatarBg, color: avatarFg }}
           aria-hidden="true"
         >
           {initial}
@@ -77,19 +78,30 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       </div>
 
       <div className="sidebar-nav">
-        {NAV_ITEMS.map(({ id, labelKey, Icon }) => (
-          <button
-            key={id}
-            className={`nav-item${currentPage === id ? ' active' : ''}`}
-            onClick={() => onNavigate(id)}
-          >
-            <Icon
-              size={16}
-              color={currentPage === id ? 'var(--stone-700)' : 'var(--stone-500)'}
-            />
-            <span>{t(labelKey)}</span>
-          </button>
-        ))}
+        {NAV_ITEMS.map(({ id, labelKey, Icon, badgeKeys }) => {
+          const isActive = currentPage === id
+          // Show count badge on 오늘(home) and 기록(history) items
+          const badge = badgeKeys === 'today' && todayCount > 0
+            ? todayCount
+            : null
+
+          return (
+            <button
+              key={id}
+              className={`nav-item${isActive ? ' active' : ''}`}
+              onClick={() => onNavigate(id)}
+            >
+              <Icon
+                size={18}
+                color={isActive ? '#ffffff' : 'var(--text-secondary)'}
+              />
+              <span>{t(labelKey)}</span>
+              {badge != null && (
+                <span className="nav-badge">{badge}</span>
+              )}
+            </button>
+          )
+        })}
       </div>
     </nav>
   )

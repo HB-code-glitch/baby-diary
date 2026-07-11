@@ -22,13 +22,22 @@
     "durationHoursMins": "{{hours}}時間{{mins}}分",
     "durationMins": "{{mins}}分",
     "breastMilk": "母乳",
-    "formula": "ミルク"
+    "formula": "ミルク",
+    "subtitle": "今日も頑張る家族の記録です",
+    "addRecord": "+ 記録",
+    "insightsTitle": "今日のまとめ",
+    "lastFeedingLabel": "最後の授乳",
+    "nextBreastLabel": "次の授乳おすすめ側",
+    "todayDiaperLabel": "今日のおむつ",
+    "recentTempLabel": "最近の体温",
+    "backupLabel": "バックアップ状態"
   },
   "stat": {
     "formulaLabel": "ミルク合計",
     "peeLabel": "おしっこ",
     "poopLabel": "うんち",
-    "feedLabel": "授乳回数"
+    "feedLabel": "授乳回数",
+    "tempLabel": "最近の体温"
   },
   "summary": {
     "pee": "おしっこ {{count}}回",

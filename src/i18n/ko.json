@@ -22,13 +22,22 @@
     "durationHoursMins": "{{hours}}시간 {{mins}}분",
     "durationMins": "{{mins}}분",
     "breastMilk": "모유",
-    "formula": "분유"
+    "formula": "분유",
+    "subtitle": "오늘도 수고하는 우리 가족의 기록이에요",
+    "addRecord": "+ 기록",
+    "insightsTitle": "오늘 요약",
+    "lastFeedingLabel": "마지막 수유",
+    "nextBreastLabel": "다음 수유 추천쪽",
+    "todayDiaperLabel": "오늘 기저귀",
+    "recentTempLabel": "최근 체온",
+    "backupLabel": "백업 상태"
   },
   "stat": {
     "formulaLabel": "분유 총량",
     "peeLabel": "소변",
     "poopLabel": "대변",
-    "feedLabel": "수유 횟수"
+    "feedLabel": "수유 횟수",
+    "tempLabel": "최근 체온"
   },
   "summary": {
     "pee": "소변 {{count}}회",
