@@ -20,10 +20,13 @@ if (process.env.BABYDIARY_TEST_USERDATA) {
 
 // F3: Prevent concurrent instances from writing to the same JSONL files simultaneously.
 // requestSingleInstanceLock() is synchronous and must be called before app is ready.
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  // Another instance is already running; quit immediately.
-  app.quit()
+// P26: Skip the lock when running under E2E test env so prod and test can coexist.
+if (!process.env.BABYDIARY_TEST_USERDATA) {
+  const gotLock = app.requestSingleInstanceLock()
+  if (!gotLock) {
+    // Another instance is already running; quit immediately.
+    app.quit()
+  }
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -63,8 +66,11 @@ function createWindow(): void {
 }
 
 function setupIPC(): void {
+  // P20: Use cached getAll() instead of loadAll() on every IPC call.
+  // loadAll() clears the index and re-scans disk — O(N) I/O per reconcile.
+  // getAll() returns the in-memory index (O(1)) which is always up-to-date after append().
   ipcMain.handle('events:list', async () => {
-    return eventLog.loadAll()
+    return eventLog.getAll()
   })
 
   ipcMain.handle('events:append', async (_, event: DiaryEvent) => {
@@ -184,6 +190,8 @@ app.whenReady().then(() => {
   settingsStore = new SettingsStore(userDataPath)
   backupManager = new BackupManager(userDataPath)
 
+  // P20: Explicit startup scan so index is warm before any IPC arrives.
+  // After this, getAll() is used for 'events:list' (no re-scan per call).
   eventLog.loadAll()
 
   setupIPC()
@@ -194,6 +202,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
+      // P21: If the backup timer was stopped by window-all-closed (non-darwin
+      // doesn't reach here, but on macOS it does), restart it so the 6-hour
+      // cycle resumes after dock-reopen.
+      if (!backupManager.isRunning()) backupManager.start()
     }
   })
 })
@@ -208,8 +220,12 @@ app.on('before-quit', (event) => {
 })
 
 app.on('window-all-closed', () => {
-  backupManager.stop()
+  // P21: Only stop the backup timer on non-darwin. On macOS, the app stays
+  // alive when all windows close (dock icon remains) and backup should
+  // continue running. Stopping it here would leave the macOS session without
+  // a backup timer until the next dock-reopen (handled in activate above).
   if (process.platform !== 'darwin') {
+    backupManager.stop()
     app.quit()
   }
 })

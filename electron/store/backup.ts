@@ -70,6 +70,11 @@ export class BackupManager {
     }
   }
 
+  /** P21: Returns true if the periodic backup interval is currently active. */
+  isRunning(): boolean {
+    return this.intervalHandle !== null
+  }
+
   getLastBackupTime(): string | null {
     return this.lastBackupTime
   }
