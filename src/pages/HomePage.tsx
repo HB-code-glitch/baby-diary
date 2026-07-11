@@ -96,15 +96,13 @@ function MilestoneAlertBanners({ birthdate, gender, lang }: MilestoneAlertBanner
         const isToday_ = m.daysUntil === 0
         const dateFormatted = format(parseISO(m.date), t('date.formatLong'), { locale: dateFnsLocale })
 
+        // P30: both ja and ko use the same i18n key for isToday_ (no dead branch)
+        // P29: ko upcoming banner now uses t() so editing ko.json changes the UI
         let text: string
         if (isToday_) {
-          text = lang === 'ja'
-            ? t('milestone.upcomingBannerToday', { name })
-            : t('milestone.upcomingBannerToday', { name })
+          text = t('milestone.upcomingBannerToday', { name })
         } else {
-          text = lang === 'ja'
-            ? t('milestone.upcomingBanner', { days: m.daysUntil, date: dateFormatted, name })
-            : `D-${m.daysUntil} · ${name} — ${dateFormatted}에 예정되어 있어요`
+          text = t('milestone.upcomingBanner', { days: m.daysUntil, date: dateFormatted, name })
         }
 
         return (
@@ -555,8 +553,12 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
   }, [])
 
   const handleSubmit = () => {
+    // P17: Clamp to physiologically valid range [35.0, 42.0].
+    // HTML min/max attributes are bypassed by direct input — enforce in JS too.
     const n = parseFloat(value)
-    if (!isNaN(n)) onConfirm(n)
+    if (!isNaN(n) && isFinite(n)) {
+      onConfirm(Math.min(Math.max(n, 35.0), 42.0))
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -619,12 +621,24 @@ interface NursingTimerState {
 
 const NURSING_TIMER_KEY = 'babydiary.nursingTimer'
 
+/** P15: Maximum elapsed duration (4h). Abandoned overnight timers are discarded. */
+const MAX_ELAPSED_MS = 4 * 60 * 60 * 1000
+const MAX_ELAPSED_MIN = 240
+
 function loadNursingTimer(): NursingTimerState {
   try {
     const raw = localStorage.getItem(NURSING_TIMER_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as NursingTimerState
-      if (parsed.running && parsed.startedAt) return parsed
+      if (parsed.running && parsed.startedAt) {
+        // P15: Discard timers older than 4 hours — an abandoned overnight timer
+        // would otherwise record a 720+ min entry.
+        if (Date.now() - parsed.startedAt > MAX_ELAPSED_MS) {
+          localStorage.removeItem(NURSING_TIMER_KEY)
+          return { running: false, startedAt: null, elapsed: 0 }
+        }
+        return parsed
+      }
     }
   } catch { /* ignore */ }
   return { running: false, startedAt: null, elapsed: 0 }
@@ -703,15 +717,19 @@ function BreastPopover({ anchor, onConfirm, onClose, lastBreastSide, onTimerChan
 
   const handleStopAndRecord = () => {
     if (nursingTimer.running && nursingTimer.startedAt != null) {
-      const elapsedSec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
-      const elapsedMin = Math.max(1, Math.ceil(elapsedSec / 60))
-      const startedAtISO = new Date(nursingTimer.startedAt).toISOString()
+      const now = Date.now()
+      const elapsedSec = Math.floor((now - nursingTimer.startedAt) / 1000)
+      // P15: cap at MAX_ELAPSED_MIN (240 min) in case timer ran very long
+      const elapsedMin = Math.min(MAX_ELAPSED_MIN, Math.max(1, Math.ceil(elapsedSec / 60)))
+      // P14: use stop time as canonical `at` so a session crossing midnight lands
+      // in today's bucket (not yesterday's when startedAt was yesterday).
+      const stopAtISO = new Date(now).toISOString()
       nursingTimer.running = false
       nursingTimer.startedAt = null
       saveNursingTimer(nursingTimer)
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current)
       onTimerChange()
-      onConfirm(side, elapsedMin, startedAtISO)
+      onConfirm(side, elapsedMin, stopAtISO)
     }
   }
 
@@ -724,8 +742,12 @@ function BreastPopover({ anchor, onConfirm, onClose, lastBreastSide, onTimerChan
   }
 
   const handleManualRecord = () => {
-    const m = minutes ? parseInt(minutes, 10) : undefined
-    onConfirm(side, isNaN(m as number) ? undefined : m)
+    // P19: clamp breast duration to [1, 120] minutes; treat 0/"" as undefined (no duration)
+    const raw = minutes ? parseInt(minutes, 10) : undefined
+    const m = raw != null && !isNaN(raw) && raw > 0
+      ? Math.min(Math.max(1, raw), 120)
+      : undefined
+    onConfirm(side, m)
   }
 
   // Clamp left so popover doesn't overflow right edge (breast popover ~280px)
@@ -869,7 +891,8 @@ function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopove
       >
         <div className="label" style={{ marginBottom: 8 }}>{t('popover.formulaAmount')}</div>
         <div className="stepper" style={{ marginBottom: 10 }}>
-          <button type="button" className="stepper-btn" onClick={() => setMl(v => Math.max(0, v - 10))}>−</button>
+          {/* P18: Floor at 10 so stepper never produces 0-ml formula entry */}
+          <button type="button" className="stepper-btn" onClick={() => setMl(v => Math.max(10, v - 10))}>−</button>
           <div className="stepper-value">{ml}</div>
           <span style={{ fontSize: 12, color: 'var(--text-muted)', paddingRight: 6 }}>ml</span>
           <button type="button" className="stepper-btn" onClick={() => setMl(v => v + 10)}>+</button>
@@ -1116,15 +1139,17 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const handleFloatingTimerStop = useCallback(() => {
     if (nursingTimer.running && nursingTimer.startedAt != null) {
-      const elapsedSec = Math.floor((Date.now() - nursingTimer.startedAt) / 1000)
-      const elapsedMin = Math.max(1, Math.ceil(elapsedSec / 60))
-      const startedAtISO = new Date(nursingTimer.startedAt).toISOString()
+      const now = Date.now()
+      const elapsedSec = Math.floor((now - nursingTimer.startedAt) / 1000)
+      // P14+P15: stop time is canonical `at`; cap at MAX_ELAPSED_MIN
+      const elapsedMin = Math.min(MAX_ELAPSED_MIN, Math.max(1, Math.ceil(elapsedSec / 60)))
+      const stopAtISO = new Date(now).toISOString()
       const side: 'L' | 'R' | 'both' = lastBreastSide === 'L' ? 'R' : lastBreastSide === 'R' ? 'L' : 'both'
       nursingTimer.running = false
       nursingTimer.startedAt = null
       saveNursingTimer(nursingTimer)
       setTimerTick(t => t + 1)
-      handleBreastConfirm(side, elapsedMin, startedAtISO)
+      handleBreastConfirm(side, elapsedMin, stopAtISO)
     }
   }, [lastBreastSide]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1136,6 +1161,9 @@ export function HomePage({ onNavigate }: HomePageProps) {
       if (e.ctrlKey || e.metaKey || e.altKey) return
       if (e.key === 'Escape' && quickMenuAnchor) { setQuickMenuAnchor(null); return }
       if (popover) return
+      // P24: Suppress digit shortcuts while the tutorial overlay is active.
+      // Pressing '1' during tour would silently record a pee event under the overlay.
+      if (document.querySelector('.tour-overlay, .tour-overlay-strip')) return
 
       // Digits work from main view (quick-record row always visible) or from the menu
       switch (e.key) {
