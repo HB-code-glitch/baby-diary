@@ -103,12 +103,12 @@ export class EventLog {
     return Array.from(this.index.values())
   }
 
-  append(event: DiaryEvent): boolean {
+  append(event: DiaryEvent): 'ok' | 'duplicate' | 'error' {
     // F4: validate before touching the filesystem
     const validationError = validateEvent(event)
     if (validationError) {
       console.error(`[EventLog] Rejected invalid event: ${validationError}`, event)
-      return false
+      return 'error'
     }
 
     this.ensureDataDir()
@@ -119,7 +119,7 @@ export class EventLog {
 
     const existing = this.index.get(event.id)
     if (existing && existing.rev === event.rev) {
-      return false
+      return 'duplicate'
     }
 
     const filePath = this.getMonthFile(event.at)
@@ -155,12 +155,17 @@ export class EventLog {
       // File doesn't exist yet — will be created by the 'a' open below; no action needed.
     }
 
-    const fd = fs.openSync(filePath, 'a')
     try {
-      fs.writeSync(fd, line)
-      fs.fsyncSync(fd)
-    } finally {
-      fs.closeSync(fd)
+      const fd = fs.openSync(filePath, 'a')
+      try {
+        fs.writeSync(fd, line)
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch (err) {
+      console.error('[EventLog] Failed to write event to disk:', err)
+      return 'error'
     }
 
     if (!existing || event.rev > existing.rev) {
@@ -171,7 +176,7 @@ export class EventLog {
       }
     }
 
-    return true
+    return 'ok'
   }
 
   getAll(): DiaryEvent[] {

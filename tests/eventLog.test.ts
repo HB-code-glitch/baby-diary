@@ -95,8 +95,8 @@ describe('EventLog', () => {
     const r1 = log.append(e)
     const r2 = log.append(e)
 
-    expect(r1).toBe(true)
-    expect(r2).toBe(false)
+    expect(r1).toBe('ok')
+    expect(r2).toBe('duplicate')
 
     const events = log.loadAll()
     expect(events).toHaveLength(1)
@@ -137,7 +137,7 @@ describe('EventLog', () => {
     const e2 = makeEvent()
     const log2 = new EventLog({ dataDir: tmpDir })
     const result = log2.append(e2)
-    expect(result).toBe(true)
+    expect(result).toBe('ok')
 
     // Reload fresh — both events must survive (F1 inserted a \n before e2)
     const log3 = new EventLog({ dataDir: tmpDir })
@@ -181,7 +181,7 @@ describe('EventLog', () => {
     const e2 = makeEvent()
     const log2 = new EventLog({ dataDir: tmpDir })
     const appended = log2.append(e2)
-    expect(appended).toBe(true)
+    expect(appended).toBe('ok')
 
     // Reload and verify
     const log3 = new EventLog({ dataDir: tmpDir })
@@ -220,49 +220,78 @@ describe('EventLog', () => {
   it('F4: rejects event with empty id', () => {
     const e = makeEvent({ id: '' })
     const result = log.append(e)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
     expect(log.loadAll()).toHaveLength(0)
   })
 
   it('F4: rejects event with non-positive rev', () => {
     const e = makeEvent({ rev: 0 })
     const result = log.append(e)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
   })
 
   it('F4: rejects event with invalid at date', () => {
     const e = makeEvent({ at: 'not-a-date' })
     const result = log.append(e)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
   })
 
   it('F4: rejects event with invalid type', () => {
     const e = makeEvent({ type: 'unknown' as never })
     const result = log.append(e)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
   })
 
   it('F4: rejects event with non-boolean deleted', () => {
     const e = { ...makeEvent(), deleted: 'yes' }
     const result = log.append(e as never)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
   })
 
   it('F4: rejects event with invalid createdAt', () => {
     const e = makeEvent({ createdAt: 'bad-date' })
     const result = log.append(e)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
   })
 
   it('F4: rejects event with invalid updatedAt', () => {
     const e = makeEvent({ updatedAt: 'bad-date' })
     const result = log.append(e)
-    expect(result).toBe(false)
+    expect(result).toBe('error')
   })
 
   it('F4: accepts a fully valid event', () => {
     const e = makeEvent()
     const result = log.append(e)
-    expect(result).toBe(true)
+    expect(result).toBe('ok')
+  })
+
+  // ── Tri-state return tests ──
+
+  it('tri-state: append returns ok for new event', () => {
+    const e = makeEvent()
+    expect(log.append(e)).toBe('ok')
+  })
+
+  it('tri-state: append returns duplicate for same id+rev', () => {
+    const e = makeEvent()
+    log.append(e)
+    expect(log.append(e)).toBe('duplicate')
+  })
+
+  it('tri-state: append returns error for invalid event (validation failure)', () => {
+    const e = makeEvent({ id: '' })
+    expect(log.append(e)).toBe('error')
+  })
+
+  it('tri-state: duplicate does not add extra line to file', () => {
+    const e = makeEvent()
+    log.append(e)
+    log.append(e)  // duplicate
+
+    const files = fs.readdirSync(tmpDir)
+    const filePath = path.join(tmpDir, files[0])
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim())
+    expect(lines).toHaveLength(1)
   })
 })

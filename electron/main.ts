@@ -59,9 +59,11 @@ function setupIPC(): void {
 
   ipcMain.handle('events:append', async (_, event: DiaryEvent) => {
     const result = eventLog.append(event)
-    if (result && mainWindow) {
+    // Broadcast to renderer only on a genuinely new write (not duplicate/error)
+    if (result === 'ok' && mainWindow) {
       mainWindow.webContents.send('event:appended', event)
     }
+    // Return tri-state string; preload passes it through to renderer
     return result
   })
 
@@ -87,7 +89,15 @@ function setupIPC(): void {
 
     if (format === 'json') {
       const filePath = path.join(destDir, `baby-diary-${timestamp}.json`)
-      fs.writeFileSync(filePath, JSON.stringify(events, null, 2), 'utf-8')
+      const content = JSON.stringify(events, null, 2)
+      // V6: fd + fsyncSync before close for durability
+      const fd = fs.openSync(filePath, 'w')
+      try {
+        fs.writeSync(fd, content, 0, 'utf-8')
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
     } else if (format === 'csv') {
       const filePath = path.join(destDir, `baby-diary-${timestamp}.csv`)
       // Bilingual headers: Korean/Japanese so both parents can read the export
@@ -116,7 +126,15 @@ function setupIPC(): void {
         e.rev,
       ])
       const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
-      fs.writeFileSync(filePath, '﻿' + csv, 'utf-8') // BOM for Excel compatibility
+      const csvContent = '﻿' + csv // BOM for Excel compatibility
+      // V6: fd + fsyncSync before close for durability
+      const fd = fs.openSync(filePath, 'w')
+      try {
+        fs.writeSync(fd, csvContent, 0, 'utf-8')
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
     }
   })
 
@@ -167,6 +185,17 @@ app.whenReady().then(() => {
       createWindow()
     }
   })
+})
+
+// V3: best-effort backup on quit (covers Cmd+Q, system shutdown, etc.)
+app.on('before-quit', () => {
+  try {
+    backupManager.backup().catch(err =>
+      console.error('[Backup] before-quit backup failed:', err)
+    )
+  } catch (err) {
+    console.error('[Backup] before-quit backup error:', err)
+  }
 })
 
 app.on('window-all-closed', () => {

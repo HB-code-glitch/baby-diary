@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react'
-import { ToastProvider } from './components/Toast'
+import { ToastProvider, useToast } from './components/Toast'
 import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
 import { useSyncLifecycle } from './sync/useSync'
 import { setLanguage } from './i18n'
+import i18n from './i18n'
 
 import { HomePage }     from './pages/HomePage'
 import { HistoryPage }  from './pages/HistoryPage'
@@ -22,6 +23,34 @@ function PageContent({ page, onNavigate }: { page: Page; onNavigate: (p: Page) =
     case 'settings': return <SettingsPage />
     default:         return <HomePage onNavigate={onNavigate} />
   }
+}
+
+/** Attach global unhandled error / rejection listeners so nothing is ever silent. */
+function GlobalErrorBoundary() {
+  const { showToast } = useToast()
+
+  useEffect(() => {
+    const handleUnhandledRejection = (e: PromiseRejectionEvent) => {
+      console.error('[GlobalError] Unhandled promise rejection:', e.reason)
+      // Only surface as toast if it looks like an app-level error (not a
+      // benign external library rejection)
+      const msg = e.reason instanceof Error ? e.reason.message : String(e.reason ?? '')
+      if (msg === 'append_failed') {
+        showToast({ message: i18n.t('toast.saveFailed') })
+      }
+    }
+    const handleError = (e: ErrorEvent) => {
+      console.error('[GlobalError] Uncaught error:', e.error ?? e.message)
+    }
+    window.addEventListener('unhandledrejection', handleUnhandledRejection)
+    window.addEventListener('error', handleError)
+    return () => {
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+      window.removeEventListener('error', handleError)
+    }
+  }, [showToast])
+
+  return null
 }
 
 function AppInner() {
@@ -60,6 +89,7 @@ function AppInner() {
 export default function App() {
   return (
     <ToastProvider>
+      <GlobalErrorBoundary />
       <AppInner />
     </ToastProvider>
   )

@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import * as os from 'os'
+import { app } from 'electron'
 
 export class BackupManager {
   private dataDir: string
@@ -12,7 +12,9 @@ export class BackupManager {
   constructor(userDataPath: string) {
     this.dataDir = path.join(userDataPath, 'data')
     this.userDataBackupDir = path.join(userDataPath, 'backups')
-    this.documentsBackupDir = path.join(os.homedir(), 'Documents', 'BabyDiary-백업')
+    // V4: use app.getPath('documents') instead of os.homedir()/Documents so
+    // OneDrive-redirected Documents folders are resolved correctly on Windows.
+    this.documentsBackupDir = path.join(app.getPath('documents'), 'BabyDiary-백업')
   }
 
   private async copyDataFiles(destDir: string): Promise<void> {

@@ -85,7 +85,10 @@
     "undo": "실행취소",
     "editTime": "시간 수정",
     "timeEdited": "시간이 수정되었습니다.",
-    "deleted": "삭제되었습니다."
+    "deleted": "삭제되었습니다.",
+    "saveFailed": "저장에 실패했습니다 — 디스크 공간을 확인해주세요",
+    "editFailed": "수정에 실패했습니다 — 디스크 공간을 확인해주세요",
+    "deleteFailed": "삭제에 실패했습니다 — 디스크 공간을 확인해주세요"
   },
   "timeEdit": {
     "title": "시간 수정",

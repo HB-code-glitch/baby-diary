@@ -186,6 +186,7 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
 
 // ---------------------------------------------------------------------------
 // Nursing timer state (module-level so it survives popover open/close)
+// V5: persisted to localStorage so app restart/reload resumes the timer.
 // ---------------------------------------------------------------------------
 interface NursingTimerState {
   running: boolean
@@ -193,11 +194,32 @@ interface NursingTimerState {
   elapsed: number            // seconds accumulated before pause (unused — always reset)
 }
 
-const nursingTimer: NursingTimerState = {
-  running: false,
-  startedAt: null,
-  elapsed: 0,
+const NURSING_TIMER_KEY = 'babydiary.nursingTimer'
+
+function loadNursingTimer(): NursingTimerState {
+  try {
+    const raw = localStorage.getItem(NURSING_TIMER_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as NursingTimerState
+      if (parsed.running && parsed.startedAt) {
+        return parsed
+      }
+    }
+  } catch { /* ignore */ }
+  return { running: false, startedAt: null, elapsed: 0 }
 }
+
+function saveNursingTimer(state: NursingTimerState): void {
+  try {
+    if (state.running) {
+      localStorage.setItem(NURSING_TIMER_KEY, JSON.stringify(state))
+    } else {
+      localStorage.removeItem(NURSING_TIMER_KEY)
+    }
+  } catch { /* ignore */ }
+}
+
+const nursingTimer: NursingTimerState = loadNursingTimer()
 
 // ---------------------------------------------------------------------------
 // Breast popover
@@ -253,6 +275,7 @@ function BreastPopover({ anchor, onConfirm, onClose, lastBreastSide, onTimerChan
     if (!nursingTimer.running) {
       nursingTimer.running = true
       nursingTimer.startedAt = Date.now()
+      saveNursingTimer(nursingTimer)
       setTimerDisplay('00:00')
       startDisplayInterval()
       onTimerChange()
@@ -266,6 +289,7 @@ function BreastPopover({ anchor, onConfirm, onClose, lastBreastSide, onTimerChan
       const startedAtISO = new Date(nursingTimer.startedAt).toISOString()
       nursingTimer.running = false
       nursingTimer.startedAt = null
+      saveNursingTimer(nursingTimer)
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current)
       onTimerChange()
       onConfirm(side, elapsedMin, startedAtISO)
@@ -533,13 +557,23 @@ export function HomePage({ onNavigate }: HomePageProps) {
     recordFn: () => Promise<DiaryEvent>,
     label: string
   ) => {
-    const event = await recordFn()
-    showToast({
-      message: t('toast.recorded', { label, time: formatTime(event.at) }),
-      undoLabel: t('toast.undo'),
-      onUndo: async () => { await softDeleteEvent(event) },
-      onTimeEdit: () => setTimeEditEvent(event),
-    })
+    try {
+      const event = await recordFn()
+      showToast({
+        message: t('toast.recorded', { label, time: formatTime(event.at) }),
+        undoLabel: t('toast.undo'),
+        onUndo: async () => {
+          try {
+            await softDeleteEvent(event)
+          } catch {
+            showToast({ message: t('toast.deleteFailed') })
+          }
+        },
+        onTimeEdit: () => setTimeEditEvent(event),
+      })
+    } catch {
+      showToast({ message: t('toast.saveFailed') })
+    }
   }, [showToast, softDeleteEvent, t])
 
   const handlePee = useCallback(() => quickRecord(() => addPee(), t('quickBtn.pee')), [quickRecord, addPee, t])
@@ -573,9 +607,14 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const handleTimeEditConfirm = async (newAt: string) => {
     if (!timeEditEvent) return
-    await editEvent(timeEditEvent, { at: newAt })
-    setTimeEditEvent(null)
-    showToast({ message: t('toast.timeEdited') })
+    try {
+      await editEvent(timeEditEvent, { at: newAt })
+      setTimeEditEvent(null)
+      showToast({ message: t('toast.timeEdited') })
+    } catch {
+      setTimeEditEvent(null)
+      showToast({ message: t('toast.editFailed') })
+    }
   }
 
   // Floating timer stop handler
@@ -587,6 +626,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
       const side: 'L' | 'R' | 'both' = lastBreastSide === 'L' ? 'R' : lastBreastSide === 'R' ? 'L' : 'both'
       nursingTimer.running = false
       nursingTimer.startedAt = null
+      saveNursingTimer(nursingTimer)
       setTimerTick(t => t + 1)
       handleBreastConfirm(side, elapsedMin, startedAtISO)
     }

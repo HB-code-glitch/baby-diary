@@ -23,16 +23,26 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   const handleTimeEdit = async (event: DiaryEvent, newAt: string) => {
-    await editEvent(event, { at: newAt })
-    setEditingAt(null)
-    showToast({ message: t('toast.timeEdited') })
+    try {
+      await editEvent(event, { at: newAt })
+      setEditingAt(null)
+      showToast({ message: t('toast.timeEdited') })
+    } catch {
+      setEditingAt(null)
+      showToast({ message: t('toast.editFailed') })
+    }
   }
 
   const handleDelete = async (event: DiaryEvent) => {
     if (confirmDelete === event.id) {
-      await softDeleteEvent(event)
-      setConfirmDelete(null)
-      showToast({ message: t('toast.deleted') })
+      try {
+        await softDeleteEvent(event)
+        setConfirmDelete(null)
+        showToast({ message: t('toast.deleted') })
+      } catch {
+        setConfirmDelete(null)
+        showToast({ message: t('toast.deleteFailed') })
+      }
     } else {
       setConfirmDelete(event.id)
       setTimeout(() => setConfirmDelete(null), 3000)

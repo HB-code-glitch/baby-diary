@@ -123,35 +123,44 @@ export function DiaryPage() {
 
   const handleSave = async (title: string, text: string) => {
     const time = new Date().toISOString()
-    if (editTarget) {
-      await editEvent(editTarget, { data: { title, text } as DiaryData })
-      showToast({ message: t('diary.toastEdited') })
-    } else {
-      const event: DiaryEvent = {
-        id: uuidv4(),
-        type: 'diary',
-        at: time,
-        data: { title, text } as DiaryData,
-        author: {
-          uid:  settings?.profile?.uid  ?? 'local',
-          name: settings?.profile?.name ?? '',
-          role: settings?.profile?.role ?? 'mom',
-        },
-        createdAt: time,
-        updatedAt: time,
-        rev: 1,
-        deleted: false,
+    try {
+      if (editTarget) {
+        await editEvent(editTarget, { data: { title, text } as DiaryData })
+        showToast({ message: t('diary.toastEdited') })
+      } else {
+        const event: DiaryEvent = {
+          id: uuidv4(),
+          type: 'diary',
+          at: time,
+          data: { title, text } as DiaryData,
+          author: {
+            uid:  settings?.profile?.uid  ?? 'local',
+            name: settings?.profile?.name ?? '',
+            role: settings?.profile?.role ?? 'mom',
+          },
+          createdAt: time,
+          updatedAt: time,
+          rev: 1,
+          deleted: false,
+        }
+        await addEvent(event)
+        showToast({ message: t('diary.toastSaved') })
       }
-      await addEvent(event)
-      showToast({ message: t('diary.toastSaved') })
+    } catch {
+      showToast({ message: t('toast.saveFailed') })
     }
   }
 
   const handleDelete = async (event: DiaryEvent) => {
     if (confirmDelete === event.id) {
-      await softDeleteEvent(event)
-      setConfirmDelete(null)
-      showToast({ message: t('diary.toastDeleted') })
+      try {
+        await softDeleteEvent(event)
+        setConfirmDelete(null)
+        showToast({ message: t('diary.toastDeleted') })
+      } catch {
+        setConfirmDelete(null)
+        showToast({ message: t('toast.deleteFailed') })
+      }
     } else {
       setConfirmDelete(event.id)
       setTimeout(() => setConfirmDelete(null), 3000)

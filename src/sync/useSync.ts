@@ -83,10 +83,10 @@ export {
  * UI 레이어에서 이벤트를 기록할 때 ipc.appendEvent 대신 이것을 사용하면
  * 로컬 저장 + 클라우드 큐잉이 한 번에 처리됨.
  */
-export async function appendAndEnqueue(event: DiaryEvent): Promise<boolean> {
-  const ok = await ipc.appendEvent(event)
-  if (ok) {
+export async function appendAndEnqueue(event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> {
+  const result = await ipc.appendEvent(event)
+  if (result !== 'error') {
     enqueue(event)
   }
-  return ok
+  return result
 }

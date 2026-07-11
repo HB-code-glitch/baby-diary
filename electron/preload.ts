@@ -5,7 +5,7 @@ const babyDiaryAPI = {
   listEvents: (): Promise<DiaryEvent[]> =>
     ipcRenderer.invoke('events:list'),
 
-  appendEvent: (event: DiaryEvent): Promise<boolean> =>
+  appendEvent: (event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> =>
     ipcRenderer.invoke('events:append', event),
 
   getSettings: (): Promise<AppSettings> =>

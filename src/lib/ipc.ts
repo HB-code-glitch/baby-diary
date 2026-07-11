@@ -4,7 +4,7 @@ declare global {
   interface Window {
     babyDiary: {
       listEvents: () => Promise<DiaryEvent[]>
-      appendEvent: (event: DiaryEvent) => Promise<boolean>
+      appendEvent: (event: DiaryEvent) => Promise<'ok' | 'duplicate' | 'error'>
       getSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<void>
       exportData: (format: ExportFormat) => Promise<void>
@@ -66,18 +66,18 @@ const mockBabyDiary: Window['babyDiary'] = {
     return Array.from(map.values())
   },
 
-  appendEvent: async (event: DiaryEvent) => {
+  appendEvent: async (event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> => {
     const all = mockGetEvents()
-    // Dedup: same id+rev is a no-op (returns false)
+    // Dedup: same id+rev is a no-op
     const exists = all.some(e => e.id === event.id && e.rev === event.rev)
-    if (exists) return false
+    if (exists) return 'duplicate'
     const merged = mockMerge(all, event)
     mockSaveEvents(merged)
     // Notify listeners (simulate main→renderer push)
     setTimeout(() => {
       _mockListeners.forEach(cb => { try { cb(event) } catch { /* ignore */ } })
     }, 0)
-    return true
+    return 'ok'
   },
 
   getSettings: async () => {

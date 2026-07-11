@@ -181,12 +181,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   addEvent: async (event: DiaryEvent) => {
-    const ok = await ipc.appendEvent(event)
-    if (ok) {
-      // Enqueue for cloud sync. Remote-received events are filtered inside enqueue
-      // via _seenFromRemote — no re-upload loop.
-      enqueue(event)
+    const result = await ipc.appendEvent(event)
+    if (result === 'error') {
+      throw new Error('append_failed')
     }
+    // Enqueue for cloud sync. Remote-received events are filtered inside enqueue
+    // via _seenFromRemote — no re-upload loop.
+    // 'duplicate' means the event is already on disk; still merge into UI state
+    // and enqueue so a previous sync gap can be filled.
+    enqueue(event)
     set(state => ({
       events: mergeEventIntoList(state.events, event),
     }))
@@ -201,10 +204,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       updatedAt: t,
       rev: original.rev + 1,
     }
-    const ok = await ipc.appendEvent(updated)
-    if (ok) {
-      enqueue(updated)
+    const result = await ipc.appendEvent(updated)
+    if (result === 'error') {
+      throw new Error('append_failed')
     }
+    enqueue(updated)
     set(state => ({
       events: mergeEventIntoList(state.events, updated),
     }))
