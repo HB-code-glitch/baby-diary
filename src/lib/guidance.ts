@@ -86,10 +86,12 @@ export const GUIDANCE_MARKERS: GuidanceMarker[] = [
     startDay: 0,
     titleKo: '3개월 미만 발열은 즉시 진료',
     titleJa: '生後3か月未満の発熱はすぐ受診',
-    bodyKo: '생후 3개월(12주) 미만 아기가 직장 체온 38.0°C 이상이면 겉보기 상태가 좋아 보여도 예외 없이 즉시 병원에 가요. 이 시기 발열은 패혈증·수막염 등 중증 감염의 유일한 신호일 수 있어요. 진료 전 해열제를 먼저 먹이면 증상을 가려 진단이 늦어질 수 있어요.',
-    bodyJa: '生後3か月(12週)未満の赤ちゃんが直腸体温38.0°C以上のときは、元気そうに見えても必ずすぐに受診してください。この時期の発熱は敗血症や髄膜炎など重い感染症の唯一のサインのことがあります。受診前に解熱剤を与えると症状が隠れ、診断が遅れる恐れがあります。',
-    quoteKo: '생후 3개월(12주) 미만 아기가 직장 체온 38.0°C 이상이면 겉보기 상태가 좋아 보여도 예외 없이 즉시 병원에 가요.',
-    quoteJa: '生後3か月(12週)未満の赤ちゃんが直腸体温38.0°C以上のときは、元気そうに見えても必ずすぐに受診してください。',
+    // P32: Align text with evaluateFever logic which uses ageDays < 90.
+    // "12주(84일)" was misleading — "90일" matches the actual threshold.
+    bodyKo: '생후 3개월(90일) 미만 아기가 직장 체온 38.0°C 이상이면 겉보기 상태가 좋아 보여도 예외 없이 즉시 병원에 가요. 이 시기 발열은 패혈증·수막염 등 중증 감염의 유일한 신호일 수 있어요. 진료 전 해열제를 먼저 먹이면 증상을 가려 진단이 늦어질 수 있어요.',
+    bodyJa: '生後3か月(90日)未満の赤ちゃんが直腸体温38.0°C以上のときは、元気そうに見えても必ずすぐに受診してください。この時期の発熱は敗血症や髄膜炎など重い感染症の唯一のサインのことがあります。受診前に解熱剤を与えると症状が隠れ、診断が遅れる恐れがあります。',
+    quoteKo: '생후 3개월(90일) 미만 아기가 직장 체온 38.0°C 이상이면 겉보기 상태가 좋아 보여도 예외 없이 즉시 병원에 가요.',
+    quoteJa: '生後3か月(90日)未満の赤ちゃんが直腸体温38.0°C以上のときは、元気そうに見えても必ずすぐに受診してください。',
     sourceLabel: 'AAP·대한소아청소년과학회·日本小児科学会',
     evidenceLevel: 'guideline-consensus',
   },
@@ -155,13 +157,26 @@ export const GUIDANCE_MARKERS: GuidanceMarker[] = [
     sourceLabel: 'AAP·CDC·厚生労働省',
     evidenceLevel: 'guideline-consensus',
   },
+  // P34: Split formula_1_3mo into two bands so per-feed max is accurate per sub-age.
+  // 1~2mo max is 160 mL; 2~3mo max rises to 180 mL. Marker text says
+  // "1~2개월은 1회 120~160 mL" — keeping both consistent with the prose.
   {
-    id: 'formula_1_3mo',
+    id: 'formula_1_2mo',
     startDay: 30,
-    titleKo: '분유량 1~3개월',
-    titleJa: 'ミルクの量 1〜3か月',
-    bodyKo: '1~2개월은 1회 120~160 mL, 하루 6~7회예요. 2~3개월은 1회 120~180 mL로, 3개월 말엔 180 mL까지도 정상이에요. 체중 기준으로는 하루 약 150 mL/kg(미국 AAP 기준은 약 165 mL/kg) — 어느 기준이냐에 따라 약 10% 차이가 나므로 성장 곡선과 함께 평가해요.',
-    bodyJa: '1〜2か月は1回120〜160 mLを1日6〜7回。2〜3か月は1回120〜180 mLで、3か月の終わりには180 mLでも正常です。体重あたりでは1日約150 mL/kg(米国AAP基準は約165 mL/kg)—基準により約10%差が出るため、成長曲線と合わせて判断してください。',
+    titleKo: '분유량 1~2개월',
+    titleJa: 'ミルクの量 1〜2か月',
+    bodyKo: '1~2개월은 1회 120~160 mL, 하루 6~7회예요. 체중 기준으로는 하루 약 150 mL/kg(미국 AAP 기준은 약 165 mL/kg) — 성장 곡선과 함께 평가해요.',
+    bodyJa: '1〜2か月は1回120〜160 mLを1日6〜7回。体重あたりでは1日約150 mL/kg(米国AAP基準は約165 mL/kg)—成長曲線と合わせて判断してください。',
+    sourceLabel: 'AAP·Nemours·厚生労働省',
+    evidenceLevel: 'guideline-consensus',
+  },
+  {
+    id: 'formula_2_3mo',
+    startDay: 60,
+    titleKo: '분유량 2~3개월',
+    titleJa: 'ミルクの量 2〜3か月',
+    bodyKo: '2~3개월은 1회 120~180 mL, 하루 6~7회예요. 3개월 말엔 180 mL까지도 정상이에요. 체중 기준으로는 하루 약 150 mL/kg(미국 AAP 기준은 약 165 mL/kg) — 성장 곡선과 함께 평가해요.',
+    bodyJa: '2〜3か月は1回120〜180 mLを1日6〜7回。3か月の終わりには180 mLでも正常です。体重あたりでは1日約150 mL/kg(米国AAP基準は約165 mL/kg)—成長曲線と合わせて判断してください。',
     sourceLabel: 'AAP·Nemours·厚生労働省',
     evidenceLevel: 'guideline-consensus',
   },
@@ -365,7 +380,8 @@ export function getGuidanceForDay(ageInDays: number): GuidanceItem[] {
 
 export interface FeedingBand {
   /** Matches the marker id this band is derived from */
-  id: 'formula_0_1mo' | 'formula_1_3mo' | 'formula_3_6mo'
+  // P34: formula_1_3mo split into formula_1_2mo (30-59d) and formula_2_3mo (60-89d)
+  id: 'formula_0_1mo' | 'formula_1_2mo' | 'formula_2_3mo' | 'formula_3_6mo'
   /** Min ml per feed — source: marker bodyKo (e.g. "30" in formula_0_1mo) */
   perFeedMlMin: number
   /** Max ml per feed — source: marker bodyKo (e.g. "120" in formula_0_1mo) */
@@ -376,9 +392,9 @@ export interface FeedingBand {
   feedsPerDayMax: number
   /** Daily max ml cap (null = no explicit cap in markers). source: marker bodyKo */
   dailyMaxMl: number | null
-  /** Per-kg ml/day min — source: formula_1_3mo marker (厚生労働省/AAP) */
+  /** Per-kg ml/day min — source: formula_1_2mo/formula_2_3mo marker (厚生労働省/AAP) */
   perKgMlPerDayMin?: number
-  /** Per-kg ml/day max — source: formula_1_3mo marker */
+  /** Per-kg ml/day max — source: formula_1_2mo/formula_2_3mo marker */
   perKgMlPerDayMax?: number
 }
 
@@ -399,10 +415,19 @@ export const FEEDING_BANDS: FeedingBand[] = [
     dailyMaxMl: null,
   },
   {
-    // Source: formula_1_3mo bodyKo — "1회 120~160 mL...1회 120~180 mL"  (perFeedMlMin=120, perFeedMlMax=180)
-    // "하루 6~7회"
-    // "하루 약 150 mL/kg...약 165 mL/kg"
-    id: 'formula_1_3mo',
+    // P34: formula_1_2mo (30-59d) — "1회 120~160 mL, 하루 6~7회"
+    id: 'formula_1_2mo',
+    perFeedMlMin: 120,
+    perFeedMlMax: 160,
+    feedsPerDayMin: 6,
+    feedsPerDayMax: 7,
+    dailyMaxMl: null,
+    perKgMlPerDayMin: 150,
+    perKgMlPerDayMax: 165,
+  },
+  {
+    // P34: formula_2_3mo (60-89d) — "1회 120~180 mL, 하루 6~7회"
+    id: 'formula_2_3mo',
     perFeedMlMin: 120,
     perFeedMlMax: 180,
     feedsPerDayMin: 6,
@@ -426,18 +451,22 @@ export const FEEDING_BANDS: FeedingBand[] = [
 
 /**
  * Returns the FeedingBand active for a baby of `ageDays` days old.
- * Returns null if ageDays < 0 or > 180 (beyond tracked bands).
+ * Returns null only if ageDays < 0.
+ *
+ * P33: Removed upper cutoff — formula_3_6mo (startDay 90) remains applicable
+ * after 180 days until weaning begins; returning null for >180 was misleading.
  *
  * Band boundaries match the startDay of each marker:
  *   formula_0_1mo: 0–29 days
  *   formula_1_3mo: 30–89 days
- *   formula_3_6mo: 90–180 days
+ *   formula_3_6mo: 90+ days
  */
 export function getFeedingBand(ageDays: number): FeedingBand | null {
-  if (ageDays < 0 || ageDays > 180) return null
+  if (ageDays < 0) return null
   if (ageDays < 30) return FEEDING_BANDS[0]  // formula_0_1mo
-  if (ageDays < 90) return FEEDING_BANDS[1]  // formula_1_3mo
-  return FEEDING_BANDS[2]                     // formula_3_6mo
+  if (ageDays < 60) return FEEDING_BANDS[1]  // formula_1_2mo  (P34)
+  if (ageDays < 90) return FEEDING_BANDS[2]  // formula_2_3mo  (P34)
+  return FEEDING_BANDS[3]                     // formula_3_6mo (no upper bound)
 }
 
 // ---------------------------------------------------------------------------
