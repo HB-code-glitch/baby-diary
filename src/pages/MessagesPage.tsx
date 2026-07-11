@@ -208,7 +208,7 @@ export function MessagesPage() {
           <div className="empty-state-sub">{t('messages.emptySub', { babyName })}</div>
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 720 }}>
           {messageEvents.map((event, i) => {
             const data = event.data as MessageData
             return (

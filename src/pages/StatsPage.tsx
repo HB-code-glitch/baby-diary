@@ -110,7 +110,7 @@ export function StatsPage() {
                 contentStyle={TOOLTIP_STYLE}
                 formatter={(v: number) => [t('stats.mlUnit', { value: v }), t('stats.formulaTooltip')]}
               />
-              <Bar dataKey="formulaMl" fill="var(--peach-300)" radius={[6,6,0,0]} name={t('stats.formulaTooltip')} />
+              <Bar dataKey="formulaMl" fill="var(--peach-300)" radius={[6,6,0,0]} maxBarSize={48} name={t('stats.formulaTooltip')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -129,7 +129,7 @@ export function StatsPage() {
                 contentStyle={TOOLTIP_STYLE}
                 formatter={(v: number) => [t('stats.countUnit', { count: v }), t('stats.feedingTooltip')]}
               />
-              <Bar dataKey="feedingCount" fill="var(--peach-200)" radius={[6,6,0,0]} name={t('stats.feedingTooltip')} />
+              <Bar dataKey="feedingCount" fill="var(--peach-200)" radius={[6,6,0,0]} maxBarSize={48} name={t('stats.feedingTooltip')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -146,8 +146,8 @@ export function StatsPage() {
               <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--stone-500)' }} />
               <Tooltip contentStyle={TOOLTIP_STYLE} />
               <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="peeCount"  stackId="a" fill="var(--sage-200)"  radius={[0,0,0,0]} name={t('stats.peeLabel')} />
-              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[6,6,0,0]} name={t('stats.poopLabel')} />
+              <Bar dataKey="peeCount"  stackId="a" fill="var(--sage-200)"  radius={[0,0,0,0]} maxBarSize={48} name={t('stats.peeLabel')} />
+              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[6,6,0,0]} maxBarSize={48} name={t('stats.poopLabel')} />
             </BarChart>
           </ResponsiveContainer>
         </div>

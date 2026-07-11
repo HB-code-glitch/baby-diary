@@ -14,13 +14,22 @@ interface EventTimelineProps {
   editable?: boolean
 }
 
-/** Deterministic hue 0-360 from name string */
-function nameToHue(name: string): number {
+/** Warm palette pairs: [bg, text] using CSS hex values */
+const WARM_PALETTE: [string, string][] = [
+  ['#e0edd9', '#3d7535'], // sage
+  ['#fde8df', '#c55c30'], // peach
+  ['#fef0cd', '#b07208'], // amber
+  ['#fde3e8', '#d44060'], // rose
+  ['#faf0d0', '#8c6a1a'], // warm sand
+]
+
+/** Deterministic warm color pair from name string */
+function nameToWarmPair(name: string): [string, string] {
   let hash = 0
   for (let i = 0; i < name.length; i++) {
     hash = name.charCodeAt(i) + ((hash << 5) - hash)
   }
-  return Math.abs(hash) % 360
+  return WARM_PALETTE[Math.abs(hash) % WARM_PALETTE.length]
 }
 
 export function EventTimeline({ events, showAuthor = true, editable = true }: EventTimelineProps) {
@@ -78,9 +87,7 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
         {events.map((event, i) => {
           const authorName = event.author?.name ?? ''
           const initial = authorName ? authorName.charAt(0).toUpperCase() : ''
-          const hue = nameToHue(authorName)
-          const avatarBg = `hsl(${hue}, 50%, 68%)`
-          const avatarFg = `hsl(${hue}, 35%, 28%)`
+          const [avatarBg, avatarFg] = nameToWarmPair(authorName)
 
           return (
             <div

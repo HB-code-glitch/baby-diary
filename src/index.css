@@ -1095,21 +1095,29 @@ body {
 /* Quick button badge (keyboard shortcut digit) */
 .quick-btn-badge {
   position: absolute;
-  top: 6px;
-  right: 8px;
-  font-size: 10px;
+  top: 5px;
+  right: 6px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
   font-weight: 700;
-  color: currentColor;
-  opacity: 0.35;
+  color: var(--stone-600);
+  background: #fdf9ed;
+  border: 1px solid var(--stone-300);
+  border-radius: 50%;
   line-height: 1;
   font-family: 'Pretendard', sans-serif;
 }
 
 /* Quick button keyboard hint text */
 .quick-btn-hint {
-  text-align: center;
-  font-size: 11px;
-  color: var(--stone-400);
+  text-align: right;
+  font-size: 10px;
+  color: var(--stone-300);
+  margin-top: 10px;
   margin-bottom: 0;
   letter-spacing: 0.02em;
 }
