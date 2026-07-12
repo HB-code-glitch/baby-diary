@@ -437,12 +437,13 @@ export async function createFamily(
  * instead of a query on families. This prevents attackers from listing all families.
  * The attacker still needs the exact code (get() only — no list); brute-forcing 36^6
  * get()s is bounded by Spark quota (50k reads/day).
- * @returns familyId
+ * @returns { familyId, babyName, babyBirthdate } — caller uses babyName/babyBirthdate
+ *   to populate local settings when the device has no baby name yet.
  */
 export async function joinFamily(
   inviteCode: string,
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
-): Promise<string> {
+): Promise<{ familyId: string; babyName: string; babyBirthdate: string }> {
   // Fallback: if _currentUser was not yet set by onAuthStateChanged (e.g. race on
   // session restore before the callback fires), grab it directly from the Auth instance.
   const effectiveUser = _currentUser ?? getFirebaseAuth()?.currentUser ?? null
@@ -478,11 +479,39 @@ export async function joinFamily(
     [`members.${authUid}`]: { name: memberName, role: memberRole },
   })
 
+  // AFTER updateDoc the user is now a member — fetch baby info from family doc.
+  // This read is now permitted because isMember() is satisfied.
+  let babyName = ''
+  let babyBirthdate = ''
+  try {
+    const familySnap = await getDoc(familyRef)
+    if (familySnap.exists()) {
+      const fd = familySnap.data() as FamilyDoc
+      babyName = fd.babyName ?? ''
+      babyBirthdate = fd.babyBirthdate ?? ''
+    }
+  } catch {
+    // best-effort: if the read fails, caller keeps existing local baby info
+  }
+
   _familyId = familyId
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
   if (_currentUser) void onUserSignedIn(_currentUser)
-  return familyId
+  return { familyId, babyName, babyBirthdate }
+}
+
+/**
+ * Update the family doc's babyName and babyBirthdate fields.
+ * Called from SettingsPage when the user saves changed baby info while a member.
+ * Guard: only call when the user is a member (familyId set) and values actually changed.
+ * Rules: isMember() update with non-members fields is allowed.
+ */
+export async function updateFamilyBabyInfo(babyName: string, babyBirthdate: string): Promise<void> {
+  if (!_db || !_familyId || !_currentUser) return
+  const { doc, updateDoc } = await _firestoreOps()
+  const familyRef = doc(_db, 'families', _familyId)
+  await updateDoc(familyRef, { babyName, babyBirthdate })
 }
 
 /**
@@ -636,6 +665,28 @@ async function onUserSignedIn(user: User): Promise<void> {
     // F2: expose invite code in state so UI can display it
     const familyData = familySnap.data() as FamilyDoc
     setState({ inviteCode: familyData.inviteCode })
+
+    // Reconnect adopt-if-empty: if this device has no baby name yet (e.g. joined
+    // before the joinFamily fix, or restored from a fresh install), copy babyName
+    // and babyBirthdate from the family doc into local settings.
+    // Never overwrites a non-empty locally-entered name.
+    try {
+      const localSettings = await ipc.getSettings()
+      const localName = localSettings.baby?.name?.trim() ?? ''
+      const isDefault = localName === '' || localName === '아기'
+      if (isDefault && (familyData.babyName || familyData.babyBirthdate)) {
+        await ipc.saveSettings({
+          ...localSettings,
+          baby: {
+            ...(localSettings.baby ?? { name: '', birthdate: '' }),
+            name:      familyData.babyName      ?? localSettings.baby?.name      ?? '',
+            birthdate: familyData.babyBirthdate ?? localSettings.baby?.birthdate ?? '',
+          },
+        })
+      }
+    } catch {
+      // best-effort: local settings update failure must not block sync
+    }
 
     await reconcile(user)
     await attachSnapshot()

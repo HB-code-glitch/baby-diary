@@ -18,6 +18,7 @@ import {
   start,
   stop,
   restartSync,
+  updateFamilyBabyInfo,
 } from './syncEngine'
 import { ipc } from '../lib/ipc'
 import { DiaryEvent } from '../../shared/types'
@@ -83,6 +84,7 @@ export {
   getStatus,
   subscribeStatus,
   restartSync,
+  updateFamilyBabyInfo,
 }
 
 /**

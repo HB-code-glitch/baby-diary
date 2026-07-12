@@ -880,3 +880,236 @@ describe('joinFamily write-shape and ordering', () => {
     expect(extractedUid).not.toBe('')
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// 14. joinFamily returns babyName/babyBirthdate (baby info propagation)
+// ────────────────────────────────────────────────────────────
+
+describe('joinFamily returns baby info from family doc', () => {
+  /**
+   * Simulates the post-join family-doc read and the return shape of joinFamily.
+   * The key invariant: joinFamily must return { familyId, babyName, babyBirthdate }
+   * so the caller can decide whether to adopt those values locally.
+   */
+  interface SimulateJoinResult {
+    familyId: string
+    babyName: string
+    babyBirthdate: string
+  }
+
+  function simulateJoinFamilyWithBabyInfo(opts: {
+    inviteExists: boolean
+    familyDocExists: boolean
+    remotebabyName: string
+    remoteBabyBirthdate: string
+  }): SimulateJoinResult | null {
+    if (!opts.inviteExists) return null
+
+    const familyId = 'family-with-baby'
+
+    // After updateDoc (member added), fetch family doc
+    let babyName = ''
+    let babyBirthdate = ''
+    if (opts.familyDocExists) {
+      babyName = opts.remotebabyName
+      babyBirthdate = opts.remoteBabyBirthdate
+    }
+
+    return { familyId, babyName, babyBirthdate }
+  }
+
+  it('returns familyId, babyName, babyBirthdate from family doc', () => {
+    const result = simulateJoinFamilyWithBabyInfo({
+      inviteExists: true,
+      familyDocExists: true,
+      remotebabyName: '루나',
+      remoteBabyBirthdate: '2024-03-15',
+    })
+    expect(result).not.toBeNull()
+    expect(result!.familyId).toBe('family-with-baby')
+    expect(result!.babyName).toBe('루나')
+    expect(result!.babyBirthdate).toBe('2024-03-15')
+  })
+
+  it('returns empty strings when family doc read fails or is empty', () => {
+    const result = simulateJoinFamilyWithBabyInfo({
+      inviteExists: true,
+      familyDocExists: false,
+      remotebabyName: '',
+      remoteBabyBirthdate: '',
+    })
+    expect(result).not.toBeNull()
+    expect(result!.babyName).toBe('')
+    expect(result!.babyBirthdate).toBe('')
+  })
+
+  it('returns null when invite does not exist', () => {
+    const result = simulateJoinFamilyWithBabyInfo({
+      inviteExists: false,
+      familyDocExists: true,
+      remotebabyName: '루나',
+      remoteBabyBirthdate: '2024-03-15',
+    })
+    expect(result).toBeNull()
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// 15. Adopt-if-empty logic: join success handler and reconnect
+// ────────────────────────────────────────────────────────────
+
+describe('adopt-if-empty: baby name adoption logic', () => {
+  const PLACEHOLDER = '아기'
+
+  /**
+   * Pure function replica of the adopt-if-empty decision used in both the
+   * join success handler (SyncSettingsSlot) and the reconnect path (onUserSignedIn).
+   */
+  function shouldAdoptBabyInfo(
+    localName: string,
+    remoteName: string,
+    remoteBirthdate: string
+  ): boolean {
+    const trimmed = localName.trim()
+    const isDefault = trimmed === '' || trimmed === PLACEHOLDER
+    return isDefault && !!(remoteName || remoteBirthdate)
+  }
+
+  function adoptBabyInfo(
+    localBaby: { name: string; birthdate: string },
+    remoteName: string,
+    remoteBirthdate: string
+  ): { name: string; birthdate: string } {
+    return {
+      name:      remoteName      || localBaby.name,
+      birthdate: remoteBirthdate || localBaby.birthdate,
+    }
+  }
+
+  it('adopts when local name is empty', () => {
+    expect(shouldAdoptBabyInfo('', '루나', '2024-03-15')).toBe(true)
+  })
+
+  it('adopts when local name is the default placeholder "아기"', () => {
+    expect(shouldAdoptBabyInfo('아기', '루나', '2024-03-15')).toBe(true)
+  })
+
+  it('does NOT adopt when local name is non-empty and not default', () => {
+    expect(shouldAdoptBabyInfo('솔이', '루나', '2024-03-15')).toBe(false)
+  })
+
+  it('does NOT adopt when remote name and birthdate are both empty', () => {
+    expect(shouldAdoptBabyInfo('', '', '')).toBe(false)
+    expect(shouldAdoptBabyInfo('아기', '', '')).toBe(false)
+  })
+
+  it('adopts even when only remote birthdate is present (name empty)', () => {
+    expect(shouldAdoptBabyInfo('', '', '2024-03-15')).toBe(true)
+  })
+
+  it('adoptBabyInfo sets name and birthdate from remote', () => {
+    const result = adoptBabyInfo({ name: '', birthdate: '' }, '루나', '2024-03-15')
+    expect(result.name).toBe('루나')
+    expect(result.birthdate).toBe('2024-03-15')
+  })
+
+  it('adoptBabyInfo keeps local value when remote is empty (partial update)', () => {
+    const result = adoptBabyInfo({ name: '', birthdate: '2024-01-01' }, '루나', '')
+    expect(result.name).toBe('루나')
+    expect(result.birthdate).toBe('2024-01-01')  // local kept
+  })
+
+  it('non-empty non-placeholder local name is preserved (no-overwrite guard)', () => {
+    const localName = '솔이'
+    const adopt = shouldAdoptBabyInfo(localName, '루나', '2024-03-15')
+    expect(adopt).toBe(false)
+    // name stays '솔이', not overwritten with '루나'
+    const baby = adopt
+      ? adoptBabyInfo({ name: localName, birthdate: '' }, '루나', '2024-03-15')
+      : { name: localName, birthdate: '' }
+    expect(baby.name).toBe('솔이')
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// 16. Reconnect adopt: onUserSignedIn adopt-if-empty logic
+// ────────────────────────────────────────────────────────────
+
+describe('reconnect adopt-if-empty: covers devices that joined before the fix', () => {
+  /**
+   * Simulates the onUserSignedIn adopt-if-empty decision path.
+   * The key invariant: if local baby name is empty/default AND family doc has data,
+   * we call ipc.saveSettings to backfill — but only then.
+   */
+  interface LocalSettings {
+    baby: { name: string; birthdate: string }
+    familyId: string
+  }
+
+  interface FamilyDocData {
+    babyName: string
+    babyBirthdate: string
+  }
+
+  function simulateReconnectAdopt(
+    local: LocalSettings,
+    familyDoc: FamilyDocData
+  ): { shouldSave: boolean; savedBaby?: { name: string; birthdate: string } } {
+    const localName = local.baby.name.trim()
+    const isDefault = localName === '' || localName === '아기'
+    if (isDefault && (familyDoc.babyName || familyDoc.babyBirthdate)) {
+      return {
+        shouldSave: true,
+        savedBaby: {
+          name:      familyDoc.babyName      || local.baby.name,
+          birthdate: familyDoc.babyBirthdate || local.baby.birthdate,
+        },
+      }
+    }
+    return { shouldSave: false }
+  }
+
+  it('saves when local name is empty and family doc has baby name', () => {
+    const result = simulateReconnectAdopt(
+      { baby: { name: '', birthdate: '' }, familyId: 'fam-1' },
+      { babyName: '루나', babyBirthdate: '2024-03-15' }
+    )
+    expect(result.shouldSave).toBe(true)
+    expect(result.savedBaby?.name).toBe('루나')
+    expect(result.savedBaby?.birthdate).toBe('2024-03-15')
+  })
+
+  it('saves when local name is placeholder "아기"', () => {
+    const result = simulateReconnectAdopt(
+      { baby: { name: '아기', birthdate: '' }, familyId: 'fam-2' },
+      { babyName: '루나', babyBirthdate: '2024-05-01' }
+    )
+    expect(result.shouldSave).toBe(true)
+    expect(result.savedBaby?.name).toBe('루나')
+  })
+
+  it('does NOT save when local name is already set (non-default)', () => {
+    const result = simulateReconnectAdopt(
+      { baby: { name: '솔이', birthdate: '2023-10-10' }, familyId: 'fam-3' },
+      { babyName: '루나', babyBirthdate: '2024-03-15' }
+    )
+    expect(result.shouldSave).toBe(false)
+  })
+
+  it('does NOT save when family doc has no baby info', () => {
+    const result = simulateReconnectAdopt(
+      { baby: { name: '', birthdate: '' }, familyId: 'fam-4' },
+      { babyName: '', babyBirthdate: '' }
+    )
+    expect(result.shouldSave).toBe(false)
+  })
+
+  it('saves correctly when only birthdate is available remotely', () => {
+    const result = simulateReconnectAdopt(
+      { baby: { name: '아기', birthdate: '' }, familyId: 'fam-5' },
+      { babyName: '', babyBirthdate: '2024-06-20' }
+    )
+    expect(result.shouldSave).toBe(true)
+    expect(result.savedBaby?.birthdate).toBe('2024-06-20')
+  })
+})

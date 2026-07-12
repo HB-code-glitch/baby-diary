@@ -277,9 +277,23 @@ function NoFamilyView() {
     setBusy(true)
     setError(null)
     try {
-      const familyId = await joinFamily(inviteCode.trim(), { uid, name, role })
+      const { familyId, babyName, babyBirthdate } = await joinFamily(inviteCode.trim(), { uid, name, role })
+
+      // Adopt baby name/birthdate from family doc when local has none (or default placeholder).
+      // Never overwrite a non-empty locally-entered name.
+      const localName = (settings?.baby?.name ?? '').trim()
+      const isDefault = localName === '' || localName === '아기'
+      const adoptedBaby = isDefault && (babyName || babyBirthdate)
+        ? {
+            ...(settings?.baby ?? { name: '', birthdate: '' }),
+            name:      babyName      || settings?.baby?.name      || '',
+            birthdate: babyBirthdate || settings?.baby?.birthdate || '',
+          }
+        : settings?.baby ?? { name: '', birthdate: '' }
+
       const updated: AppSettings = {
         ...(settings ?? { baby: { name: '', birthdate: '' }, profile: { uid, name, role }, firebase: null }),
+        baby: adoptedBaby,
         familyId,
       }
       await saveSettings(updated)

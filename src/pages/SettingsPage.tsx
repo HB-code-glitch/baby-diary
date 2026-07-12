@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 import { DeleteAllModal } from '../components/DeleteAllModal'
 import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
+import { updateFamilyBabyInfo } from '../sync/useSync'
 
 // Re-export for any consumers that already import from this path
 export type { FormSnapshot }
@@ -108,6 +109,21 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       }
 
       await saveSettings(updated)
+
+      // Reverse-sync: if user is a family member and baby name/birthdate actually
+      // changed, push the new values to the family doc so other devices pick them up.
+      // Guard: only when familyId is set and values differ from what was on disk.
+      if (updated.familyId) {
+        const prevName      = current.baby?.name      ?? ''
+        const prevBirthdate = current.baby?.birthdate ?? ''
+        const newName       = updated.baby?.name      ?? ''
+        const newBirthdate  = updated.baby?.birthdate ?? ''
+        if (newName !== prevName || newBirthdate !== prevBirthdate) {
+          updateFamilyBabyInfo(newName, newBirthdate).catch(() => {
+            // best-effort: family doc update failure is non-fatal (local save succeeded)
+          })
+        }
+      }
 
       // Detect race scenario: form was fully blank but disk had data →
       // re-hydrate the form and show info toast instead of normal saved toast
