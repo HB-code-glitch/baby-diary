@@ -2946,7 +2946,7 @@ body {
 
 /* ── Legacy palette dark overrides ──
    EventIcon chips, author avatars, DiaryPage delete confirm, MessagesPage border all
-   reference --peach-*/--sage-*/--amber-*/--rose-*/--cream-* vars.
+   reference --peach-*, --sage-*, --amber-*, --rose-*, --cream-* vars.
    These were not overridden in [data-theme="dark"], causing light pastel discs on dark bg. */
 [data-theme="dark"] {
   /* Peach family */
