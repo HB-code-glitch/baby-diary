@@ -183,18 +183,21 @@ describe('evaluateFever', () => {
     expect(evaluateFever(36.5, 100)).toBeNull()
   })
 
-  // ageDays=null (birthdate unknown): no emergency tier
-  it('ageDays=null, temp=38.0 → warning (no emergency without age)', () => {
-    expect(evaluateFever(38.0, null)).toBe('warning')
+  // MF-01: ageDays=null (birthdate unknown) → emergency at >=38.0 (cannot rule out newborn)
+  it('MF-01: ageDays=null, temp=38.0 → emergency (conservative default)', () => {
+    expect(evaluateFever(38.0, null)).toBe('emergency')
   })
-  it('ageDays=null, temp=39.0 → danger', () => {
-    expect(evaluateFever(39.0, null)).toBe('danger')
+  it('MF-01: ageDays=null, temp=38.5 → emergency', () => {
+    expect(evaluateFever(38.5, null)).toBe('emergency')
   })
-  it('ageDays=null, temp=37.5 → caution', () => {
+  it('MF-01: ageDays=null, temp=37.5 → caution (below 38.0 threshold)', () => {
     expect(evaluateFever(37.5, null)).toBe('caution')
   })
-  it('ageDays=null, temp=37.4 → null', () => {
+  it('MF-01: ageDays=null, temp=37.4 → null', () => {
     expect(evaluateFever(37.4, null)).toBeNull()
+  })
+  it('MF-01: ageDays=null, temp=39.0 → emergency (null-age wins even at danger threshold)', () => {
+    expect(evaluateFever(39.0, null)).toBe('emergency')
   })
 })
 

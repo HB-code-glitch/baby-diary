@@ -528,6 +528,8 @@ export type FeverLevel = 'emergency' | 'danger' | 'warning' | 'caution' | null
 export function evaluateFever(celsius: number, ageDays: number | null): FeverLevel {
   if (celsius < 37.5) return null
   if (celsius < 38.0) return 'caution'
+  // MF-01: age unknown → conservative default (cannot rule out age<90d)
+  if (ageDays === null && celsius >= 38.0) return 'emergency'
   // emergency: under 90 days (3 months) with fever >= 38.0
   if (ageDays !== null && ageDays < 90 && celsius >= 38.0) return 'emergency'
   if (celsius >= 39.0) return 'danger'
