@@ -57,6 +57,11 @@ const babyDiaryAPI = {
 
   savePdf: (): Promise<SavePdfResult> =>
     ipcRenderer.invoke('report:savePdf'),
+
+  /** MF-06: renderer sends this after init() + ReportView render completes */
+  reportReady: (): void => {
+    ipcRenderer.send('report:ready')
+  },
 }
 
 contextBridge.exposeInMainWorld('babyDiary', babyDiaryAPI)

@@ -205,8 +205,15 @@ function setupIPC(): void {
         await printWin.loadFile(path.join(__dirname, '../../dist/index.html'), { hash: '/report' })
       }
 
-      // 4. Wait for React to render (give i18n + store a moment)
-      await new Promise<void>(resolve => setTimeout(resolve, 800))
+      // 4. MF-06: wait for report:ready IPC from renderer (store init + render done)
+      //    with a 5s timeout fallback in case the signal never arrives.
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, 5000)
+        ipcMain.once('report:ready', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
 
       // 5. Print to PDF
       const pdfBuffer = await printWin.webContents.printToPDF({

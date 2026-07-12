@@ -12,6 +12,7 @@ import { UpdateBanner } from './components/UpdateBanner'
 import { useMidnightRefresh } from './lib/useMidnightRefresh'
 import { PageSkeleton } from './components/PageSkeleton'
 import { ReportView } from './report/ReportView'
+import { ipc } from './lib/ipc'
 
 // HomePage is the landing view — always eager so first paint has no async gap.
 import { HomePage } from './pages/HomePage'
@@ -199,13 +200,32 @@ function AppInner() {
   )
 }
 
+/**
+ * MF-06: Wrapper that loads the store before rendering ReportView.
+ * After init() resolves, signals main via report:ready IPC so printToPDF
+ * starts at the right moment (not after a fixed 800ms guess).
+ */
+function ReportRoute() {
+  const init = useAppStore(s => s.init)
+  const isReady = useAppStore(s => s.isReady)
+
+  useEffect(() => {
+    init().then(() => {
+      ipc.reportReady()
+    })
+  }, [init])
+
+  if (!isReady) return null
+  return <ReportView />
+}
+
 export default function App() {
   // Hidden print window: when the app is loaded at #/report, render only
   // the print-optimized ReportView with no navigation chrome.
   if (typeof window !== 'undefined' && window.location.hash === '#/report') {
     return (
       <ToastProvider>
-        <ReportView />
+        <ReportRoute />
       </ToastProvider>
     )
   }

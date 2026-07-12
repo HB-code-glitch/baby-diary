@@ -17,6 +17,8 @@ declare global {
       installUpdate: () => void
       openUpdateDownload: () => void
       savePdf: () => Promise<SavePdfResult>
+      /** MF-06: renderer signals main that store init + ReportView render is done */
+      reportReady: () => void
     }
   }
 }
@@ -141,6 +143,8 @@ const mockBabyDiary: Window['babyDiary'] = {
   savePdf: async (): Promise<SavePdfResult> => {
     throw new Error('ELECTRON_ONLY')
   },
+
+  reportReady: (): void => { /* no-op in browser/mock mode */ },
 }
 
 // ────────────────────────────────────────────────────────────
@@ -183,4 +187,5 @@ export const ipc = {
   installUpdate:       (): void => getApi().installUpdate(),
   openUpdateDownload:  (): void => getApi().openUpdateDownload(),
   savePdf: (): Promise<SavePdfResult> => getApi().savePdf(),
+  reportReady: (): void => getApi().reportReady(),
 }
