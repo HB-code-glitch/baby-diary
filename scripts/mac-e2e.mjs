@@ -75,6 +75,8 @@ async function main() {
 
   let app
   try {
+    if (executablePath && !fs.existsSync(executablePath)) throw new Error(`E2E executable not found: ${executablePath}`)
+
     app = await electron.launch({
       ...(executablePath ? { executablePath } : { args: ['.'] }),
       cwd: ROOT,
@@ -599,6 +601,10 @@ async function main() {
     const dataTheme = await page.$eval('html', el => el.getAttribute('data-theme'))
     assert(dataTheme === 'dark', `dark theme applied (data-theme=${dataTheme})`)
 
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    failures.push(`Fatal error: ${message}`)
+    console.error('[E2E fatal]', err)
   } finally {
     // ---------------------------------------------------------------------------
     // Teardown + report
@@ -638,11 +644,11 @@ async function main() {
     }
     console.log('========================================\n')
 
-    process.exit(failures.length > 0 ? 1 : 0)
+    process.exitCode = failures.length > 0 ? 1 : 0
   }
 }
 
 main().catch(err => {
   console.error('[E2E fatal]', err)
-  process.exit(1)
+  process.exitCode = 1
 })
