@@ -142,6 +142,9 @@ export const ERR_NOT_SIGNED_IN = 'NOT_SIGNED_IN'
 /** Firestore error code emitted when the security rules reject a request. */
 export const ERR_PERMISSION_DENIED = 'permission-denied'
 
+/** Emitted when the family doc is missing/inaccessible — offer create/join. */
+export const DETAIL_FAMILY_GONE = 'FAMILY_GONE'
+
 // ────────────────────────────────────────────────────────────
 // 내부 상태
 // ────────────────────────────────────────────────────────────
@@ -423,6 +426,14 @@ export async function createFamily(
   batch.set(inviteRef, { familyId: familyRef.id, createdAt: serverTimestamp(), code_check: inviteCode })
   await batch.commit()
 
+  // Write cloud identity truth: users/{authUid}.familyId
+  try {
+    const { doc: docFn2, setDoc: setDocFn } = await _firestoreOps()
+    await setDocFn(docFn2(_db, 'users', authUid), { familyId: familyRef.id }, { merge: true })
+  } catch (e) {
+    console.warn('[syncEngine] createFamily: could not write users doc', e)
+  }
+
   _familyId = familyRef.id
   setState({ inviteCode })
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
@@ -495,6 +506,15 @@ export async function joinFamily(
   }
 
   _familyId = familyId
+
+  // Write cloud identity truth: users/{authUid}.familyId
+  try {
+    const { doc: docFn3, setDoc: setDocFn2 } = await _firestoreOps()
+    await setDocFn2(docFn3(_db, 'users', authUid), { familyId }, { merge: true })
+  } catch (e) {
+    console.warn('[syncEngine] joinFamily: could not write users doc', e)
+  }
+
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
   if (_currentUser) void onUserSignedIn(_currentUser)
@@ -643,7 +663,7 @@ export function subscribeStatus(cb: StatusCallback): () => void {
 // ────────────────────────────────────────────────────────────
 
 async function onUserSignedIn(user: User): Promise<void> {
-  if (!_db || !_familyId) {
+  if (!_db) {
     setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: _pending.length })
     return
   }
@@ -651,37 +671,107 @@ async function onUserSignedIn(user: User): Promise<void> {
   setState({ status: 'connecting', detail: 'connecting...', pendingCount: _pending.length })
 
   try {
-    // F2 + F8: fetch family doc early so we can surface the invite code and detect
-    // not-found familyIds (e.g. a leftover uuid from the old F8 bug).
-    const { doc, getDoc } = await _firestoreOps()
-    const familyRef = doc(_db, 'families', _familyId)
-    const familySnap = await getDoc(familyRef)
-    if (!familySnap.exists()) {
-      // F8: unknown familyId — treat as no-family, offer create/join
-      _familyId = ''
+    const { doc, getDoc, setDoc } = await _firestoreOps()
+
+    // ── A. Cloud identity reconciliation ─────────────────────────────────
+    // Read users/{uid} to get authoritative familyId from cloud.
+    let cloudFamilyId: string | undefined
+    try {
+      const userDocRef = doc(_db, 'users', user.uid)
+      const userSnap = await getDoc(userDocRef)
+      if (userSnap.exists()) {
+        cloudFamilyId = (userSnap.data() as { familyId?: string }).familyId
+      }
+    } catch (e) {
+      console.warn('[syncEngine] onUserSignedIn: could not read users doc', e)
+    }
+
+    // Local settings as reference point
+    let localSettings: import('../../shared/types').AppSettings | null = null
+    try {
+      localSettings = await ipc.getSettings()
+    } catch {
+      // non-fatal
+    }
+    const localFamilyId = localSettings?.familyId ?? _familyId ?? ''
+
+    if (!cloudFamilyId && localFamilyId) {
+      // Legacy self-heal: local has familyId but cloud users doc absent.
+      // Verify local familyId is still valid (family doc readable and user is member).
+      try {
+        const familyRef = doc(_db, 'families', localFamilyId)
+        const testSnap = await getDoc(familyRef)
+        if (testSnap.exists()) {
+          // Local is valid — write it up to users/{uid}
+          try {
+            await setDoc(doc(_db, 'users', user.uid), { familyId: localFamilyId }, { merge: true })
+            console.log('[syncEngine] legacy self-heal: wrote users doc', localFamilyId)
+          } catch (e) {
+            console.warn('[syncEngine] legacy self-heal: could not write users doc', e)
+          }
+          cloudFamilyId = localFamilyId
+        }
+      } catch {
+        // family unreadable — fall through, cloudFamilyId stays undefined
+      }
+    }
+
+    if (cloudFamilyId && cloudFamilyId !== localFamilyId) {
+      // B. Cloud familyId differs from local — adopt cloud into local (field-merge)
+      console.log('[syncEngine] adopting cloud familyId', cloudFamilyId, 'over local', localFamilyId)
+      _familyId = cloudFamilyId
+      try {
+        await ipc.mergeSettings({ familyId: cloudFamilyId })
+      } catch (e) {
+        console.warn('[syncEngine] could not merge cloud familyId into local settings', e)
+        // fallback: use it in-memory even if disk write failed
+      }
+    } else if (cloudFamilyId) {
+      _familyId = cloudFamilyId
+    }
+
+    // If still no familyId after reconciliation
+    if (!_familyId) {
       setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: _pending.length })
       return
     }
+
+    // ── C. Fetch family doc ───────────────────────────────────────────────
+    const familyRef = doc(_db, 'families', _familyId)
+    let familySnap: import('firebase/firestore').DocumentSnapshot
+    try {
+      familySnap = await getDoc(familyRef)
+    } catch (err) {
+      const code = (err as { code?: string }).code
+      if (code === ERR_PERMISSION_DENIED || String(err).includes('permission-denied')) {
+        // Family gone or user evicted — clear identity and guide user
+        await _handleFamilyGone(user)
+        return
+      }
+      throw err
+    }
+
+    if (!familySnap.exists()) {
+      await _handleFamilyGone(user)
+      return
+    }
+
     // F2: expose invite code in state so UI can display it
     const familyData = familySnap.data() as FamilyDoc
     setState({ inviteCode: familyData.inviteCode })
 
-    // Reconnect adopt-if-empty: if this device has no baby name yet (e.g. joined
-    // before the joinFamily fix, or restored from a fresh install), copy babyName
-    // and babyBirthdate from the family doc into local settings.
-    // Never overwrites a non-empty locally-entered name.
+    // Reconnect adopt-if-empty: copy babyName/babyBirthdate from family doc when local is blank.
     try {
-      const localSettings = await ipc.getSettings()
-      const localName = localSettings.baby?.name?.trim() ?? ''
+      const localSettings2 = await ipc.getSettings()
+      const localName = localSettings2.baby?.name?.trim() ?? ''
       const isDefault = localName === '' || localName === '아기'
       if (isDefault && (familyData.babyName || familyData.babyBirthdate)) {
-        await ipc.saveSettings({
-          ...localSettings,
+        await ipc.mergeSettings({
           baby: {
-            ...(localSettings.baby ?? { name: '', birthdate: '' }),
-            name:      familyData.babyName      ?? localSettings.baby?.name      ?? '',
-            birthdate: familyData.babyBirthdate ?? localSettings.baby?.birthdate ?? '',
-          },
+            ...((localSettings2.baby ?? { name: '', birthdate: '' }) as object),
+            name:      familyData.babyName      ?? localSettings2.baby?.name      ?? '',
+            birthdate: familyData.babyBirthdate ?? localSettings2.baby?.birthdate ?? '',
+          } as import('../../shared/types').AppSettings['baby'],
         })
       }
     } catch {
@@ -697,6 +787,28 @@ async function onUserSignedIn(user: User): Promise<void> {
     setState({ status: 'error', detail: `connection error: ${msg}`, pendingCount: _pending.length })
     scheduleRetry()
   }
+}
+
+/** Family doc not found or permission denied — clear local identity gracefully. */
+async function _handleFamilyGone(user: import('firebase/auth').User): Promise<void> {
+  console.warn('[syncEngine] family gone for', user.uid, '— clearing identity')
+  _familyId = ''
+  // Clear local settings.familyId
+  try {
+    await ipc.mergeSettings({ familyId: '' })
+  } catch (e) {
+    console.warn('[syncEngine] _handleFamilyGone: could not merge settings', e)
+  }
+  // Clear cloud users/{uid}.familyId too
+  try {
+    const { doc, setDoc } = await _firestoreOps()
+    if (_db) {
+      await setDoc(doc(_db, 'users', user.uid), { familyId: '' }, { merge: true })
+    }
+  } catch (e) {
+    console.warn('[syncEngine] _handleFamilyGone: could not clear users doc', e)
+  }
+  setState({ status: 'signed-out', detail: DETAIL_FAMILY_GONE, pendingCount: _pending.length })
 }
 
 /**
