@@ -34,6 +34,7 @@ export function UpdateBanner() {
       setState({ type: 'available', version, url })
       setVisible(true)
     })
+    ipc.updateRendererReady()
     return () => {
       offReady()
       offAvailable()

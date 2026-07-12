@@ -48,6 +48,11 @@ const babyDiaryAPI = {
     return () => ipcRenderer.removeListener('update:available', handler)
   },
 
+  /** Signal that the renderer installed both update listeners. */
+  updateRendererReady: (): void => {
+    ipcRenderer.send('update:rendererReady')
+  },
+
   /** Automatic mode: quit and apply the downloaded update. */
   installUpdate: (): void => {
     ipcRenderer.send('update:install')

@@ -6,9 +6,9 @@
  * Development and E2E runs keep the updater disabled.
  */
 
-import { app, ipcMain, shell, type BrowserWindow } from 'electron'
+import { app, ipcMain, shell, type BrowserWindow, type IpcMainEvent } from 'electron'
 import { autoUpdater } from 'electron-updater'
-import { getUpdateMode } from './updatePolicy'
+import { getUpdateMode, type UpdateMode } from './updatePolicy'
 
 const DOWNLOAD_PAGE = 'https://github.com/HB-code-glitch/baby-diary-releases/releases/latest'
 const INTERVAL_MS = 30 * 60 * 1_000
@@ -22,19 +22,16 @@ let _intervalHandle: ReturnType<typeof setInterval> | null = null
 let _checking = false
 let _lastFocusCheck = 0
 let _runCheck: ((trigger: CheckTrigger) => void) | null = null
+let _mode: UpdateMode = 'off'
 
 let _focusWindow: BrowserWindow | null = null
 let _rendererReady = false
-let _rendererReadyListener: (() => void) | null = null
 let _windowClosedListener: (() => void) | null = null
 let _pendingManualUpdate: ManualUpdatePayload | null = null
 
 function detachUpdaterWindow(): void {
   if (_focusWindow !== null) {
     _focusWindow.removeListener('focus', onWindowFocus)
-    if (_rendererReadyListener !== null) {
-      _focusWindow.webContents.removeListener('did-finish-load', _rendererReadyListener)
-    }
     if (_windowClosedListener !== null) {
       _focusWindow.removeListener('closed', _windowClosedListener)
     }
@@ -42,7 +39,6 @@ function detachUpdaterWindow(): void {
 
   _focusWindow = null
   _rendererReady = false
-  _rendererReadyListener = null
   _windowClosedListener = null
 }
 
@@ -71,17 +67,70 @@ export function attachUpdaterWindow(window: BrowserWindow): void {
   _focusWindow = window
   window.on('focus', onWindowFocus)
 
-  _rendererReadyListener = () => {
-    if (_focusWindow !== window) return
-    _rendererReady = true
-    sendPendingManualUpdate()
-  }
-  window.webContents.once('did-finish-load', _rendererReadyListener)
-
   _windowClosedListener = () => {
     if (_focusWindow === window) detachUpdaterWindow()
   }
   window.once('closed', _windowClosedListener)
+}
+
+function handleUpdateAvailable(info: { version: string }): void {
+  if (_mode !== 'manual') return
+
+  const payload = { version: info.version, url: DOWNLOAD_PAGE }
+  if (_focusWindow !== null && _rendererReady) {
+    _focusWindow.webContents.send('update:available', payload)
+    return
+  }
+  _pendingManualUpdate = payload
+}
+
+function handleUpdateDownloaded(info: { version: string }): void {
+  if (_mode !== 'auto' || _focusWindow === null || !_rendererReady) return
+  _focusWindow.webContents.send('update:ready', { version: info.version })
+}
+
+function handleUpdaterError(err: Error): void {
+  console.error('[Updater] error:', err?.message ?? err)
+}
+
+function handleInstallUpdate(): void {
+  if (_mode !== 'auto') return
+  try {
+    autoUpdater.quitAndInstall(false, true)
+  } catch (err) {
+    console.error('[Updater] quitAndInstall error:', err)
+  }
+}
+
+function handleOpenDownload(): void {
+  if (_mode !== 'manual') return
+  shell.openExternal(DOWNLOAD_PAGE).catch(err =>
+    console.error('[Updater] openExternal error:', err)
+  )
+}
+
+function handleRendererReady(event?: IpcMainEvent): void {
+  if (_focusWindow === null || event?.sender !== _focusWindow.webContents) return
+  _rendererReady = true
+  sendPendingManualUpdate()
+}
+
+function registerUpdaterHandlers(): void {
+  autoUpdater.on('update-available', handleUpdateAvailable)
+  autoUpdater.on('update-downloaded', handleUpdateDownloaded)
+  autoUpdater.on('error', handleUpdaterError)
+  ipcMain.on('update:install', handleInstallUpdate)
+  ipcMain.on('update:openDownload', handleOpenDownload)
+  ipcMain.on('update:rendererReady', handleRendererReady)
+}
+
+function unregisterUpdaterHandlers(): void {
+  autoUpdater.removeListener('update-available', handleUpdateAvailable)
+  autoUpdater.removeListener('update-downloaded', handleUpdateDownloaded)
+  autoUpdater.removeListener('error', handleUpdaterError)
+  ipcMain.removeListener('update:install', handleInstallUpdate)
+  ipcMain.removeListener('update:openDownload', handleOpenDownload)
+  ipcMain.removeListener('update:rendererReady', handleRendererReady)
 }
 
 export function isUpdaterRunning(): boolean {
@@ -99,11 +148,13 @@ export function stopUpdater(): void {
     _intervalHandle = null
   }
 
+  unregisterUpdaterHandlers()
   detachUpdaterWindow()
   _runCheck = null
   _checking = false
   _lastFocusCheck = 0
   _pendingManualUpdate = null
+  _mode = 'off'
 }
 
 export function setupUpdater(): void {
@@ -114,6 +165,7 @@ export function setupUpdater(): void {
     process.env.PORTABLE_EXECUTABLE_FILE,
   )
   if (mode === 'off' || _intervalHandle !== null) return
+  _mode = mode
 
   autoUpdater.setFeedURL({
     provider: 'github',
@@ -123,42 +175,8 @@ export function setupUpdater(): void {
 
   autoUpdater.autoDownload = mode === 'auto'
   autoUpdater.autoInstallOnAppQuit = false
-
-  autoUpdater.on('update-available', (info) => {
-    if (mode !== 'manual') return
-
-    const payload = { version: info.version, url: DOWNLOAD_PAGE }
-    if (_focusWindow !== null && _rendererReady) {
-      _focusWindow.webContents.send('update:available', payload)
-      return
-    }
-    _pendingManualUpdate = payload
-  })
-
-  autoUpdater.on('update-downloaded', (info) => {
-    if (mode !== 'auto' || _focusWindow === null || !_rendererReady) return
-    _focusWindow.webContents.send('update:ready', { version: info.version })
-  })
-
-  autoUpdater.on('error', (err) => {
-    console.error('[Updater] error:', err?.message ?? err)
-  })
-
-  ipcMain.on('update:install', () => {
-    if (mode !== 'auto') return
-    try {
-      autoUpdater.quitAndInstall(false, true)
-    } catch (err) {
-      console.error('[Updater] quitAndInstall error:', err)
-    }
-  })
-
-  ipcMain.on('update:openDownload', () => {
-    if (mode !== 'manual') return
-    shell.openExternal(DOWNLOAD_PAGE).catch(err =>
-      console.error('[Updater] openExternal error:', err)
-    )
-  })
+  unregisterUpdaterHandlers()
+  registerUpdaterHandlers()
 
   function runCheck(trigger: CheckTrigger): void {
     if (_checking) {
