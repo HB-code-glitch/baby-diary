@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   getStatsVisibility,
+  getSyncDisclosurePresentation,
   getVisibleHomeMetrics,
   partitionHomeInsights,
   partitionStatsPageSections,
@@ -124,4 +125,34 @@ it('opens sync details only when attention is required', () => {
   expect(shouldOpenSyncDisclosure('connecting')).toBe(false)
   expect(shouldOpenSyncDisclosure('signed-out')).toBe(true)
   expect(shouldOpenSyncDisclosure('error')).toBe(true)
+})
+
+describe('sync disclosure presentation', () => {
+  it('opens with attention when sync is online without a family', () => {
+    expect(getSyncDisclosurePresentation('online', false)).toEqual({
+      summary: 'attention',
+      defaultOpen: true,
+    })
+  })
+
+  it('stays closed and ready when sync is online with a family', () => {
+    expect(getSyncDisclosurePresentation('online', true)).toEqual({
+      summary: 'ready',
+      defaultOpen: false,
+    })
+  })
+
+  it('stays closed while connecting', () => {
+    expect(getSyncDisclosurePresentation('connecting', false)).toEqual({
+      summary: 'connecting',
+      defaultOpen: false,
+    })
+  })
+
+  it('opens with attention on errors', () => {
+    expect(getSyncDisclosurePresentation('error', true)).toEqual({
+      summary: 'attention',
+      defaultOpen: true,
+    })
+  })
 })

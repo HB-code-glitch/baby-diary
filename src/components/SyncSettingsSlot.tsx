@@ -89,7 +89,6 @@ function NoConfigView() {
           padding: '10px 12px',
           color: 'var(--stone-700)',
           resize: 'vertical',
-          outline: 'none',
           boxSizing: 'border-box',
         }}
       />

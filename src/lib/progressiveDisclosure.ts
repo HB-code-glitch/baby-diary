@@ -5,6 +5,8 @@ export type HomeMetricKey = 'formula' | 'pee' | 'poop' | 'feeding' | 'temperatur
 export type HomeInsightKey = 'lastFeeding' | 'diaper' | 'temperature' | 'sleep' | 'nextSide'
 export type StatsSectionKey = 'sleep' | 'formula' | 'feeding' | 'diaper' | 'temperature'
 export type StatsPageSectionKey = StatsSectionKey | 'growthWeight' | 'growthHeight'
+export type SyncDisclosureStatus = 'off' | 'no-config' | 'signed-out' | 'connecting' | 'online' | 'error'
+export type SyncDisclosureSummary = 'ready' | 'connecting' | 'attention'
 
 export interface StatsVisibility {
   sleep: boolean
@@ -98,7 +100,18 @@ export function partitionStatsPageSections(
 }
 
 export function shouldOpenSyncDisclosure(
-  status: 'off' | 'no-config' | 'signed-out' | 'connecting' | 'online' | 'error',
+  status: SyncDisclosureStatus,
 ): boolean {
   return status === 'no-config' || status === 'signed-out' || status === 'error'
+}
+
+export function getSyncDisclosurePresentation(
+  status: SyncDisclosureStatus,
+  hasFamily: boolean,
+): { summary: SyncDisclosureSummary; defaultOpen: boolean } {
+  const isReady = status === 'online' && hasFamily
+  return {
+    summary: isReady ? 'ready' : status === 'connecting' ? 'connecting' : 'attention',
+    defaultOpen: shouldOpenSyncDisclosure(status) || (status === 'online' && !hasFamily),
+  }
 }

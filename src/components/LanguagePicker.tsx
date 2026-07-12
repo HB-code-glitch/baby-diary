@@ -3,7 +3,7 @@
  *
  * Shown before the tutorial when babydiary.langChosen is not set.
  * z-index 1400 (above tutorial 1300).
- * Entrance: opacity + margin-top only (house rule — no scale/transform).
+ * Entrance: opacity + translateY only, with no layout shift.
  * No i18n keys used; labels are hardcoded in their own language.
  */
 
