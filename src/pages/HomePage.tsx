@@ -346,9 +346,6 @@ function InsightsPanel({
     hasTemperature: recentTemp != null,
     hasSleep: todaySleepMinutes > 0,
   })
-  const visibleInsightKeys = showAllInsights
-    ? [...insightPartition.primary, ...insightPartition.secondary]
-    : insightPartition.primary
 
   const renderInsightRow = (key: HomeInsightKey) => {
     const row = rows[key]
@@ -411,18 +408,27 @@ function InsightsPanel({
         </div>
       )}
 
-      {visibleInsightKeys.map(renderInsightRow)}
+      {insightPartition.primary.map(renderInsightRow)}
 
       {insightPartition.secondary.length > 0 && (
         <button
+          id="home-secondary-insights-toggle"
           className="progressive-more-button"
           type="button"
+          aria-expanded={showAllInsights}
+          aria-controls="home-secondary-insights"
           onClick={() => setShowAllInsights(value => !value)}
         >
           {showAllInsights
             ? t('home.lessSummary')
             : t('home.moreSummary', { count: insightPartition.secondary.length })}
         </button>
+      )}
+
+      {showAllInsights && insightPartition.secondary.length > 0 && (
+        <section id="home-secondary-insights" aria-labelledby="home-secondary-insights-toggle">
+          {insightPartition.secondary.map(renderInsightRow)}
+        </section>
       )}
 
       {/* Current formula / age guidance row */}
