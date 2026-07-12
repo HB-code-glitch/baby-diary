@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { IconFolderOpen, IconDownload, IconInfo } from '../components/icons'
 import { GUIDANCE_MARKERS, GUIDANCE_DISCLAIMER } from '../lib/guidance'
+import { BREASTFEEDING_BANDS, BF_DISCLAIMER, BF_CLUSTER_NOTE, BF_NEWBORN_RULE } from '../lib/breastfeeding'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
@@ -473,6 +474,9 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           {/* Care guidance reference card */}
           <GuidanceReferenceCard lang={i18nInstance.language as 'ko' | 'ja'} />
 
+          {/* Breastfeeding interval guide */}
+          <BreastfeedingGuideCard lang={i18nInstance.language as 'ko' | 'ja'} />
+
           {/* Sync section */}
           <div className="settings-section">
             <div className="settings-section-title">{t('settings.syncSection')}</div>
@@ -505,6 +509,122 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           onClose={() => !deletingAll && setShowDeleteAllModal(false)}
           busy={deletingAll}
         />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 모유수유 간격 참고 / 授乳間隔の目安 — band table + notes accordion
+// ---------------------------------------------------------------------------
+function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="settings-section">
+      <button
+        className="settings-section-title"
+        style={{
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: 0,
+          fontSize: 'inherit',
+          color: 'inherit',
+          fontWeight: 'inherit',
+          width: '100%',
+          textAlign: 'left',
+        }}
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+      >
+        <IconInfo size={15} color="var(--sky-text)" />
+        {t('guidance.bfGuideTitle')}
+        <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
+          {open ? t('guidance.guideCollapse') : t('guidance.guideExpand')}
+        </span>
+      </button>
+      {open && (
+        <div className="card" style={{ marginTop: 8 }}>
+          {/* Band table */}
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 14 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  {lang === 'ja' ? '月齢' : '월령'}
+                </th>
+                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  {t('guidance.bfGuideIntervalHeader')}
+                </th>
+                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  {t('guidance.bfGuideFeedsHeader')}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {BREASTFEEDING_BANDS.map(band => (
+                <tr key={band.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '5px 6px', color: 'var(--text-primary)', fontWeight: 500 }}>
+                    {lang === 'ja' ? band.ageLabelJa : band.ageLabelKo}
+                  </td>
+                  <td style={{ padding: '5px 6px', color: 'var(--text-secondary)' }}>
+                    {band.intervalMaxHours != null
+                      ? `${band.intervalMinHours}~${band.intervalMaxHours}${lang === 'ja' ? '時間' : '시간'}`
+                      : `${band.intervalMinHours}${lang === 'ja' ? '時間以上' : '시간 이상'}`}
+                  </td>
+                  <td style={{ padding: '5px 6px', color: 'var(--text-secondary)' }}>
+                    {band.feedsPerDayMin}~{band.feedsPerDayMax}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Newborn rule */}
+          <div style={{
+            fontSize: 12,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.6,
+            marginBottom: 10,
+            borderLeft: '3px solid var(--butter)',
+            paddingLeft: 10,
+          }}>
+            {lang === 'ja' ? BF_NEWBORN_RULE.ja : BF_NEWBORN_RULE.ko}
+          </div>
+
+          {/* Cluster note */}
+          <div style={{
+            fontSize: 12,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.6,
+            marginBottom: 10,
+            borderLeft: '3px solid var(--mint)',
+            paddingLeft: 10,
+          }}>
+            {lang === 'ja' ? BF_CLUSTER_NOTE.ja : BF_CLUSTER_NOTE.ko}
+          </div>
+
+          {/* Disclaimer */}
+          <div style={{
+            fontSize: 11.5,
+            color: 'var(--text-muted)',
+            lineHeight: 1.5,
+            marginBottom: 10,
+            borderLeft: '3px solid var(--sky)',
+            paddingLeft: 10,
+          }}>
+            {lang === 'ja' ? BF_DISCLAIMER.ja : BF_DISCLAIMER.ko}
+          </div>
+
+          {/* Source */}
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {t('guidance.bfGuideSourceLabel')}
+          </div>
+        </div>
       )}
     </div>
   )

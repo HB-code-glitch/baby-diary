@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconClock, IconStar, IconGift, IconInfo, IconX, IconMoon, IconRuler } from '../components/icons'
+import { computeNextFeed, formatCountdown } from '../lib/breastfeeding'
 import { useAppStore, formatTime, getDDay } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
@@ -137,10 +138,12 @@ function MilestoneAlertBanners({ birthdate, gender, lang }: MilestoneAlertBanner
 interface InsightsPanelProps {
   lastFeeding: DiaryEvent | null
   lastBreastSide: 'L' | 'R' | 'both' | null
+  lastBreastEvent: DiaryEvent | null
   todayPeeCount: number
   todayPoopCount: number
   dataInfo: DataInfo | null
   birthdate?: string
+  ageDays: number | null
   onNavigate?: (page: 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings') => void
   todaySleepMinutes: number
 }
@@ -148,10 +151,12 @@ interface InsightsPanelProps {
 function InsightsPanel({
   lastFeeding,
   lastBreastSide,
+  lastBreastEvent,
   todayPeeCount,
   todayPoopCount,
   dataInfo,
   birthdate,
+  ageDays,
   onNavigate,
   todaySleepMinutes,
 }: InsightsPanelProps) {
@@ -161,7 +166,7 @@ function InsightsPanel({
   const syncDotClass = syncState.status === 'online' ? 'on' : syncState.status === 'error' ? 'err' : 'off'
 
   useEffect(() => {
-    const id = setInterval(() => setTick(c => c + 1), 60_000)
+    const id = setInterval(() => setTick(c => c + 1), 30_000)
     return () => clearInterval(id)
   }, [])
 
@@ -225,6 +230,65 @@ function InsightsPanel({
     return h > 0 ? (m > 0 ? `${h}시간 ${m}분` : `${h}시간`) : `${m}분`
   })()
 
+  // Breast countdown — computed from last breast event
+  const bfCountdown = useMemo(() => {
+    if (!lastBreastEvent || ageDays === null || !birthdate) return null
+    const now = new Date()
+    const bfLang = lang === 'ja' ? 'ja' : 'ko'
+    const { windowStart, windowEnd, maxStretchAt, band } = computeNextFeed(lastBreastEvent.at, ageDays)
+    const fmt = (d: Date) => d.toLocaleTimeString(lang === 'ja' ? 'ja-JP' : 'ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+
+    const msToStart = windowStart.getTime() - now.getTime()
+    const msToEnd = windowEnd ? windowEnd.getTime() - now.getTime() : null
+    const msElapsed = now.getTime() - new Date(lastBreastEvent.at).getTime()
+    const elapsedStr = formatCountdown(msElapsed, bfLang)
+
+    // maxStretchAt exceeded — newborn warning (amber)
+    if (maxStretchAt && now >= maxStretchAt) {
+      return {
+        type: 'newborn' as const,
+        value: t('home.bfCountdownNewborn', { elapsed: elapsedStr }),
+        sub: null,
+        isAmber: true,
+      }
+    }
+
+    // Before windowStart
+    if (msToStart > 0) {
+      const countdown = formatCountdown(msToStart, bfLang)
+      const sub = windowEnd
+        ? t('home.bfCountdownBeforeSub', { from: fmt(windowStart), to: fmt(windowEnd) })
+        : t('home.bfCountdownBeforeSubNoEnd', { from: fmt(windowStart) })
+      return {
+        type: 'before' as const,
+        value: t('home.bfCountdownBefore', { countdown }),
+        sub,
+        isAmber: false,
+      }
+    }
+
+    // Inside window
+    const pastWindowEnd = msToEnd !== null && msToEnd < 0
+    const pastWindowStartPlus1h = msToEnd === null && msToStart < -60 * 60 * 1000
+    if (!pastWindowEnd && !pastWindowStartPlus1h) {
+      return {
+        type: 'window' as const,
+        value: t('home.bfCountdownWindow'),
+        sub: windowEnd ? `~ ${fmt(windowEnd)}` : null,
+        isAmber: false,
+      }
+    }
+
+    // Past window
+    return {
+      type: 'past' as const,
+      value: t('home.bfCountdownPast', { elapsed: elapsedStr }),
+      sub: null,
+      isAmber: false,
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastBreastEvent, ageDays, birthdate, lang, t])
+
   const rows = [
     {
       Icon: IconBottle,
@@ -271,6 +335,37 @@ function InsightsPanel({
   return (
     <div className="insights-panel" data-tour="insights">
       <div className="insights-title">{t('home.insightsTitle')}</div>
+
+      {/* Breast countdown row — shown only when last feed was breast and birthdate set */}
+      {bfCountdown && (
+        <div
+          className="insight-row"
+          style={bfCountdown.isAmber ? { background: 'var(--amber, #fffbea)', borderRadius: 8, padding: '4px 0' } : undefined}
+        >
+          <div
+            className="insight-icon"
+            style={{ background: bfCountdown.isAmber ? 'var(--butter)' : 'var(--sky)' }}
+            aria-hidden="true"
+          >
+            <IconClock size={16} color={bfCountdown.isAmber ? 'var(--butter-text)' : 'var(--sky-text)'} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="insight-label">{t('home.bfCountdownLabel')}</div>
+            <div
+              className="insight-value"
+              style={bfCountdown.type === 'window' ? { color: 'var(--mint-text)', fontWeight: 600 } : bfCountdown.isAmber ? { color: 'var(--butter-text)', fontWeight: 600 } : undefined}
+            >
+              {bfCountdown.value}
+            </div>
+            {bfCountdown.sub && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>
+                {bfCountdown.sub}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {rows.map((row, i) => {
         const RowIcon = row.Icon
         return (
@@ -1262,6 +1357,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const [feedingTip, setFeedingTip] = useState<{
     type: 'formula' | 'breast'
     sourceLabel: string
+    lastBreastAtISO?: string
   } | null>(null)
   const [feverModal, setFeverModal] = useState<{
     celsius: number
@@ -1306,6 +1402,12 @@ export function HomePage({ onNavigate }: HomePageProps) {
     if (breasts.length === 0) return null
     const last = breasts.sort((a, b) => b.at.localeCompare(a.at))[0]
     return (last.data as BreastData).side ?? null
+  }, [events])
+
+  const lastBreastEvent = React.useMemo((): DiaryEvent | null => {
+    const breasts = events.filter(e => !e.deleted && e.type === 'breast')
+    if (breasts.length === 0) return null
+    return breasts.sort((a, b) => b.at.localeCompare(a.at))[0]
   }, [events])
 
   const onTimerChange = useCallback(() => setTimerTick(t => t + 1), [])
@@ -1374,12 +1476,12 @@ export function HomePage({ onNavigate }: HomePageProps) {
     }
     // With birthdate — show feeding tip popup (replaces success toast)
     try {
-      await addBreast(side, minutes, startedAt)
+      const event = await addBreast(side, minutes, startedAt)
       const band = getFeedingBand(ageDays)
       const marker = band
         ? GUIDANCE_MARKERS.find(m => m.id === band.id)
         : GUIDANCE_MARKERS.find(m => m.id === 'formula_0_1mo')
-      setFeedingTip({ type: 'breast', sourceLabel: marker?.sourceLabel ?? 'AAP' })
+      setFeedingTip({ type: 'breast', sourceLabel: marker?.sourceLabel ?? 'AAP', lastBreastAtISO: event.at })
     } catch {
       showToast({ message: t('toast.saveFailed') })
     }
@@ -1611,10 +1713,12 @@ export function HomePage({ onNavigate }: HomePageProps) {
         <InsightsPanel
           lastFeeding={lastFeeding}
           lastBreastSide={lastBreastSide}
+          lastBreastEvent={lastBreastEvent}
           todayPeeCount={peeCount}
           todayPoopCount={poopCount}
           dataInfo={dataInfo}
           birthdate={birthdate ?? undefined}
+          ageDays={ageDays}
           onNavigate={onNavigate}
           todaySleepMinutes={todaySleepMin}
         />
@@ -1719,6 +1823,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           todayFormulaTotalMl={todayFormulaMlNow}
           todayFeedingCount={todayFeedingCountNow}
           sourceLabel={feedingTip.sourceLabel}
+          lastBreastAtISO={feedingTip.lastBreastAtISO}
           onNavigate={onNavigate}
           onDismiss={() => setFeedingTip(null)}
         />

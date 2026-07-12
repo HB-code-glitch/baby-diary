@@ -32,7 +32,14 @@
     "recentTempLabel": "最近の体温",
     "backupLabel": "バックアップ状態",
     "guidanceRowAriaLabel": "育児ガイドを詳しく見る（設定へ移動）",
-    "todaySleepLabel": "今日のねんね"
+    "todaySleepLabel": "今日のねんね",
+    "bfCountdownLabel": "次の母乳授乳",
+    "bfCountdownBefore": "次の授乳まで約{{countdown}}",
+    "bfCountdownBeforeSub": "{{from}}〜{{to}} 推奨時間帯",
+    "bfCountdownBeforeSubNoEnd": "{{from}} 以降が目安",
+    "bfCountdownWindow": "今が授乳のよい時間です",
+    "bfCountdownPast": "赤ちゃんが欲しがればいつでも — 前回の授乳から{{elapsed}}",
+    "bfCountdownNewborn": "新生児は夜4時間・昼3時間を超えないよう起こして授乳します — 前回の授乳から{{elapsed}}"
   },
   "stat": {
     "formulaLabel": "ミルク合計",
@@ -357,7 +364,11 @@
     "guideExpand": "開く",
     "guideCollapse": "閉じる",
     "evidenceConsensus": "ガイドライン",
-    "sourcePrefix": "出典: "
+    "sourcePrefix": "出典: ",
+    "bfGuideTitle": "授乳間隔の目安",
+    "bfGuideIntervalHeader": "間隔",
+    "bfGuideFeedsHeader": "回数/日",
+    "bfGuideSourceLabel": "出典: 大韓小児青少年科学会、アイサラン(保健福祉部)、AAP、KellyMom、厚生労働省 他"
   },
   "feedingTip": {
     "formulaWithMax": "今日の合計 {{total}}ml — 1日の上限 {{max}}mlまで残り{{remaining}}ml",
@@ -369,7 +380,12 @@
     "footerSource": "参考: 育児ガイド · {{sourceLabel}}",
     "footerDisclaimer": "数値は目標ではなく参考範囲です",
     "footerAriaLabel": "育児ガイドを確認する",
-    "dismiss": "閉じる"
+    "dismiss": "閉じる",
+    "breastNextWindow": "次の授乳は通常{{intervalMin}}〜{{intervalMax}}時間後です — {{from}}〜{{to}}ごろ",
+    "breastNextWindowNoMax": "{{intervalMin}}時間以降、赤ちゃんが欲しがったとき",
+    "breastShortDisclaimer": "間隔は目安です — 空腹サインが出たらいつでも授乳してください",
+    "breastClusterNote": "夕方のまとめ授乳（クラスター授乳）は正常です",
+    "breastNewbornAlert": "新生児は夜4時間・昼3時間を超えないよう起こして授乳します"
   },
   "tour": {
     "next": "次へ",

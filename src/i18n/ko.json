@@ -32,7 +32,14 @@
     "recentTempLabel": "최근 체온",
     "backupLabel": "백업 상태",
     "guidanceRowAriaLabel": "육아 가이드 자세히 보기 (설정으로 이동)",
-    "todaySleepLabel": "오늘 수면"
+    "todaySleepLabel": "오늘 수면",
+    "bfCountdownLabel": "다음 모유 수유",
+    "bfCountdownBefore": "다음 수유까지 약 {{countdown}}",
+    "bfCountdownBeforeSub": "{{from}}~{{to}} 권장 구간",
+    "bfCountdownBeforeSubNoEnd": "{{from}} 이후 권장",
+    "bfCountdownWindow": "지금이 수유하기 좋은 시간이에요",
+    "bfCountdownPast": "아기가 원하면 언제든 — 마지막 수유 후 {{elapsed}}",
+    "bfCountdownNewborn": "신생아는 밤 4시간·낮 3시간을 넘기지 않게 깨워 먹여요 — 마지막 수유 후 {{elapsed}}"
   },
   "stat": {
     "formulaLabel": "분유 총량",
@@ -357,7 +364,11 @@
     "guideExpand": "펼치기",
     "guideCollapse": "접기",
     "evidenceConsensus": "가이드라인",
-    "sourcePrefix": "출처: "
+    "sourcePrefix": "출처: ",
+    "bfGuideTitle": "모유수유 간격 참고",
+    "bfGuideIntervalHeader": "간격",
+    "bfGuideFeedsHeader": "횟수/일",
+    "bfGuideSourceLabel": "출처: 대한소아청소년과학회, 아이사랑(보건복지부), AAP, KellyMom, 厚生労働省 외"
   },
   "feedingTip": {
     "formulaWithMax": "오늘 총 {{total}}ml — 하루 상한 {{max}}ml까지 {{remaining}}ml 남았어요",
@@ -369,7 +380,12 @@
     "footerSource": "참고: 육아 가이드 · {{sourceLabel}}",
     "footerDisclaimer": "수치는 목표가 아닌 참고 범위예요",
     "footerAriaLabel": "육아 가이드 보기",
-    "dismiss": "닫기"
+    "dismiss": "닫기",
+    "breastNextWindow": "다음 수유는 보통 {{intervalMin}}~{{intervalMax}}시간 뒤예요 — {{from}}~{{to}}쯤",
+    "breastNextWindowNoMax": "{{intervalMin}}시간 이후 아기가 원할 때",
+    "breastShortDisclaimer": "간격은 참고용 — 아기가 배고픔 신호를 보이면 언제든 먹여요",
+    "breastClusterNote": "저녁 시간대 몰아 수유(클러스터 피딩)는 정상이에요",
+    "breastNewbornAlert": "신생아는 밤 4시간·낮 3시간을 넘기지 않게 깨워 먹여요"
   },
   "tour": {
     "next": "다음",

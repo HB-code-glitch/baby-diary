@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { getFeedingBand } from '../lib/guidance'
+import { computeNextFeed } from '../lib/breastfeeding'
 import { IconX } from './icons'
 
 export interface FeedingTipPopupProps {
@@ -12,6 +13,8 @@ export interface FeedingTipPopupProps {
   todayFeedingCount: number
   /** sourceLabel from the matched marker (e.g. 'AAP·CDC·厚生労働省') */
   sourceLabel: string
+  /** ISO timestamp of the breast feed just recorded (used for next-feed window) */
+  lastBreastAtISO?: string
   onNavigate?: (page: 'settings') => void
   onDismiss: () => void
 }
@@ -25,10 +28,11 @@ export function FeedingTipPopup({
   todayFormulaTotalMl,
   todayFeedingCount,
   sourceLabel,
+  lastBreastAtISO,
   onNavigate,
   onDismiss,
 }: FeedingTipPopupProps): React.JSX.Element | null {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -45,6 +49,10 @@ export function FeedingTipPopup({
 
   let mainLine: string
   let isAmber = false
+  let breastWindowLine: string | null = null
+  let breastNoteLine: string | null = null
+  let breastDisclaimerLine: string | null = null
+  let showClusterNote = false
 
   if (type === 'formula') {
     if (band?.dailyMaxMl != null) {
@@ -80,6 +88,37 @@ export function FeedingTipPopup({
   } else {
     // breast
     mainLine = t('feedingTip.breastCount', { count: todayFeedingCount })
+
+    // Next-feed window line
+    if (lastBreastAtISO != null) {
+      const { windowStart, windowEnd, band: bfBand } = computeNextFeed(lastBreastAtISO, ageDays)
+      const fmt = (d: Date) => d.toLocaleTimeString(i18n.language === 'ja' ? 'ja-JP' : 'ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+
+      if (windowEnd != null) {
+        breastWindowLine = t('feedingTip.breastNextWindow', {
+          intervalMin: bfBand.intervalMinHours,
+          intervalMax: bfBand.intervalMaxHours,
+          from: fmt(windowStart),
+          to: fmt(windowEnd),
+        })
+      } else {
+        breastWindowLine = t('feedingTip.breastNextWindowNoMax', {
+          intervalMin: bfBand.intervalMinHours,
+        })
+      }
+
+      // Band note
+      breastNoteLine = i18n.language === 'ja' ? bfBand.noteJa : bfBand.noteKo
+
+      // Short disclaimer
+      breastDisclaimerLine = t('feedingTip.breastShortDisclaimer')
+
+      // Evening cluster note: 18-22시 AND ageDays < 90
+      const hour = new Date(lastBreastAtISO).getHours()
+      if (hour >= 18 && hour < 22 && ageDays < 90) {
+        showClusterNote = true
+      }
+    }
   }
 
   const lastSideLabel =
@@ -110,6 +149,30 @@ export function FeedingTipPopup({
       {lastSideLabel && (
         <div className="feeding-tip-sub">
           {t('feedingTip.breastLastSide', { side: lastSideLabel })}
+        </div>
+      )}
+
+      {breastWindowLine && (
+        <div className="feeding-tip-sub" style={{ fontWeight: 500 }}>
+          {breastWindowLine}
+        </div>
+      )}
+
+      {breastNoteLine && (
+        <div className="feeding-tip-sub" style={{ color: 'var(--text-secondary)', fontSize: 11.5 }}>
+          {breastNoteLine}
+        </div>
+      )}
+
+      {showClusterNote && (
+        <div className="feeding-tip-sub" style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+          {t('feedingTip.breastClusterNote')}
+        </div>
+      )}
+
+      {breastDisclaimerLine && (
+        <div className="feeding-tip-sub" style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+          {breastDisclaimerLine}
         </div>
       )}
 
