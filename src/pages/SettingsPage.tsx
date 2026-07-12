@@ -190,12 +190,17 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const handleDeleteAll = async () => {
     setDeletingAll(true)
     try {
-      const count = await softDeleteAllEvents()
-      setShowDeleteAllModal(false)
-      showToast({ message: t('settings.deleteAllToastSuccess', { count }) })
+      // MF-12: partial failure must show the partial toast (not success)
+      const { count, partial } = await softDeleteAllEvents()
+      if (partial) {
+        showToast({ message: t('settings.deleteAllToastPartial', { count }) })
+      } else {
+        setShowDeleteAllModal(false)
+        showToast({ message: t('settings.deleteAllToastSuccess', { count }) })
+      }
       await loadDataInfo()
     } catch {
-      showToast({ message: t('settings.deleteAllToastPartial', { count: 0 }) })
+      showToast({ message: t('toast.saveFailed') })
     } finally {
       setDeletingAll(false)
     }

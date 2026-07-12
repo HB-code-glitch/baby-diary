@@ -78,7 +78,7 @@ describe('softDeleteAllEvents', () => {
     mockAppendEvent.mockResolvedValue('ok')
   })
 
-  it('비삭제 이벤트 전부를 tombstone 처리하고 count를 반환한다', async () => {
+  it('비삭제 이벤트 전부를 tombstone 처리하고 { count, partial } 를 반환한다', async () => {
     const { useAppStore } = await import('../src/store/useAppStore')
 
     const events: DiaryEvent[] = [
@@ -90,9 +90,11 @@ describe('softDeleteAllEvents', () => {
     // Pre-seed store state directly
     useAppStore.setState({ events })
 
-    const count = await useAppStore.getState().softDeleteAllEvents()
+    const result = await useAppStore.getState().softDeleteAllEvents()
 
-    expect(count).toBe(3)
+    // MF-12: now returns { count, partial }
+    expect(result.count).toBe(3)
+    expect(result.partial).toBe(false)
     // ipc.appendEvent called once per event with deleted: true and rev bumped
     expect(mockAppendEvent).toHaveBeenCalledTimes(3)
     const calls = mockAppendEvent.mock.calls
@@ -114,27 +116,29 @@ describe('softDeleteAllEvents', () => {
 
     useAppStore.setState({ events })
 
-    const count = await useAppStore.getState().softDeleteAllEvents()
+    const result = await useAppStore.getState().softDeleteAllEvents()
 
-    expect(count).toBe(1)
+    expect(result.count).toBe(1)
+    expect(result.partial).toBe(false)
     expect(mockAppendEvent).toHaveBeenCalledTimes(1)
     expect(mockAppendEvent.mock.calls[0][0]).toMatchObject({ id: 'alive', deleted: true })
     expect(mockEnqueue).toHaveBeenCalledTimes(1)
   })
 
-  it('이벤트가 없으면 count 0을 반환한다', async () => {
+  it('이벤트가 없으면 { count: 0, partial: false } 를 반환한다', async () => {
     const { useAppStore } = await import('../src/store/useAppStore')
 
     useAppStore.setState({ events: [] })
 
-    const count = await useAppStore.getState().softDeleteAllEvents()
+    const result = await useAppStore.getState().softDeleteAllEvents()
 
-    expect(count).toBe(0)
+    expect(result.count).toBe(0)
+    expect(result.partial).toBe(false)
     expect(mockAppendEvent).not.toHaveBeenCalled()
     expect(mockEnqueue).not.toHaveBeenCalled()
   })
 
-  it('ipc.appendEvent가 error를 반환하면 즉시 중단하고 부분 count를 반환한다', async () => {
+  it('MF-12: ipc.appendEvent가 error를 반환하면 즉시 중단하고 { count, partial: true } 를 반환한다', async () => {
     const { useAppStore } = await import('../src/store/useAppStore')
 
     const events: DiaryEvent[] = [
@@ -151,10 +155,11 @@ describe('softDeleteAllEvents', () => {
       .mockResolvedValueOnce('error')
       .mockResolvedValueOnce('ok') // should never be reached
 
-    const count = await useAppStore.getState().softDeleteAllEvents()
+    const result = await useAppStore.getState().softDeleteAllEvents()
 
-    // Processed 1 before error
-    expect(count).toBe(1)
+    // MF-12: partial=true signals caller to show partial toast (not success)
+    expect(result.count).toBe(1)
+    expect(result.partial).toBe(true)
     expect(mockAppendEvent).toHaveBeenCalledTimes(2)
     expect(mockEnqueue).toHaveBeenCalledTimes(1)
   })

@@ -65,7 +65,7 @@ interface AppState {
   addEvent:            (event: DiaryEvent) => Promise<DiaryEvent>
   editEvent:           (original: DiaryEvent, patch: Partial<Pick<DiaryEvent, 'at' | 'data' | 'deleted'>>) => Promise<DiaryEvent>
   softDeleteEvent:     (event: DiaryEvent) => Promise<DiaryEvent>
-  softDeleteAllEvents: () => Promise<number>
+  softDeleteAllEvents: () => Promise<{ count: number; partial: boolean }>
 
   // Quick-add helpers
   addPee:     (atOverride?: string) => Promise<DiaryEvent>
@@ -219,11 +219,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   editEvent: async (original: DiaryEvent, patch) => {
     const t = now()
+    // MF-11: re-read the live rev from the store in case a remote sync raised it
+    // while the modal was open — prevents the edit being silently dropped by
+    // mergeEventIntoList (incoming.rev not > existing.rev).
+    const liveRev = get().events.find(e => e.id === original.id)?.rev ?? original.rev
+    const safeRev = Math.max(original.rev, liveRev) + 1
     const updated: DiaryEvent = {
       ...original,
       ...patch,
       updatedAt: t,
-      rev: original.rev + 1,
+      rev: safeRev,
     }
     const result = await ipc.appendEvent(updated)
     if (result === 'error') {
@@ -274,7 +279,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // matches what's actually on disk (avoids ghost-deleted entries in memory).
       await get().loadEvents()
     }
-    return count
+    // MF-12: return both count and partial flag so caller can show the correct toast
+    return { count, partial }
   },
 
   // -----------------------------------------------------------------------
