@@ -2,6 +2,7 @@ import type { Page } from '../components/Sidebar'
 
 export const TUTORIAL_VERSION = 2
 export const TUTORIAL_STATE_KEY = 'babydiary.tutorial.v2'
+export const TUTORIAL_SHORTCUT_BLOCKING_SELECTOR = '[data-tutorial-active="true"], .tour-stage, .tour-overlay, .tour-overlay-strip'
 
 export type TutorialExitReason = 'completed' | 'skipped'
 export type TutorialPlacement = 'right' | 'left' | 'bottom' | 'top' | 'center'
@@ -32,6 +33,12 @@ export const TUTORIAL_STEPS: readonly TutorialStep[] = [
   { id: 'settings-family', page: 'settings', targetSelector: '[data-tour="settings-sync"]', placement: 'left', icon: 'settings', eyebrowKey: 'tour.settingsEyebrow', titleKey: 'tour.settingsTitle', bodyKey: 'tour.settingsBody' },
   { id: 'ready', page: 'home', placement: 'center', icon: 'check', eyebrowKey: 'tour.readyEyebrow', titleKey: 'tour.readyTitle', bodyKey: 'tour.readyBody' },
 ]
+
+export function isTutorialShortcutBlocked(
+  root: Pick<ParentNode, 'querySelector'> | null = typeof document === 'undefined' ? null : document,
+): boolean {
+  return root ? root.querySelector(TUTORIAL_SHORTCUT_BLOCKING_SELECTOR) !== null : false
+}
 
 function defaultStorage(): Storage | null {
   try { return typeof localStorage === 'undefined' ? null : localStorage } catch { return null }

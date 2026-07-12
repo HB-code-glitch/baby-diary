@@ -6,6 +6,7 @@ import i18n from '../src/i18n'
 import ko from '../src/i18n/ko.json'
 import ja from '../src/i18n/ja.json'
 import { TutorialCard } from '../src/components/TutorialCard'
+import { TutorialTour } from '../src/components/TutorialTour'
 import {
   TUTORIAL_STATE_KEY,
   TUTORIAL_STEPS,
@@ -24,6 +25,17 @@ function storage(seed: Record<string, string> = {}): Storage {
     key: index => [...values.keys()][index] ?? null,
     removeItem: key => values.delete(key),
     setItem: (key, value) => values.set(key, value),
+  }
+}
+
+function selectorRoot(activeSelector: string | null): Pick<ParentNode, 'querySelector'> {
+  return {
+    querySelector: (selector: string) => selector
+      .split(',')
+      .map(candidate => candidate.trim())
+      .includes(activeSelector ?? '')
+        ? ({} as Element)
+        : null,
   }
 }
 
@@ -88,5 +100,56 @@ describe('tutorial v2 content', () => {
     expect(html).toContain('tour-back-button')
     expect(html).toContain('tour-primary-button')
     expect((html.match(/tour-progress-segment/g) ?? [])).toHaveLength(6)
+  })
+
+  it('exposes a stable active marker while the v2 tutorial blocks the app', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(TutorialTour, {
+        onNavigate: () => undefined,
+        onExit: () => undefined,
+      }),
+    )
+
+    expect(html).toContain('data-tutorial-active="true"')
+  })
+
+  it('blocks quick-record shortcuts for v2 and legacy tutorial overlays', async () => {
+    const tutorial = await import('../src/lib/tutorial')
+
+    expect(tutorial.isTutorialShortcutBlocked(selectorRoot('[data-tutorial-active="true"]'))).toBe(true)
+    expect(tutorial.isTutorialShortcutBlocked(selectorRoot('.tour-stage'))).toBe(true)
+    expect(tutorial.isTutorialShortcutBlocked(selectorRoot('.tour-overlay'))).toBe(true)
+    expect(tutorial.isTutorialShortcutBlocked(selectorRoot('.tour-overlay-strip'))).toBe(true)
+    expect(tutorial.isTutorialShortcutBlocked(selectorRoot(null))).toBe(false)
+  })
+
+  it('scrolls an offscreen target once, remeasures it, and leaves oversized targets alone', async () => {
+    const tour = await import('../src/components/TutorialTour')
+    const offscreenRects = [
+      { top: 760, left: 24, width: 320, height: 120 },
+      { top: 210, left: 24, width: 320, height: 120 },
+    ]
+    const scrollCalls: ScrollIntoViewOptions[] = []
+    let offscreenReads = 0
+    const offscreenTarget = {
+      getBoundingClientRect: () => offscreenRects[Math.min(offscreenReads++, offscreenRects.length - 1)],
+      scrollIntoView: (options: ScrollIntoViewOptions) => scrollCalls.push(options),
+    }
+
+    expect(tour.measureTutorialTarget(offscreenTarget, { width: 960, height: 640 })).toEqual(offscreenRects[1])
+    expect(offscreenReads).toBe(2)
+    expect(scrollCalls).toEqual([{ block: 'center', inline: 'nearest', behavior: 'auto' }])
+
+    let oversizedReads = 0
+    let oversizedScrolls = 0
+    const oversizedRect = { top: -80, left: 0, width: 216, height: 800 }
+    const oversizedTarget = {
+      getBoundingClientRect: () => { oversizedReads += 1; return oversizedRect },
+      scrollIntoView: () => { oversizedScrolls += 1 },
+    }
+
+    expect(tour.measureTutorialTarget(oversizedTarget, { width: 960, height: 640 })).toEqual(oversizedRect)
+    expect(oversizedReads).toBe(1)
+    expect(oversizedScrolls).toBe(0)
   })
 })

@@ -8,6 +8,8 @@ import {
   type TutorialPlacement,
 } from '../lib/tutorial'
 
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
 interface TutorialTourProps {
   onNavigate: (page: Page) => void
   onExit: (reason: TutorialExitReason) => void
@@ -25,6 +27,11 @@ interface Viewport {
   height: number
 }
 
+interface MeasurableTutorialTarget {
+  getBoundingClientRect: () => Rect
+  scrollIntoView: (options: ScrollIntoViewOptions) => void
+}
+
 const SPOTLIGHT_PADDING = 6
 const CARD_WIDTH = 400
 const EDGE_GAP = 12
@@ -33,6 +40,20 @@ const TARGET_GAP = 12
 function currentViewport(): Viewport {
   if (typeof window === 'undefined') return { width: 960, height: 640 }
   return { width: window.innerWidth, height: window.innerHeight }
+}
+
+export function measureTutorialTarget(target: MeasurableTutorialTarget, viewport: Viewport): Rect {
+  const initialRect = target.getBoundingClientRect()
+  const isOversized = initialRect.height > viewport.height || initialRect.width > viewport.width
+  const isOutsideViewport = initialRect.top < 0
+    || initialRect.left < 0
+    || initialRect.top + initialRect.height > viewport.height
+    || initialRect.left + initialRect.width > viewport.width
+
+  if (!isOutsideViewport || isOversized) return initialRect
+
+  target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' })
+  return target.getBoundingClientRect()
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -165,12 +186,11 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
       return
     }
 
-    const rect = target.getBoundingClientRect()
-    setTargetRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height })
+    setTargetRect(measureTutorialTarget(target, currentViewport()))
     setVisible(true)
   }, [step.targetSelector])
 
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     const background = Array.from(document.querySelectorAll<HTMLElement>('.sidebar, .main-content'))
     const previousInert = background.map(element => ({
       element,
@@ -225,7 +245,7 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
     }
   }, [measureTarget, onNavigate, step.page, stepIndex])
 
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (!visible || !cardRef.current) return
     const measuredHeight = cardRef.current.offsetHeight
     setCardHeight(previous => previous === measuredHeight ? previous : measuredHeight)
@@ -282,7 +302,7 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
     : null
 
   return (
-    <div className="tour-stage">
+    <div className="tour-stage" data-tutorial-active="true">
       {spotlightStyle ? (
         <>
           <div className="tour-backdrop tour-backdrop-top" style={{ height: spotlightStyle.top }} aria-hidden="true" />
