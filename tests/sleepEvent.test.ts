@@ -138,6 +138,64 @@ describe('formatEventValue sleep — Japanese', () => {
   })
 })
 
+// --------------- MF-03: Sleep stop-after-midnight time reconstruction ---------------
+
+describe('MF-03: SleepConfirmPopover handleConfirm anchors HH:MM to startedAt date', () => {
+  /**
+   * The fix: instead of `new Date()`, use `new Date(startedAt)` so HH:MM edits
+   * are anchored to the sleep-start date (not the stop date when tapped after midnight).
+   */
+  function reconstructStartISO(startedAt: number, startValue: string): string {
+    const [hh, mm] = startValue.split(':').map(Number)
+    const d = new Date(startedAt)  // MF-03 fix: anchor to startedAt
+    d.setHours(hh, mm, 0, 0)
+    return d.toISOString()
+  }
+
+  it('stop tapped at 00:30 next day: result date-part is the sleep-start day', () => {
+    // Sleep started at 23:50 on day D
+    const dayD = new Date(2026, 5, 20, 23, 50, 0, 0)  // local 2026-06-20 23:50
+    const startedAt = dayD.getTime()
+    const startValue = '23:50'  // user keeps the original start time
+
+    const result = reconstructStartISO(startedAt, startValue)
+    const resultDate = new Date(result)
+
+    // The date-part of the result should be June 20, not June 21
+    expect(resultDate.getFullYear()).toBe(2026)
+    expect(resultDate.getMonth()).toBe(5)  // 0-indexed June
+    expect(resultDate.getDate()).toBe(20)
+    expect(resultDate.getHours()).toBe(23)
+    expect(resultDate.getMinutes()).toBe(50)
+  })
+
+  it('stop tapped after midnight with edited start 23:50: result is still startedAt day', () => {
+    // Sleep started at 2026-06-20 23:50
+    const startedAt = new Date(2026, 5, 20, 23, 50, 0, 0).getTime()
+    // User edits start to 23:45 (stays same day)
+    const startValue = '23:45'
+
+    const result = reconstructStartISO(startedAt, startValue)
+    const resultDate = new Date(result)
+
+    expect(resultDate.getDate()).toBe(20)  // still June 20
+    expect(resultDate.getHours()).toBe(23)
+    expect(resultDate.getMinutes()).toBe(45)
+  })
+
+  it('normal same-day stop: result date-part matches expected day', () => {
+    const startedAt = new Date(2026, 5, 20, 14, 30, 0, 0).getTime()
+    const startValue = '14:30'
+
+    const result = reconstructStartISO(startedAt, startValue)
+    const resultDate = new Date(result)
+
+    expect(resultDate.getDate()).toBe(20)
+    expect(resultDate.getHours()).toBe(14)
+    expect(resultDate.getMinutes()).toBe(30)
+  })
+})
+
 // --------------- Open-sleep localStorage rehydrate/discard logic ---------------
 
 const SLEEP_START_KEY = 'babydiary.sleepStart'

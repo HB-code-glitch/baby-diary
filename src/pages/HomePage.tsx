@@ -1184,7 +1184,9 @@ function SleepConfirmPopover({ startedAt, anchor, onConfirm, onCancel }: SleepCo
 
   const handleConfirm = () => {
     const [hh, mm] = startValue.split(':').map(Number)
-    const d = new Date()
+    // MF-03: anchor the HH:MM edit to the sleep-start date so a stop
+    // tapped after midnight writes to the correct (yesterday) calendar date.
+    const d = new Date(startedAt)
     d.setHours(hh, mm, 0, 0)
     onConfirm(durationMin, d.toISOString())
   }
@@ -1465,7 +1467,10 @@ export function HomePage({ onNavigate }: HomePageProps) {
     }
   }
 
-  const handleBreastConfirm = async (side: 'L' | 'R' | 'both', minutes?: number, startedAt?: string) => {
+  // MF-10: wrap in useCallback so handleFloatingTimerStop captures a stable
+  // reference that includes the live ageDays value — prevents stale closure
+  // where ageDays===null makes the floating-pill stop bypass the FeedingTip.
+  const handleBreastConfirm = useCallback(async (side: 'L' | 'R' | 'both', minutes?: number, startedAt?: string) => {
     setPopover(null)
     const sideLabel = side === 'L' ? t('breast.left') : side === 'R' ? t('breast.right') : t('breast.both')
     const label = `${t('quickBtn.breast')}(${sideLabel})`
@@ -1485,7 +1490,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
     } catch {
       showToast({ message: t('toast.saveFailed') })
     }
-  }
+  }, [ageDays, addBreast, showToast, t, setFeedingTip, setPopover, quickRecord])
 
   const handleFormulaConfirm = async (ml: number) => {
     setPopover(null)
@@ -1518,6 +1523,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
     }
   }
 
+  // MF-10: handleBreastConfirm is now stable (useCallback above), so include it here.
   const handleFloatingTimerStop = useCallback(() => {
     if (nursingTimer.running && nursingTimer.startedAt != null) {
       const now = Date.now()
@@ -1532,7 +1538,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
       setTimerTick(t => t + 1)
       handleBreastConfirm(side, elapsedMin, stopAtISO)
     }
-  }, [lastBreastSide]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lastBreastSide, handleBreastConfirm])
 
   const handleSleepButtonClick = useCallback((e: React.MouseEvent) => {
     if (sleepTimer.running && sleepTimer.startedAt != null) {
@@ -1593,7 +1599,8 @@ export function HomePage({ onNavigate }: HomePageProps) {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.ctrlKey || e.metaKey || e.altKey) return
       if (e.key === 'Escape' && quickMenuAnchor) { setQuickMenuAnchor(null); return }
-      if (popover) return
+      // MF-09: suppress digit shortcuts while any modal/popover/tutorial is open
+      if (popover || sleepConfirmAnchor || feverModal || timeEditEvent || feedingTip) return
       // P24: Suppress digit shortcuts while the tutorial overlay is active.
       // Pressing '1' during tour would silently record a pee event under the overlay.
       if (document.querySelector('.tour-overlay, .tour-overlay-strip')) return
@@ -1610,7 +1617,8 @@ export function HomePage({ onNavigate }: HomePageProps) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [popover, quickMenuAnchor, handlePee, handlePoop])
+  // MF-09: include all modal/popover states that suppress digit shortcuts
+  }, [popover, sleepConfirmAnchor, feverModal, timeEditEvent, feedingTip, quickMenuAnchor, handlePee, handlePoop])
 
   // Quick-record buttons config
   const sleepRunning = sleepTimer.running
