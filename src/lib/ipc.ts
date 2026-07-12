@@ -19,6 +19,8 @@ declare global {
       savePdf: () => Promise<SavePdfResult>
       /** MF-06: renderer signals main that store init + ReportView render is done */
       reportReady: () => void
+      /** Merge partial settings into on-disk settings (field-scoped, no stale-overwrite). */
+      mergeSettings: (partial: Partial<AppSettings>) => Promise<void>
     }
   }
 }
@@ -145,6 +147,25 @@ const mockBabyDiary: Window['babyDiary'] = {
   },
 
   reportReady: (): void => { /* no-op in browser/mock mode */ },
+
+  mergeSettings: async (partial: Partial<AppSettings>): Promise<void> => {
+    try {
+      const raw = localStorage.getItem(MOCK_SETTINGS_KEY)
+      const current: AppSettings = raw ? JSON.parse(raw) as AppSettings : {
+        baby: { name: '', birthdate: '' },
+        profile: { uid: 'mock-uid', name: '', role: 'mom' },
+        familyId: '',
+        firebase: null,
+      }
+      const merged: AppSettings = {
+        ...current,
+        ...partial,
+        baby:    partial.baby    ? { ...current.baby,    ...partial.baby    } : current.baby,
+        profile: partial.profile ? { ...current.profile, ...partial.profile } : current.profile,
+      }
+      localStorage.setItem(MOCK_SETTINGS_KEY, JSON.stringify(merged))
+    } catch { /* ignore */ }
+  },
 }
 
 // ────────────────────────────────────────────────────────────
@@ -174,6 +195,8 @@ export const ipc = {
   appendEvent:      (event: DiaryEvent)          => getApi().appendEvent(event),
   getSettings:      (): Promise<AppSettings>     => getApi().getSettings(),
   saveSettings:     (settings: AppSettings)      => getApi().saveSettings(settings),
+  /** Field-merge partial settings — re-reads disk first, only writes owned fields. */
+  mergeSettings: (partial: Partial<AppSettings>): Promise<void> => getApi().mergeSettings(partial),
   exportData:       (format: ExportFormat)       => getApi().exportData(format),
   openBackupFolder: (): Promise<void>            => getApi().openBackupFolder(),
   getDataInfo:      (): Promise<DataInfo>        => getApi().getDataInfo(),
