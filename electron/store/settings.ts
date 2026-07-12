@@ -2,6 +2,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { AppSettings } from '../../shared/types'
 
+type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T
+
 const DEFAULT_SETTINGS: AppSettings = {
   baby: {
     name: '',
@@ -157,5 +159,34 @@ export class SettingsStore {
     }
 
     this.settings = { ...settings }
+  }
+
+  /**
+   * Field-merge partial settings into the current on-disk settings.
+   * Re-reads the file first to avoid overwriting concurrent writes.
+   * Only the provided keys are updated; everything else is untouched.
+   * This is the preferred API for callers that only own a subset of fields.
+   */
+  merge(partial: DeepPartial<AppSettings>): void {
+    // Re-read from disk to get the authoritative state
+    this.load()
+    const current = this.settings
+
+    // Deep-merge: baby and profile sub-objects are merged field-by-field
+    const merged: AppSettings = {
+      ...current,
+      ...(partial as Partial<AppSettings>),
+      baby: partial.baby != null
+        ? { ...current.baby, ...(partial.baby as object) }
+        : current.baby,
+      profile: partial.profile != null
+        ? { ...current.profile, ...(partial.profile as object) }
+        : current.profile,
+      firebase: 'firebase' in partial
+        ? (partial.firebase as AppSettings['firebase'] ?? current.firebase)
+        : current.firebase,
+    }
+
+    this.save(merged)
   }
 }

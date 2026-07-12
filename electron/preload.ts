@@ -14,6 +14,9 @@ const babyDiaryAPI = {
   saveSettings: (settings: AppSettings): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
+  mergeSettings: (partial: Partial<AppSettings>): Promise<void> =>
+    ipcRenderer.invoke('settings:merge', partial),
+
   exportData: (format: ExportFormat): Promise<void> =>
     ipcRenderer.invoke('data:export', format),
 

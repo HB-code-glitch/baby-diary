@@ -91,6 +91,10 @@ function setupIPC(): void {
     settingsStore.save(settings)
   })
 
+  ipcMain.handle('settings:merge', async (_, partial: Partial<AppSettings>) => {
+    settingsStore.merge(partial)
+  })
+
   ipcMain.handle('data:export', async (_, format: ExportFormat) => {
     const { canceled, filePaths } = await dialog.showOpenDialog({
       properties: ['openDirectory'],
