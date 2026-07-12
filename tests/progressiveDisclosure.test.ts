@@ -33,6 +33,8 @@ it('enables only chart sections with data', () => {
 })
 
 it('opens sync details only when attention is required', () => {
+  expect(shouldOpenSyncDisclosure('off')).toBe(false)
+  expect(shouldOpenSyncDisclosure('no-config')).toBe(true)
   expect(shouldOpenSyncDisclosure('online')).toBe(false)
   expect(shouldOpenSyncDisclosure('connecting')).toBe(false)
   expect(shouldOpenSyncDisclosure('signed-out')).toBe(true)
