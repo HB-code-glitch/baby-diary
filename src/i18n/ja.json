@@ -339,7 +339,9 @@
     "signingOut": "ログアウト中…",
     "syncOff": "同期オフ",
     "connecting": "接続中…",
-    "familyNeeded": "家族の連携が必要です"
+    "familyNeeded": "家族の連携が必要です",
+    "familyGoneTitle": "家族の連携が解除されました",
+    "familyGoneDesc": "家族の接続が有効ではなくなりました — 新しく家族を作るか、招待コードで再度参加してください"
   },
   "date": {
     "formatLong": "M月d日（EEE）",

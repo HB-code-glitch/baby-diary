@@ -3,7 +3,7 @@ import {
   Cloud, CloudOff, AlertCircle, Copy, Check, LogOut,
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
-import { useSyncStatus, restartSync, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
+import { useSyncStatus, restartSync, signIn, signUp, signOutSync, createFamily, joinFamily, DETAIL_FAMILY_GONE } from '../sync/useSync'
 import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN, ERR_PERMISSION_DENIED } from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
@@ -595,6 +595,21 @@ export function SyncSettingsSlot() {
       // Detect the latter via the internal sentinel constant from syncEngine.
       if (detail === DETAIL_FAMILY_NEEDED) {
         content = <NoFamilyView />
+      } else if (detail === DETAIL_FAMILY_GONE) {
+        content = (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <AlertCircle size={16} style={{ color: 'var(--rose-400)' }} />
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-700)' }}>
+                {t('sync.familyGoneTitle')}
+              </span>
+            </div>
+            <p style={{ fontSize: 12, color: 'var(--stone-500)', margin: 0, lineHeight: 1.6 }}>
+              {t('sync.familyGoneDesc')}
+            </p>
+            <NoFamilyView />
+          </div>
+        )
       } else {
         content = <SignedOutView />
       }
