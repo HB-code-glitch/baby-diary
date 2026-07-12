@@ -41,6 +41,22 @@ async function shot(page, name) {
   return file
 }
 
+/** Wait for every quick-record mount animation to settle before a Home screenshot. */
+async function waitForQuickRecordAnimations(page) {
+  await page.waitForFunction(
+    () => {
+      const slots = Array.from(document.querySelectorAll('.quick-record-slot'))
+      return slots.length > 0 && slots.every(slot =>
+        slot.getAnimations().every(animation =>
+          animation.playState === 'finished' || animation.playState === 'idle'
+        )
+      )
+    },
+    undefined,
+    { timeout: 1000 },
+  )
+}
+
 /** Soft-assert: record failures instead of throwing immediately */
 function assert(cond, msg) {
   if (!cond) {
@@ -198,6 +214,7 @@ async function main() {
 
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="quick-row"]', { timeout: 5000 })
+    await waitForQuickRecordAnimations(page)
     await shot(page, 'home')
 
     // 3a. 소변 (pee) button
@@ -501,12 +518,64 @@ async function main() {
 
     await page.click('[data-tour="nav-stats"]')
     await page.waitForSelector('[data-tour="stats"]', { timeout: 5000 })
+
+    const statsChartSelector = '[data-tour="stats"] .recharts-responsive-container'
+    await page.waitForSelector(statsChartSelector, { timeout: 5000 })
+    const initialStatsChartCount = await page.locator(statsChartSelector).count()
+    assert(initialStatsChartCount === 2, `stats initially shows exactly 2 charts (got ${initialStatsChartCount})`)
+
+    const statsMoreButton = page.locator('[data-tour="stats"] .progressive-more-button').first()
+    const statsMoreButtonCount = await statsMoreButton.count()
+    assert(statsMoreButtonCount === 1, `stats progressive more button exists (got ${statsMoreButtonCount})`)
+    const statsMoreButtonVisible = await statsMoreButton.isVisible().catch(() => false)
+    assert(statsMoreButtonVisible, 'stats progressive more button is visible')
+    const initiallyExpanded = await statsMoreButton.getAttribute('aria-expanded')
+    assert(initiallyExpanded === 'false', `stats progressive sections initially collapsed (aria-expanded=${initiallyExpanded})`)
     await shot(page, 'stats')
 
-    // Scroll down to growth chart section
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+    await statsMoreButton.click()
+    await page.waitForFunction(
+      selector => document.querySelectorAll(selector).length > 2,
+      statsChartSelector,
+      { timeout: 5000 },
+    )
+    const expandedAria = await statsMoreButton.getAttribute('aria-expanded')
+    assert(expandedAria === 'true', `stats progressive sections expanded (aria-expanded=${expandedAria})`)
+    const expandedStatsChartCount = await page.locator(statsChartSelector).count()
+    assert(expandedStatsChartCount > 2, `expanded stats shows more than 2 charts (got ${expandedStatsChartCount})`)
+
+    const weightGrowthTitle = page
+      .locator('[data-tour="stats"] .section-header-accent')
+      .filter({ hasText: /체중|体重/ })
+      .first()
+    const weightGrowthTitleVisible = await weightGrowthTitle.isVisible().catch(() => false)
+    assert(weightGrowthTitleVisible, 'weight growth chart title is visible after expanding stats')
+
+    // Scroll the actual page container to the growth chart section.
+    await page.$eval('[data-tour="stats"]', stats => {
+      stats.scrollTop = stats.scrollHeight
+    })
+    await page.waitForFunction(
+      () => {
+        const stats = document.querySelector('[data-tour="stats"]')
+        return !!stats && Math.ceil(stats.scrollTop + stats.clientHeight) >= stats.scrollHeight
+      },
+      undefined,
+      { timeout: 5000 },
+    )
     await page.waitForTimeout(400)
     await shot(page, 'stats-growth-chart')
+
+    await statsMoreButton.click()
+    await page.waitForFunction(
+      selector => document.querySelectorAll(selector).length === 2,
+      statsChartSelector,
+      { timeout: 5000 },
+    )
+    const collapsedAria = await statsMoreButton.getAttribute('aria-expanded')
+    assert(collapsedAria === 'false', `stats progressive sections collapsed again (aria-expanded=${collapsedAria})`)
+    const collapsedStatsChartCount = await page.locator(statsChartSelector).count()
+    assert(collapsedStatsChartCount === 2, `collapsed stats returns to exactly 2 charts (got ${collapsedStatsChartCount})`)
 
     // ---------------------------------------------------------------------------
     // 7. 일기 (Diary)
@@ -581,6 +650,7 @@ async function main() {
     // Go to home and screenshot Japanese UI
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="hero"]', { timeout: 5000 })
+    await waitForQuickRecordAnimations(page)
     await shot(page, 'home-ja')
 
     // Dark theme
@@ -595,11 +665,58 @@ async function main() {
 
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="hero"]', { timeout: 5000 })
+    await waitForQuickRecordAnimations(page)
     await shot(page, 'home-dark')
 
     // Verify dark theme attribute
     const dataTheme = await page.$eval('html', el => el.getAttribute('data-theme'))
     assert(dataTheme === 'dark', `dark theme applied (data-theme=${dataTheme})`)
+
+    // Responsive layout checks (no screenshots).
+    await page.setViewportSize({ width: 960, height: 640 })
+    const homeShellSize = await page.$eval('.app-shell', shell => ({
+      clientWidth: shell.clientWidth,
+      scrollWidth: shell.scrollWidth,
+    }))
+    assert(
+      homeShellSize.scrollWidth <= homeShellSize.clientWidth,
+      `Home app shell has no horizontal overflow at 960px (${homeShellSize.scrollWidth}/${homeShellSize.clientWidth})`,
+    )
+
+    await page.click('[data-tour="nav-settings"]')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+    const settingsColumnsAt960 = await page.$eval(
+      '.settings-grid',
+      grid => getComputedStyle(grid).gridTemplateColumns,
+    )
+    const settingsColumnCountAt960 = settingsColumnsAt960.trim().split(/\s+/).filter(Boolean).length
+    assert(
+      settingsColumnCountAt960 === 1,
+      `Settings uses 1 computed column at 960px (got "${settingsColumnsAt960}")`,
+    )
+
+    await page.setViewportSize({ width: 1200, height: 800 })
+    const settingsColumnsAt1200 = await page.$eval(
+      '.settings-grid',
+      grid => getComputedStyle(grid).gridTemplateColumns,
+    )
+    const settingsColumnCountAt1200 = settingsColumnsAt1200.trim().split(/\s+/).filter(Boolean).length
+    assert(
+      settingsColumnCountAt1200 === 2,
+      `Settings uses 2 computed columns at 1200px (got "${settingsColumnsAt1200}")`,
+    )
+
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.click('[data-tour="nav-home"]')
+    await page.waitForSelector('[data-tour="quick-row"]', { timeout: 5000 })
+    const reducedMotionAnimationNames = await page.$$eval(
+      '.quick-record-slot',
+      slots => slots.map(slot => getComputedStyle(slot).animationName),
+    )
+    assert(
+      reducedMotionAnimationNames.length > 0 && reducedMotionAnimationNames.every(name => name === 'none'),
+      `Home quick-record slots disable animation for reduced motion (got ${reducedMotionAnimationNames.join(', ')})`,
+    )
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -620,6 +737,10 @@ async function main() {
     const errorCount = consoleErrors.length
     if (errorCount > 0) {
       failures.push(`${errorCount} unexpected console error(s): ${consoleErrors.slice(0, 3).join(' | ')}`)
+    }
+
+    if (screenshotIndex !== 24) {
+      failures.push(`Expected exactly 24 screenshots, got ${screenshotIndex}`)
     }
 
     // Write result JSON
