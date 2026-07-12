@@ -8,6 +8,25 @@ import {
 } from '../src/lib/progressiveDisclosure'
 
 describe('progressive Home disclosure', () => {
+  it('keeps Home disclosure translation keys aligned across both locales', async () => {
+    const ko = await import('../src/i18n/ko.json')
+    const ja = await import('../src/i18n/ja.json')
+    const expectedKeys = [
+      'summaryEmptyTitle',
+      'summaryEmptyBody',
+      'moreSummary',
+      'lessSummary',
+      'dailyTip',
+    ]
+
+    const koKeys = expectedKeys.filter(key => key in ko.home)
+    const jaKeys = expectedKeys.filter(key => key in ja.home)
+
+    expect(koKeys).toEqual(expectedKeys)
+    expect(jaKeys).toEqual(expectedKeys)
+    expect(koKeys).toEqual(jaKeys)
+  })
+
   it('shows no metric placeholders when every current value is empty', () => {
     expect(getVisibleHomeMetrics({ formulaMl: 0, peeCount: 0, poopCount: 0, feedingCount: 0, hasTemperature: false })).toEqual([])
   })
@@ -20,6 +39,19 @@ describe('progressive Home disclosure', () => {
   it('keeps three priority insights and moves the rest behind disclosure', () => {
     expect(partitionHomeInsights({ hasLastFeeding: true, hasNextSide: true, hasDiaper: true, hasTemperature: true, hasSleep: true }))
       .toEqual({ primary: ['lastFeeding', 'diaper', 'temperature'], secondary: ['sleep', 'nextSide'] })
+  })
+
+  it('never promotes next-side ahead of feeding, diaper, and temperature', () => {
+    const { primary } = partitionHomeInsights({
+      hasLastFeeding: true,
+      hasNextSide: true,
+      hasDiaper: true,
+      hasTemperature: true,
+      hasSleep: false,
+    })
+
+    expect(primary).toEqual(['lastFeeding', 'diaper', 'temperature'])
+    expect(primary).not.toContain('nextSide')
   })
 })
 

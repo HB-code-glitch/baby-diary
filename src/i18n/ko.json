@@ -39,7 +39,12 @@
     "bfCountdownBeforeSubNoEnd": "{{from}} 이후 권장",
     "bfCountdownWindow": "지금이 수유하기 좋은 시간이에요",
     "bfCountdownPast": "아기가 원하면 언제든 — 마지막 수유 후 {{elapsed}}",
-    "bfCountdownNewborn": "신생아는 밤 4시간·낮 3시간을 넘기지 않게 깨워 먹여요 — 마지막 수유 후 {{elapsed}}"
+    "bfCountdownNewborn": "신생아는 밤 4시간·낮 3시간을 넘기지 않게 깨워 먹여요 — 마지막 수유 후 {{elapsed}}",
+    "summaryEmptyTitle": "필요한 정보만 여기에 모아드려요",
+    "summaryEmptyBody": "기록을 시작하면 오늘의 변화가 자동으로 표시됩니다.",
+    "moreSummary": "추가 요약 {{count}}개 보기",
+    "lessSummary": "요약 접기",
+    "dailyTip": "오늘 도움말"
   },
   "stat": {
     "formulaLabel": "분유 총량",

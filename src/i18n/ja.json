@@ -39,7 +39,12 @@
     "bfCountdownBeforeSubNoEnd": "{{from}} 以降が目安",
     "bfCountdownWindow": "今が授乳のよい時間です",
     "bfCountdownPast": "赤ちゃんが欲しがればいつでも — 前回の授乳から{{elapsed}}",
-    "bfCountdownNewborn": "新生児は夜4時間・昼3時間を超えないよう起こして授乳します — 前回の授乳から{{elapsed}}"
+    "bfCountdownNewborn": "新生児は夜4時間・昼3時間を超えないよう起こして授乳します — 前回の授乳から{{elapsed}}",
+    "summaryEmptyTitle": "必要な情報だけをここにまとめます",
+    "summaryEmptyBody": "記録を始めると、今日の変化が自動的に表示されます。",
+    "moreSummary": "追加のまとめ{{count}}件を表示",
+    "lessSummary": "まとめを閉じる",
+    "dailyTip": "今日のヒント"
   },
   "stat": {
     "formulaLabel": "ミルク合計",

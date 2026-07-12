@@ -15,6 +15,12 @@ import { getCurrentFormulaGuidance, getGuidanceForAge, GUIDANCE_MARKERS, evaluat
 import { FeedingTipPopup } from '../components/FeedingTipPopup'
 import { FeverModal } from '../components/FeverModal'
 import { useSyncStatus } from '../sync/useSync'
+import {
+  getVisibleHomeMetrics,
+  partitionHomeInsights,
+  type HomeInsightKey,
+  type HomeMetricKey,
+} from '../lib/progressiveDisclosure'
 
 // ---------------------------------------------------------------------------
 // Milestone dismiss persistence
@@ -162,6 +168,7 @@ function InsightsPanel({
 }: InsightsPanelProps) {
   const { t, i18n: i18nInstance } = useTranslation()
   const [, setTick] = useState(0)
+  const [showAllInsights, setShowAllInsights] = useState(false)
   const syncState = useSyncStatus()
   const syncDotClass = syncState.status === 'online' ? 'on' : syncState.status === 'error' ? 'err' : 'off'
 
@@ -289,8 +296,8 @@ function InsightsPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastBreastEvent, ageDays, birthdate, lang, t])
 
-  const rows = [
-    {
+  const rows = {
+    lastFeeding: {
       Icon: IconBottle,
       bg: 'var(--blush)',
       iconColor: 'var(--blush-text)',
@@ -298,15 +305,7 @@ function InsightsPanel({
       value: lastFeedingLabel,
       ago: lastFeedingAgo,
     },
-    {
-      Icon: IconHeart,
-      bg: 'var(--sky)',
-      iconColor: 'var(--sky-text)',
-      label: t('home.nextBreastLabel'),
-      value: nextSideLabel,
-      ago: null,
-    },
-    {
+    diaper: {
       Icon: IconDrop,
       bg: 'var(--mint)',
       iconColor: 'var(--mint-text)',
@@ -314,7 +313,7 @@ function InsightsPanel({
       value: `${t('quickBtn.pee')} ${todayPeeCount} / ${t('quickBtn.poop')} ${todayPoopCount}`,
       ago: null,
     },
-    {
+    temperature: {
       Icon: IconThermometer,
       bg: 'var(--butter)',
       iconColor: 'var(--butter-text)',
@@ -322,7 +321,7 @@ function InsightsPanel({
       value: tempLabel,
       ago: null,
     },
-    {
+    sleep: {
       Icon: IconMoon,
       bg: 'var(--lavender-100)',
       iconColor: 'var(--lavender-600)',
@@ -330,7 +329,53 @@ function InsightsPanel({
       value: sleepLabel,
       ago: null,
     },
-  ]
+    nextSide: {
+      Icon: IconHeart,
+      bg: 'var(--sky)',
+      iconColor: 'var(--sky-text)',
+      label: t('home.nextBreastLabel'),
+      value: nextSideLabel,
+      ago: null,
+    },
+  }
+
+  const insightPartition = partitionHomeInsights({
+    hasLastFeeding: lastFeeding != null,
+    hasNextSide: lastBreastSide === 'L' || lastBreastSide === 'R',
+    hasDiaper: todayPeeCount > 0 || todayPoopCount > 0,
+    hasTemperature: recentTemp != null,
+    hasSleep: todaySleepMinutes > 0,
+  })
+  const visibleInsightKeys = showAllInsights
+    ? [...insightPartition.primary, ...insightPartition.secondary]
+    : insightPartition.primary
+
+  const renderInsightRow = (key: HomeInsightKey) => {
+    const row = rows[key]
+    const RowIcon = row.Icon
+    return (
+      <div key={key} className="insight-row">
+        <div
+          className="insight-icon"
+          style={{ background: row.bg }}
+          aria-hidden="true"
+        >
+          <RowIcon size={16} color={row.iconColor} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="insight-label">{row.label}</div>
+          <div className="insight-value">
+            {row.value}
+            {row.ago && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 5 }}>
+                ({row.ago})
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="insights-panel" data-tour="insights">
@@ -366,70 +411,63 @@ function InsightsPanel({
         </div>
       )}
 
-      {rows.map((row, i) => {
-        const RowIcon = row.Icon
-        return (
-        <div key={i} className="insight-row">
-          <div
-            className="insight-icon"
-            style={{ background: row.bg }}
-            aria-hidden="true"
-          >
-            <RowIcon size={16} color={row.iconColor} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="insight-label">{row.label}</div>
-            <div className="insight-value">
-              {row.value}
-              {row.ago && (
-                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 5 }}>
-                  ({row.ago})
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-        )
-      })}
+      {visibleInsightKeys.map(renderInsightRow)}
+
+      {insightPartition.secondary.length > 0 && (
+        <button
+          className="progressive-more-button"
+          type="button"
+          onClick={() => setShowAllInsights(value => !value)}
+        >
+          {showAllInsights
+            ? t('home.lessSummary')
+            : t('home.moreSummary', { count: insightPartition.secondary.length })}
+        </button>
+      )}
 
       {/* Current formula / age guidance row */}
       {formulaGuidance && (
-        <div
-          className="insight-row"
-          role="button"
-          tabIndex={0}
-          aria-label={t('home.guidanceRowAriaLabel')}
-          style={{ cursor: 'pointer' }}
-          onClick={() => onNavigate?.('settings')}
-          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate?.('settings') } }}
-        >
+        <details className="insight-guidance">
+          <summary>{t('home.dailyTip')}</summary>
           <div
-            className="insight-icon"
-            aria-hidden="true"
-            style={{ background: 'var(--sky)' }}
+            className="insight-row"
+            role="button"
+            tabIndex={0}
+            aria-label={t('home.guidanceRowAriaLabel')}
+            style={{ cursor: 'pointer' }}
+            onClick={() => onNavigate?.('settings')}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate?.('settings') } }}
           >
-            <IconInfo size={16} color="var(--sky-text)" />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="insight-label">
-              {lang === 'ja' ? formulaGuidance.titleJa : formulaGuidance.titleKo}
+            <div
+              className="insight-icon"
+              aria-hidden="true"
+              style={{ background: 'var(--sky)' }}
+            >
+              <IconInfo size={16} color="var(--sky-text)" />
             </div>
-            <div className="insight-value" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              {/* First sentence only */}
-              {(lang === 'ja' ? formulaGuidance.bodyJa : formulaGuidance.bodyKo).split(/[。.]\s*/)[0]}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="insight-label">
+                {lang === 'ja' ? formulaGuidance.titleJa : formulaGuidance.titleKo}
+              </div>
+              <div className="insight-value" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                {/* First sentence only */}
+                {(lang === 'ja' ? formulaGuidance.bodyJa : formulaGuidance.bodyKo).split(/[。.]\s*/)[0]}
+              </div>
             </div>
           </div>
-        </div>
+        </details>
       )}
 
       {/* Backup card */}
-      <div className="backup-card">
-        <div className="backup-card-title">{t('home.backupLabel')}</div>
-        <div className="backup-card-row">
-          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{backupStr}</span>
-          <span className={`sync-dot ${syncDotClass}`} />
+      {(!dataInfo?.lastBackupTime || syncState.status === 'error') && (
+        <div className="backup-card">
+          <div className="backup-card-title">{t('home.backupLabel')}</div>
+          <div className="backup-card-row">
+            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{backupStr}</span>
+            <span className={`sync-dot ${syncDotClass}`} />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -477,48 +515,79 @@ function StatCards() {
     )
   }
 
+  const visibleMetrics = getVisibleHomeMetrics({
+    formulaMl,
+    peeCount,
+    poopCount,
+    feedingCount: feedCount,
+    hasTemperature: lastTemp != null,
+  })
+
+  const metricCards: Record<HomeMetricKey, {
+    className: string
+    label: string
+    value: React.ReactNode
+    valueStyle?: React.CSSProperties
+    delta?: React.ReactNode
+  }> = {
+    formula: {
+      className: 'stat-card stat-card-featured',
+      label: t('stat.formulaLabel'),
+      value: (
+        <>
+          {formulaMl}
+          <span className="stat-card-unit" style={{ fontSize: 16, marginLeft: 3 }}>ml</span>
+        </>
+      ),
+      delta: yFormulaMl > 0 ? <DeltaTag current={formulaMl} prev={yFormulaMl} /> : null,
+    },
+    pee: {
+      className: 'stat-card',
+      label: t('stat.peeLabel'),
+      value: peeCount,
+      delta: <DeltaTag current={peeCount} prev={yPeeCount} />,
+    },
+    poop: {
+      className: 'stat-card',
+      label: t('stat.poopLabel'),
+      value: poopCount,
+      delta: <DeltaTag current={poopCount} prev={yPoopCount} />,
+    },
+    feeding: {
+      className: 'stat-card',
+      label: t('stat.feedLabel'),
+      value: feedCount,
+      delta: <DeltaTag current={feedCount} prev={yFeedCount} />,
+    },
+    temperature: {
+      className: 'stat-card',
+      label: t('stat.tempLabel'),
+      value: `${lastTemp?.toFixed(1)}℃`,
+      valueStyle: { fontSize: 24 },
+    },
+  }
+
+  if (visibleMetrics.length === 0) {
+    return (
+      <div className="progressive-empty" data-testid="home-summary-empty">
+        <div className="progressive-empty-title">{t('home.summaryEmptyTitle')}</div>
+        <div className="progressive-empty-body">{t('home.summaryEmptyBody')}</div>
+      </div>
+    )
+  }
+
   return (
-    <div className="stat-card-grid">
-      {/* Featured: formula total */}
-      <div className="stat-card stat-card-featured">
-        <div className="stat-card-label">{t('stat.formulaLabel')}</div>
-        <div className="stat-card-num">
-          {formulaMl > 0 ? formulaMl : '–'}
-          {formulaMl > 0 && <span className="stat-card-unit" style={{ fontSize: 16, marginLeft: 3 }}>ml</span>}
-        </div>
-        {formulaMl > 0 && yFormulaMl > 0 && (
-          <DeltaTag current={formulaMl} prev={yFormulaMl} />
-        )}
-      </div>
-
-      {/* Pee */}
-      <div className="stat-card">
-        <div className="stat-card-label">{t('stat.peeLabel')}</div>
-        <div className="stat-card-num">{peeCount}</div>
-        <DeltaTag current={peeCount} prev={yPeeCount} />
-      </div>
-
-      {/* Poop */}
-      <div className="stat-card">
-        <div className="stat-card-label">{t('stat.poopLabel')}</div>
-        <div className="stat-card-num">{poopCount}</div>
-        <DeltaTag current={poopCount} prev={yPoopCount} />
-      </div>
-
-      {/* Feed count */}
-      <div className="stat-card">
-        <div className="stat-card-label">{t('stat.feedLabel')}</div>
-        <div className="stat-card-num">{feedCount}</div>
-        <DeltaTag current={feedCount} prev={yFeedCount} />
-      </div>
-
-      {/* Temp */}
-      <div className="stat-card">
-        <div className="stat-card-label">{t('stat.tempLabel')}</div>
-        <div className="stat-card-num" style={{ fontSize: 24 }}>
-          {lastTemp != null ? `${lastTemp.toFixed(1)}℃` : '–'}
-        </div>
-      </div>
+    <div className={`stat-card-grid stat-card-grid-count-${Math.min(visibleMetrics.length, 5)}`}>
+      {visibleMetrics.map(key => {
+        const card = metricCards[key]
+        return (
+          <div key={key} className={card.className}>
+            <div className="stat-card-label">{card.label}</div>
+            <div className="stat-card-num" style={card.valueStyle}>{card.value}</div>
+            {card.delta}
+          </div>
+        )
+      })}
     </div>
   )
 }
