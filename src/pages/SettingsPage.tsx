@@ -9,13 +9,15 @@ import { useAppStore } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { ipc } from '../lib/ipc'
 import { SyncSettingsSlot } from '../components/SyncSettingsSlot'
+import { DisclosureSection } from '../components/DisclosureSection'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 import { DeleteAllModal } from '../components/DeleteAllModal'
 import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
-import { updateFamilyBabyInfo, updateMemberEntry } from '../sync/useSync'
+import { updateFamilyBabyInfo, updateMemberEntry, useSyncStatus } from '../sync/useSync'
+import { shouldOpenSyncDisclosure } from '../lib/progressiveDisclosure'
 
 // Re-export for any consumers that already import from this path
 export type { FormSnapshot }
@@ -31,6 +33,18 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const { t, i18n: i18nInstance } = useTranslation()
 
   const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
+  const syncStatus = useSyncStatus()
+  const syncSummary = syncStatus.status === 'online'
+    ? t('settings.syncReady')
+    : syncStatus.status === 'connecting'
+      ? t('sync.connecting')
+      : t('settings.syncNeedsAttention')
+  const dataSummary = t('settings.dataSummary', {
+    count: dataInfo?.eventCount ?? 0,
+    backup: dataInfo?.lastBackupTime
+      ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
+      : t('settings.noBackup'),
+  })
 
   // Local form state
   const [babyName,   setBabyName]   = useState(settings?.baby?.name       ?? '')
@@ -429,8 +443,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
         <div className="settings-column">
 
           {/* Data section */}
-          <div className="settings-section">
-            <div className="settings-section-title">{t('settings.dataSection')}</div>
+          <DisclosureSection title={t('settings.dataSection')} summary={dataSummary}>
             <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
               {dataInfo && (
                 <>
@@ -503,7 +516,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 </button>
               </div>
             </div>
-          </div>
+          </DisclosureSection>
 
           {/* Care guidance reference card */}
           <GuidanceReferenceCard lang={i18nInstance.language as 'ko' | 'ja'} />
@@ -512,10 +525,13 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           <BreastfeedingGuideCard lang={i18nInstance.language as 'ko' | 'ja'} />
 
           {/* Sync section */}
-          <div className="settings-section">
-            <div className="settings-section-title">{t('settings.syncSection')}</div>
+          <DisclosureSection
+            title={t('settings.syncSection')}
+            summary={syncSummary}
+            defaultOpen={shouldOpenSyncDisclosure(syncStatus.status)}
+          >
             <SyncSettingsSlot />
-          </div>
+          </DisclosureSection>
 
           {/* Tutorial replay */}
           {onStartTour && (

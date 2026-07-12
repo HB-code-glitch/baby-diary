@@ -35,13 +35,16 @@ export function setLanguage(lang: Language): void {
   i18n.changeLanguage(lang)
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute('data-lang', lang)
+    document.documentElement.setAttribute('lang', lang)
   }
 }
 
 /** Set initial data-lang attribute (called once on startup). */
 export function initLangAttr(): void {
   if (typeof document !== 'undefined') {
-    document.documentElement.setAttribute('data-lang', detectLanguage())
+    const lang = detectLanguage()
+    document.documentElement.setAttribute('data-lang', lang)
+    document.documentElement.setAttribute('lang', lang)
   }
 }
 
