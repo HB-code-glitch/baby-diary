@@ -39,7 +39,12 @@
     "bfCountdownBeforeSubNoEnd": "{{from}} 이후 권장",
     "bfCountdownWindow": "지금이 수유하기 좋은 시간이에요",
     "bfCountdownPast": "아기가 원하면 언제든 — 마지막 수유 후 {{elapsed}}",
-    "bfCountdownNewborn": "신생아는 밤 4시간·낮 3시간을 넘기지 않게 깨워 먹여요 — 마지막 수유 후 {{elapsed}}"
+    "bfCountdownNewborn": "신생아는 밤 4시간·낮 3시간을 넘기지 않게 깨워 먹여요 — 마지막 수유 후 {{elapsed}}",
+    "summaryEmptyTitle": "필요한 정보만 여기에 모아드려요",
+    "summaryEmptyBody": "기록을 시작하면 오늘의 변화가 자동으로 표시됩니다.",
+    "moreSummary": "추가 요약 {{count}}개 보기",
+    "lessSummary": "요약 접기",
+    "dailyTip": "오늘 도움말"
   },
   "stat": {
     "formulaLabel": "분유 총량",
@@ -206,7 +211,11 @@
     "growthP85": "P85",
     "growthP97": "P97",
     "growthMonthUnit": "{{m}}개월",
-    "noGrowthData": "이 기간에 성장 기록이 없습니다"
+    "noGrowthData": "이 기간에 성장 기록이 없습니다",
+    "emptyTitle": "표시할 통계가 아직 없어요",
+    "emptyBody": "수유·수면·기저귀·체온 또는 성장 기록이 쌓이면 관련 그래프만 나타납니다.",
+    "moreSections": "추가 통계 {{count}}개 보기",
+    "lessSections": "통계 간단히 보기"
   },
   "diary": {
     "title": "일기",
@@ -270,6 +279,7 @@
     "recordUnit": "{{count}}개",
     "lastBackup": "마지막 백업",
     "noBackup": "없음",
+    "dataSummary": "{{count}}개 기록 · 백업 {{backup}}",
     "backupFolder": "백업 폴더",
     "openFolder": "열기",
     "exportData": "데이터 내보내기",
@@ -279,6 +289,8 @@
     "toastOpenFolderFail": "폴더를 열 수 없습니다.",
     "electronOnly": "이 기능은 데스크톱 앱에서만 사용할 수 있어요",
     "syncSection": "가족 동기화",
+    "syncReady": "연결됨",
+    "syncNeedsAttention": "설정이 필요합니다",
     "deleteAllRecords": "모든 기록 삭제",
     "deleteAllTitle": "모든 기록을 삭제할까요?",
     "deleteAllBody": "소변·수유·체온·일기·편지 등 모든 기록이 이 기기와 연결된 모든 기기에서 삭제돼요.\n아기 정보·프로필·가족 연결·로그인은 그대로 유지돼요.",

@@ -39,7 +39,12 @@
     "bfCountdownBeforeSubNoEnd": "{{from}} 以降が目安",
     "bfCountdownWindow": "今が授乳のよい時間です",
     "bfCountdownPast": "赤ちゃんが欲しがればいつでも — 前回の授乳から{{elapsed}}",
-    "bfCountdownNewborn": "新生児は夜4時間・昼3時間を超えないよう起こして授乳します — 前回の授乳から{{elapsed}}"
+    "bfCountdownNewborn": "新生児は夜4時間・昼3時間を超えないよう起こして授乳します — 前回の授乳から{{elapsed}}",
+    "summaryEmptyTitle": "必要な情報だけをここにまとめます",
+    "summaryEmptyBody": "記録を始めると、今日の変化が自動的に表示されます。",
+    "moreSummary": "追加のまとめ{{count}}件を表示",
+    "lessSummary": "まとめを閉じる",
+    "dailyTip": "今日のヒント"
   },
   "stat": {
     "formulaLabel": "ミルク合計",
@@ -206,7 +211,11 @@
     "growthP85": "P85",
     "growthP97": "P97",
     "growthMonthUnit": "{{m}}か月",
-    "noGrowthData": "この期間に成長記録がありません"
+    "noGrowthData": "この期間に成長記録がありません",
+    "emptyTitle": "表示できるグラフはまだありません",
+    "emptyBody": "授乳・睡眠・おむつ・体温・成長の記録が増えると、関連するグラフだけが表示されます。",
+    "moreSections": "追加のグラフ{{count}}件を表示",
+    "lessSections": "グラフを少なく表示"
   },
   "diary": {
     "title": "日記",
@@ -270,6 +279,7 @@
     "recordUnit": "{{count}}件",
     "lastBackup": "最終バックアップ",
     "noBackup": "なし",
+    "dataSummary": "記録{{count}}件 · バックアップ {{backup}}",
     "backupFolder": "バックアップフォルダ",
     "openFolder": "開く",
     "exportData": "データを書き出す",
@@ -279,6 +289,8 @@
     "toastOpenFolderFail": "フォルダを開けません。",
     "electronOnly": "この機能はデスクトップアプリでのみ使用できます",
     "syncSection": "家族の同期",
+    "syncReady": "接続済み",
+    "syncNeedsAttention": "設定が必要です",
     "deleteAllRecords": "すべての記録を削除",
     "deleteAllTitle": "すべての記録を削除しますか？",
     "deleteAllBody": "おしっこ・授乳・体温・日記・手紙など、すべての記録がこのデバイスと連携しているすべてのデバイスから削除されます。\n赤ちゃんの情報・プロフィール・家族の連携・ログインはそのまま保たれます。",
