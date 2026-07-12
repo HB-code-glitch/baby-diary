@@ -4,6 +4,7 @@ export const STATS_PRIMARY_SECTION_LIMIT = 2
 export type HomeMetricKey = 'formula' | 'pee' | 'poop' | 'feeding' | 'temperature'
 export type HomeInsightKey = 'lastFeeding' | 'diaper' | 'temperature' | 'sleep' | 'nextSide'
 export type StatsSectionKey = 'sleep' | 'formula' | 'feeding' | 'diaper' | 'temperature'
+export type StatsPageSectionKey = StatsSectionKey | 'growthWeight' | 'growthHeight'
 
 export interface StatsVisibility {
   sleep: boolean
@@ -72,6 +73,24 @@ export function partitionStatsSections(visibility: StatsVisibility): {
 } {
   const ordered: StatsSectionKey[] = (['sleep', 'formula', 'feeding', 'diaper', 'temperature'] as const)
     .filter(key => visibility[key])
+  return {
+    primary: ordered.slice(0, STATS_PRIMARY_SECTION_LIMIT),
+    secondary: ordered.slice(STATS_PRIMARY_SECTION_LIMIT),
+  }
+}
+
+export function partitionStatsPageSections(
+  visibility: StatsVisibility,
+  growth: { weight: boolean; height: boolean },
+): { primary: StatsPageSectionKey[]; secondary: StatsPageSectionKey[] } {
+  const daily = partitionStatsSections(visibility)
+  const ordered: StatsPageSectionKey[] = [
+    ...daily.primary,
+    ...daily.secondary,
+    ...(growth.weight ? ['growthWeight'] as const : []),
+    ...(growth.height ? ['growthHeight'] as const : []),
+  ]
+
   return {
     primary: ordered.slice(0, STATS_PRIMARY_SECTION_LIMIT),
     secondary: ordered.slice(STATS_PRIMARY_SECTION_LIMIT),

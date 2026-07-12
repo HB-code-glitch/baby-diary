@@ -15,7 +15,8 @@ import { ipc } from '../lib/ipc'
 import { useToast } from '../components/Toast'
 import {
   getStatsVisibility,
-  partitionStatsSections,
+  partitionStatsPageSections,
+  StatsPageSectionKey,
   StatsSectionKey,
 } from '../lib/progressiveDisclosure'
 
@@ -339,7 +340,6 @@ export function StatsPage() {
 
   const tempData = data.filter(d => d.avgTemp != null)
   const visibility = getStatsVisibility(data)
-  const partition = partitionStatsSections(visibility)
   const secondarySectionsId = 'stats-secondary-sections'
 
   // Growth chart gating: need birthdate + gender + data for the metric.
@@ -353,8 +353,11 @@ export function StatsPage() {
     && growthEvents.some(event => (event.data as GrowthData).weightKg != null)
   const hasHeightGrowth = canShowGrowth
     && growthEvents.some(event => (event.data as GrowthData).heightCm != null)
-  const hasGrowthSection = hasWeightGrowth || hasHeightGrowth
-  const hasAnySection = partition.primary.length > 0 || hasGrowthSection
+  const partition = partitionStatsPageSections(visibility, {
+    weight: hasWeightGrowth,
+    height: hasHeightGrowth,
+  })
+  const hasAnySection = partition.primary.length > 0
 
   const renderDailySection = (key: StatsSectionKey): React.ReactNode => {
     switch (key) {
@@ -511,6 +514,33 @@ export function StatsPage() {
     }
   }
 
+  const renderPageSection = (key: StatsPageSectionKey): React.ReactNode => {
+    switch (key) {
+      case 'growthWeight':
+        return (
+          <GrowthChartSection
+            metric="weight"
+            sex={whoSex}
+            birthdate={birthdateObj!}
+            events={events}
+            dateFnsLocale={dateFnsLocale}
+          />
+        )
+      case 'growthHeight':
+        return (
+          <GrowthChartSection
+            metric="height"
+            sex={whoSex}
+            birthdate={birthdateObj!}
+            events={events}
+            dateFnsLocale={dateFnsLocale}
+          />
+        )
+      default:
+        return renderDailySection(key)
+    }
+  }
+
   return (
     <div className="page-container" data-tour="stats">
       <div className="page-header">
@@ -545,7 +575,7 @@ export function StatsPage() {
 
       <div className="stats-section-stack">
         {partition.primary.map(key => (
-          <React.Fragment key={key}>{renderDailySection(key)}</React.Fragment>
+          <React.Fragment key={key}>{renderPageSection(key)}</React.Fragment>
         ))}
 
         {partition.secondary.length > 0 && (
@@ -569,7 +599,7 @@ export function StatsPage() {
               {showAllSections && (
                 <div className="stats-section-stack">
                   {partition.secondary.map(key => (
-                    <React.Fragment key={key}>{renderDailySection(key)}</React.Fragment>
+                    <React.Fragment key={key}>{renderPageSection(key)}</React.Fragment>
                   ))}
                 </div>
               )}
@@ -584,30 +614,6 @@ export function StatsPage() {
           </div>
         )}
 
-        {hasGrowthSection && (
-          <div className="section-header-accent" style={{ marginTop: 4 }}>
-            {t('stats.growthTitle')}
-          </div>
-        )}
-
-        {hasWeightGrowth && (
-          <GrowthChartSection
-            metric="weight"
-            sex={whoSex}
-            birthdate={birthdateObj!}
-            events={events}
-            dateFnsLocale={dateFnsLocale}
-          />
-        )}
-        {hasHeightGrowth && (
-          <GrowthChartSection
-            metric="height"
-            sex={whoSex}
-            birthdate={birthdateObj!}
-            events={events}
-            dateFnsLocale={dateFnsLocale}
-          />
-        )}
       </div>
     </div>
   )

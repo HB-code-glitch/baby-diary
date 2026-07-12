@@ -3,6 +3,7 @@ import {
   getStatsVisibility,
   getVisibleHomeMetrics,
   partitionHomeInsights,
+  partitionStatsPageSections,
   partitionStatsSections,
   shouldOpenSyncDisclosure,
 } from '../src/lib/progressiveDisclosure'
@@ -65,6 +66,26 @@ it('enables only chart sections with data', () => {
 })
 
 describe('progressive Stats disclosure', () => {
+  it('keeps growth charts secondary when two daily charts already fill the primary limit', () => {
+    expect(partitionStatsPageSections(
+      { sleep: true, formula: true, feeding: false, diaper: false, temperature: false },
+      { weight: true, height: true },
+    )).toEqual({
+      primary: ['sleep', 'formula'],
+      secondary: ['growthWeight', 'growthHeight'],
+    })
+  })
+
+  it('keeps both growth charts primary when there are no daily charts', () => {
+    expect(partitionStatsPageSections(
+      { sleep: false, formula: false, feeding: false, diaper: false, temperature: false },
+      { weight: true, height: true },
+    )).toEqual({
+      primary: ['growthWeight', 'growthHeight'],
+      secondary: [],
+    })
+  })
+
   it('shows no Stats sections when every day value is empty', () => {
     const visibility = getStatsVisibility([
       { sleepMinutes: 0, formulaMl: 0, feedingCount: 0, peeCount: 0, poopCount: 0, avgTemp: null },
