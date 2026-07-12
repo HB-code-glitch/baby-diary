@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, Suspense, lazy } from 'react'
+import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from 'react'
 import { ToastProvider, useToast } from './components/Toast'
 import { Sidebar, Page } from './components/Sidebar'
 import { useAppStore } from './store/useAppStore'
@@ -6,7 +6,8 @@ import { useSyncLifecycle } from './sync/useSync'
 import { setLanguage, initLangAttr } from './i18n'
 import type { Language } from './i18n'
 import i18n from './i18n'
-import { TutorialTour, isTutorialDone } from './components/TutorialTour'
+import { TutorialTour } from './components/TutorialTour'
+import { shouldAutoStartTutorial, type TutorialExitReason } from './lib/tutorial'
 import { LanguagePicker, isLangChosen, markLangChosen } from './components/LanguagePicker'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useMidnightRefresh } from './lib/useMidnightRefresh'
@@ -87,17 +88,32 @@ function AppInner() {
   const saveSettings = useAppStore(s => s.saveSettings)
   const [currentPage, setCurrentPage] = useState<Page>('home')
   const [tourActive, setTourActive] = useState(false)
+  const tourOriginPage = useRef<Page>('home')
+  const tourOriginFocus = useRef<HTMLElement | null>(null)
   // null = undecided (show picker on first launch), false = hidden, true = shown
   const [showLangPicker, setShowLangPicker] = useState<boolean>(false)
 
   const startTour = useCallback(() => {
+    tourOriginPage.current = currentPage
+    tourOriginFocus.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
     setCurrentPage('home')
     setTourActive(true)
-  }, [])
+  }, [currentPage])
 
-  const endTour = useCallback(() => {
+  const endTour = useCallback((reason: TutorialExitReason) => {
+    const originPage = tourOriginPage.current
+    const originFocus = tourOriginFocus.current
     setTourActive(false)
-    setCurrentPage('home')
+    setCurrentPage(reason === 'completed' ? 'home' : originPage)
+    requestAnimationFrame(() => {
+      if (originFocus?.isConnected) {
+        originFocus.focus()
+      } else if (reason === 'skipped' && originPage === 'settings') {
+        document.querySelector<HTMLElement>('[data-tutorial-replay]')?.focus()
+      }
+    })
   }, [])
 
   // Start sync engine on mount; stop on unmount.
@@ -166,13 +182,15 @@ function AppInner() {
   // then start tutorial. If language already chosen, go straight to tutorial.
   useEffect(() => {
     const id = setTimeout(() => {
-      if (isTutorialDone()) return // neither picker nor tour needed
+      if (!shouldAutoStartTutorial()) return // neither picker nor tour needed
 
       if (!isLangChosen()) {
         // Show language picker first; tutorial starts after pick (see handleLangPick)
         setShowLangPicker(true)
       } else {
         // Language already picked → straight to tutorial
+        tourOriginPage.current = 'home'
+        setCurrentPage('home')
         setTourActive(true)
       }
     }, 300)
@@ -197,8 +215,8 @@ function AppInner() {
 
     // 4. Hide picker and start tutorial
     setShowLangPicker(false)
-    setTourActive(true)
-  }, [settings, saveSettings])
+    startTour()
+  }, [settings, saveSettings, startTour])
 
   return (
     <div className="app-shell">
@@ -212,7 +230,7 @@ function AppInner() {
       {tourActive && (
         <TutorialTour
           onNavigate={setCurrentPage}
-          onDone={endTour}
+          onExit={endTour}
         />
       )}
     </div>
