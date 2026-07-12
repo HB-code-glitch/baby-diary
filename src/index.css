@@ -993,6 +993,35 @@ body {
   margin-top: 4px;
 }
 
+.stats-section-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.stats-secondary-sections {
+  width: 100%;
+}
+
+.stats-section-stack > .progressive-more-button {
+  align-self: stretch;
+  flex: 0 0 auto;
+  margin: -4px 0;
+}
+
+.stats-section-stack .recharts-responsive-container {
+  min-height: 180px;
+}
+
+.stats-empty-state {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+  padding: 24px;
+  text-align: center;
+}
+
 /* Individual stat card */
 .stat-card {
   background: var(--surface);

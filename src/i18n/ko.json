@@ -211,7 +211,11 @@
     "growthP85": "P85",
     "growthP97": "P97",
     "growthMonthUnit": "{{m}}개월",
-    "noGrowthData": "이 기간에 성장 기록이 없습니다"
+    "noGrowthData": "이 기간에 성장 기록이 없습니다",
+    "emptyTitle": "표시할 통계가 아직 없어요",
+    "emptyBody": "수유·수면·기저귀·체온 또는 성장 기록이 쌓이면 관련 그래프만 나타납니다.",
+    "moreSections": "추가 통계 {{count}}개 보기",
+    "lessSections": "통계 간단히 보기"
   },
   "diary": {
     "title": "일기",

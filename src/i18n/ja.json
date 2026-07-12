@@ -211,7 +211,11 @@
     "growthP85": "P85",
     "growthP97": "P97",
     "growthMonthUnit": "{{m}}か月",
-    "noGrowthData": "この期間に成長記録がありません"
+    "noGrowthData": "この期間に成長記録がありません",
+    "emptyTitle": "表示できるグラフはまだありません",
+    "emptyBody": "授乳・睡眠・おむつ・体温・成長の記録が増えると、関連するグラフだけが表示されます。",
+    "moreSections": "追加のグラフ{{count}}件を表示",
+    "lessSections": "グラフを少なく表示"
   },
   "diary": {
     "title": "日記",

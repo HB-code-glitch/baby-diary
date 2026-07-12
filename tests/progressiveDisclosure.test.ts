@@ -64,6 +64,38 @@ it('enables only chart sections with data', () => {
   expect(partitionStatsSections(visibility)).toEqual({ primary: ['sleep', 'feeding'], secondary: ['diaper', 'temperature'] })
 })
 
+describe('progressive Stats disclosure', () => {
+  it('shows no Stats sections when every day value is empty', () => {
+    const visibility = getStatsVisibility([
+      { sleepMinutes: 0, formulaMl: 0, feedingCount: 0, peeCount: 0, poopCount: 0, avgTemp: null },
+      { sleepMinutes: 0, formulaMl: 0, feedingCount: 0, peeCount: 0, poopCount: 0, avgTemp: null },
+    ])
+
+    expect(partitionStatsSections(visibility)).toEqual({ primary: [], secondary: [] })
+  })
+
+  it('shows only the formula section when formula is the only recorded metric', () => {
+    const visibility = getStatsVisibility([
+      { sleepMinutes: 0, formulaMl: 120, feedingCount: 0, peeCount: 0, poopCount: 0, avgTemp: null },
+    ])
+
+    expect(partitionStatsSections(visibility)).toEqual({ primary: ['formula'], secondary: [] })
+  })
+
+  it('keeps Stats disclosure translation keys aligned across both locales', async () => {
+    const ko = await import('../src/i18n/ko.json')
+    const ja = await import('../src/i18n/ja.json')
+    const expectedKeys = ['emptyTitle', 'emptyBody', 'moreSections', 'lessSections']
+
+    const koKeys = expectedKeys.filter(key => key in ko.stats)
+    const jaKeys = expectedKeys.filter(key => key in ja.stats)
+
+    expect(koKeys).toEqual(expectedKeys)
+    expect(jaKeys).toEqual(expectedKeys)
+    expect(koKeys).toEqual(jaKeys)
+  })
+})
+
 it('opens sync details only when attention is required', () => {
   expect(shouldOpenSyncDisclosure('off')).toBe(false)
   expect(shouldOpenSyncDisclosure('no-config')).toBe(true)

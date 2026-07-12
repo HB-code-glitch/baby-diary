@@ -13,6 +13,11 @@ import { useTranslation } from 'react-i18next'
 import { computeZ, zToPercentile, percentileBandValue } from '../lib/whoGrowth'
 import { ipc } from '../lib/ipc'
 import { useToast } from '../components/Toast'
+import {
+  getStatsVisibility,
+  partitionStatsSections,
+  StatsSectionKey,
+} from '../lib/progressiveDisclosure'
 
 type Range = 7 | 30
 
@@ -238,13 +243,13 @@ function GrowthChartSection({ metric, sex, birthdate, events, dateFnsLocale }: G
             type="number"
             domain={[0, 24]}
             tickCount={7}
-            tick={{ fontSize: 11, fill: 'var(--text-muted)' }}
+            tick={{ fontSize: 12, fill: 'var(--text-muted)' }}
             tickFormatter={(m: number) => t('stats.growthMonthUnit', { m })}
           />
           <YAxis
             domain={yDomain}
             ticks={yTicks}
-            tick={{ fontSize: 11, fill: 'var(--text-muted)' }}
+            tick={{ fontSize: 12, fill: 'var(--text-muted)' }}
             tickFormatter={(v: number) => `${Math.round(v)}${unit}`}
           />
           <Tooltip
@@ -257,11 +262,11 @@ function GrowthChartSection({ metric, sex, birthdate, events, dateFnsLocale }: G
           />
 
           {/* Band lines: P3, P15, P50, P85, P97 */}
-          <Line data={bandData} type="monotone" dataKey="p3"  stroke={BAND_COLORS[0]} strokeWidth={1} strokeDasharray={BAND_DASHES[0]} dot={false} name={t('stats.growthP3')}  legendType="none" />
-          <Line data={bandData} type="monotone" dataKey="p15" stroke={BAND_COLORS[1]} strokeWidth={1} strokeDasharray={BAND_DASHES[1]} dot={false} name={t('stats.growthP15')} legendType="none" />
-          <Line data={bandData} type="monotone" dataKey="p50" stroke={BAND_COLORS[2]} strokeWidth={1.5} dot={false} name={t('stats.growthP50')} legendType="none" />
-          <Line data={bandData} type="monotone" dataKey="p85" stroke={BAND_COLORS[3]} strokeWidth={1} strokeDasharray={BAND_DASHES[3]} dot={false} name={t('stats.growthP85')} legendType="none" />
-          <Line data={bandData} type="monotone" dataKey="p97" stroke={BAND_COLORS[4]} strokeWidth={1} strokeDasharray={BAND_DASHES[4]} dot={false} name={t('stats.growthP97')} legendType="none" />
+          <Line data={bandData} type="monotone" dataKey="p3"  stroke={BAND_COLORS[0]} strokeWidth={1} strokeDasharray={BAND_DASHES[0]} dot={false} name={t('stats.growthP3')}  legendType="none" isAnimationActive={false} />
+          <Line data={bandData} type="monotone" dataKey="p15" stroke={BAND_COLORS[1]} strokeWidth={1} strokeDasharray={BAND_DASHES[1]} dot={false} name={t('stats.growthP15')} legendType="none" isAnimationActive={false} />
+          <Line data={bandData} type="monotone" dataKey="p50" stroke={BAND_COLORS[2]} strokeWidth={1.5} dot={false} name={t('stats.growthP50')} legendType="none" isAnimationActive={false} />
+          <Line data={bandData} type="monotone" dataKey="p85" stroke={BAND_COLORS[3]} strokeWidth={1} strokeDasharray={BAND_DASHES[3]} dot={false} name={t('stats.growthP85')} legendType="none" isAnimationActive={false} />
+          <Line data={bandData} type="monotone" dataKey="p97" stroke={BAND_COLORS[4]} strokeWidth={1} strokeDasharray={BAND_DASHES[4]} dot={false} name={t('stats.growthP97')} legendType="none" isAnimationActive={false} />
 
           {/* Baby scatter points */}
           {scatterData.length > 0 && (
@@ -271,6 +276,7 @@ function GrowthChartSection({ metric, sex, birthdate, events, dateFnsLocale }: G
               name="scatter"
               fill="var(--indigo-500)"
               r={5}
+              isAnimationActive={false}
               shape={(props: { cx?: number; cy?: number }) => (
                 <circle
                   cx={props.cx ?? 0}
@@ -301,6 +307,7 @@ export function StatsPage() {
   const events   = useAppStore(s => s.events)
   const settings = useAppStore(s => s.settings)
   const [range, setRange] = useState<Range>(7)
+  const [showAllSections, setShowAllSections] = useState(false)
   const { t, i18n: i18nInstance } = useTranslation()
   const { showToast } = useToast()
   const [pdfSaving, setPdfSaving] = useState(false)
@@ -330,16 +337,179 @@ export function StatsPage() {
 
   const data = useMemo(() => buildDayStats(events, range, dateFnsLocale), [events, range, dateFnsLocale])
 
-  const hasTempData  = data.some(d => d.avgTemp != null)
-  const tempData     = data.filter(d => d.avgTemp != null)
-  const hasSleepData = data.some(d => d.sleepMinutes > 0)
+  const tempData = data.filter(d => d.avgTemp != null)
+  const visibility = getStatsVisibility(data)
+  const partition = partitionStatsSections(visibility)
+  const secondarySectionsId = 'stats-secondary-sections'
 
-  // Growth chart gating: need birthdate + gender
+  // Growth chart gating: need birthdate + gender + data for the metric.
   const birthdate = settings?.baby?.birthdate
   const gender    = settings?.baby?.gender
   const canShowGrowth = !!(birthdate && gender)
   const birthdateObj  = canShowGrowth ? parseISO(birthdate!) : null
   const whoSex: WhoSex = gender === 'girl' ? 'girl' : 'boy'
+  const growthEvents = events.filter(event => !event.deleted && event.type === 'growth')
+  const hasWeightGrowth = canShowGrowth
+    && growthEvents.some(event => (event.data as GrowthData).weightKg != null)
+  const hasHeightGrowth = canShowGrowth
+    && growthEvents.some(event => (event.data as GrowthData).heightCm != null)
+  const hasGrowthSection = hasWeightGrowth || hasHeightGrowth
+  const hasAnySection = partition.primary.length > 0 || hasGrowthSection
+
+  const renderDailySection = (key: StatsSectionKey): React.ReactNode => {
+    switch (key) {
+      case 'sleep':
+        return (
+          <div className="card">
+            <div className="section-header-accent">
+              {t('stats.sleepTitle')}
+            </div>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <YAxis tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  formatter={(v: number) => [t('stats.sleepUnit', { value: v }), t('stats.sleepTooltip')]}
+                />
+                <Bar
+                  dataKey="sleepMinutes"
+                  fill="var(--indigo-300)"
+                  radius={[8, 8, 0, 0]}
+                  maxBarSize={44}
+                  name={t('stats.sleepTooltip')}
+                  isAnimationActive={false}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      case 'formula':
+        return (
+          <div className="card">
+            <div className="section-header-accent">
+              {t('stats.formulaTitle')}
+            </div>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <YAxis tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  formatter={(v: number) => [t('stats.mlUnit', { value: v }), t('stats.formulaTooltip')]}
+                />
+                <Bar
+                  dataKey="formulaMl"
+                  fill="var(--amber-300)"
+                  radius={[8, 8, 0, 0]}
+                  maxBarSize={44}
+                  name={t('stats.formulaTooltip')}
+                  isAnimationActive={false}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      case 'feeding':
+        return (
+          <div className="card">
+            <div className="section-header-accent">
+              {t('stats.feedingTitle')}
+            </div>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  formatter={(v: number) => [t('stats.countUnit', { count: v }), t('stats.feedingTooltip')]}
+                />
+                <Bar
+                  dataKey="feedingCount"
+                  fill="var(--amber-200)"
+                  radius={[8, 8, 0, 0]}
+                  maxBarSize={44}
+                  name={t('stats.feedingTooltip')}
+                  isAnimationActive={false}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      case 'diaper':
+        return (
+          <div className="card">
+            <div className="section-header-accent">
+              {t('stats.diaperTitle')}
+            </div>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                <Bar
+                  dataKey="peeCount"
+                  stackId="a"
+                  fill="var(--mint)"
+                  radius={[0, 0, 0, 0]}
+                  maxBarSize={44}
+                  name={t('stats.peeLabel')}
+                  isAnimationActive={false}
+                />
+                <Bar
+                  dataKey="poopCount"
+                  stackId="a"
+                  fill="var(--sage-400)"
+                  radius={[8, 8, 0, 0]}
+                  maxBarSize={44}
+                  name={t('stats.poopLabel')}
+                  isAnimationActive={false}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      case 'temperature':
+        return (
+          <div className="card">
+            <div className="section-header-accent">
+              {t('stats.tempTitle')}
+            </div>
+            <ResponsiveContainer width="100%" height={180}>
+              <LineChart data={tempData} margin={{ top: 4, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <YAxis domain={[36, 40]} tick={{ fontSize: 12, fill: 'var(--text-muted)' }} />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  formatter={(v: number) => [`${v}℃`, t('stats.tempTooltip')]}
+                />
+                <ReferenceLine
+                  y={37.5}
+                  stroke="var(--peach-400)"
+                  strokeDasharray="4 4"
+                  label={{ value: '37.5℃', position: 'right', fontSize: 11, fill: 'var(--peach-400)' }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="avgTemp"
+                  stroke="var(--amber-500)"
+                  strokeWidth={2}
+                  dot={{ fill: 'var(--amber-500)', r: 4 }}
+                  name={t('stats.tempLineLabel')}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )
+    }
+  }
 
   return (
     <div className="page-container" data-tour="stats">
@@ -373,163 +543,71 @@ export function StatsPage() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="stats-section-stack">
+        {partition.primary.map(key => (
+          <React.Fragment key={key}>{renderDailySection(key)}</React.Fragment>
+        ))}
 
-        {/* Sleep total minutes per day */}
-        <div className="card">
-          <div className="section-header-accent">
-            {t('stats.sleepTitle')}
-          </div>
-          {hasSleepData ? (
-            <ResponsiveContainer width="100%" height={180}>
-              <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-                <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-                <Tooltip
-                  contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => [t('stats.sleepUnit', { value: v }), t('stats.sleepTooltip')]}
-                />
-                <Bar
-                  dataKey="sleepMinutes"
-                  fill="var(--indigo-300)"
-                  radius={[8, 8, 0, 0]}
-                  maxBarSize={44}
-                  name={t('stats.sleepTooltip')}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div style={{ textAlign: 'center', color: 'var(--stone-400)', fontSize: 13, padding: '24px 0' }}>
-              {t('stats.noGrowthData')}
-            </div>
-          )}
-        </div>
-
-        {/* Formula total */}
-        <div className="card">
-          <div className="section-header-accent">
-            {t('stats.formulaTitle')}
-          </div>
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                formatter={(v: number) => [t('stats.mlUnit', { value: v }), t('stats.formulaTooltip')]}
-              />
-              <Bar dataKey="formulaMl" fill="var(--amber-300)" radius={[8,8,0,0]} maxBarSize={44} name={t('stats.formulaTooltip')} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Feeding count */}
-        <div className="card">
-          <div className="section-header-accent">
-            {t('stats.feedingTitle')}
-          </div>
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                formatter={(v: number) => [t('stats.countUnit', { count: v }), t('stats.feedingTooltip')]}
-              />
-              <Bar dataKey="feedingCount" fill="var(--amber-200)" radius={[8,8,0,0]} maxBarSize={44} name={t('stats.feedingTooltip')} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Diaper counts */}
-        <div className="card">
-          <div className="section-header-accent">
-            {t('stats.diaperTitle')}
-          </div>
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} />
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="peeCount"  stackId="a" fill="var(--mint)"      radius={[0,0,0,0]} maxBarSize={44} name={t('stats.peeLabel')} />
-              <Bar dataKey="poopCount" stackId="a" fill="var(--sage-400)"  radius={[8,8,0,0]} maxBarSize={44} name={t('stats.poopLabel')} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Temperature */}
-        {hasTempData && (
-          <div className="card">
-            <div className="section-header-accent">
-              {t('stats.tempTitle')}
-            </div>
-            <ResponsiveContainer width="100%" height={180}>
-              <LineChart data={tempData} margin={{ top: 4, right: 0, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="2 4" stroke="var(--border)" strokeOpacity={0.8} />
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-                <YAxis domain={[36, 40]} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-                <Tooltip
-                  contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => [`${v}℃`, t('stats.tempTooltip')]}
-                />
-                <ReferenceLine
-                  y={37.5}
-                  stroke="var(--peach-400)"
-                  strokeDasharray="4 4"
-                  label={{ value: '37.5℃', position: 'right', fontSize: 11, fill: 'var(--peach-400)' }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="avgTemp"
-                  stroke="var(--amber-500)"
-                  strokeWidth={2}
-                  dot={{ fill: 'var(--amber-500)', r: 4 }}
-                  name={t('stats.tempLineLabel')}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-
-        {!hasTempData && (
-          <div className="card" style={{ textAlign: 'center', color: 'var(--stone-400)', fontSize: 13, padding: '24px' }}>
-            {t('stats.noTempData')}
-          </div>
-        )}
-
-        {/* WHO Growth Curves */}
-        <div className="section-header-accent" style={{ marginTop: 4 }}>
-          {t('stats.growthTitle')}
-        </div>
-
-        {!canShowGrowth ? (
-          <div className="card" style={{ textAlign: 'center', color: 'var(--stone-400)', fontSize: 13, padding: '24px' }}>
-            {t('stats.growthNoBirthdate')}
-          </div>
-        ) : (
+        {partition.secondary.length > 0 && (
           <>
-            <GrowthChartSection
-              metric="weight"
-              sex={whoSex}
-              birthdate={birthdateObj!}
-              events={events}
-              dateFnsLocale={dateFnsLocale}
-            />
-            <GrowthChartSection
-              metric="height"
-              sex={whoSex}
-              birthdate={birthdateObj!}
-              events={events}
-              dateFnsLocale={dateFnsLocale}
-            />
+            <button
+              className="progressive-more-button"
+              type="button"
+              aria-expanded={showAllSections}
+              aria-controls={secondarySectionsId}
+              onClick={() => setShowAllSections(value => !value)}
+            >
+              {showAllSections
+                ? t('stats.lessSections')
+                : t('stats.moreSections', { count: partition.secondary.length })}
+            </button>
+            <div
+              id={secondarySectionsId}
+              className="stats-secondary-sections"
+              hidden={!showAllSections}
+            >
+              {showAllSections && (
+                <div className="stats-section-stack">
+                  {partition.secondary.map(key => (
+                    <React.Fragment key={key}>{renderDailySection(key)}</React.Fragment>
+                  ))}
+                </div>
+              )}
+            </div>
           </>
         )}
 
+        {!hasAnySection && (
+          <div className="stats-empty-state">
+            <div className="progressive-empty-title">{t('stats.emptyTitle')}</div>
+            <div className="progressive-empty-body">{t('stats.emptyBody')}</div>
+          </div>
+        )}
+
+        {hasGrowthSection && (
+          <div className="section-header-accent" style={{ marginTop: 4 }}>
+            {t('stats.growthTitle')}
+          </div>
+        )}
+
+        {hasWeightGrowth && (
+          <GrowthChartSection
+            metric="weight"
+            sex={whoSex}
+            birthdate={birthdateObj!}
+            events={events}
+            dateFnsLocale={dateFnsLocale}
+          />
+        )}
+        {hasHeightGrowth && (
+          <GrowthChartSection
+            metric="height"
+            sex={whoSex}
+            birthdate={birthdateObj!}
+            events={events}
+            dateFnsLocale={dateFnsLocale}
+          />
+        )}
       </div>
     </div>
   )
