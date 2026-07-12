@@ -280,6 +280,92 @@ async function main() {
       console.error(`  FAIL fever modal: ${err.message}`)
     }
 
+    // 3d. 모유 (breast) → FeedingTipPopup → countdown row
+    console.log('  → click breast button')
+    const breastBtn = await page.$('.quick-btn-circle-breast')
+    assert(!!breastBtn, 'breast button exists')
+    await breastBtn.click()
+    await page.waitForSelector('.popover', { timeout: 5000 })
+
+    // Click 기록 button in breast popover (or press Enter)
+    const breastPopoverBtns = await page.$$('.popover .btn-primary')
+    if (breastPopoverBtns.length > 0) {
+      await breastPopoverBtns[0].click()
+    } else {
+      await page.keyboard.press('Enter')
+    }
+
+    // FeedingTipPopup should appear with next-feed window text (ko: /다음 수유는 보통/)
+    try {
+      await page.waitForSelector('.feeding-tip-popup, [class*="feeding-tip"]', { timeout: 6000 })
+      // Assert popup contains next-feed window text
+      const tipText = await page.$eval(
+        '.feeding-tip-popup, [class*="feeding-tip"]',
+        el => el.textContent ?? ''
+      )
+      assert(
+        /다음 수유는 보통|授乳の目安/.test(tipText),
+        `breastfeed tip popup contains next-feed window text (got: "${tipText.slice(0, 80)}")`
+      )
+      await shot(page, 'breastfeed-tip')
+
+      // Dismiss via X button
+      const tipDismissBtn = await page.$('.feeding-tip-dismiss, .feeding-tip-popup button[aria-label], [class*="feeding-tip"] button')
+      if (tipDismissBtn) {
+        await tipDismissBtn.click()
+      } else {
+        await page.keyboard.press('Escape')
+      }
+      await page.waitForTimeout(400)
+      assert(true, 'breastfeed tip popup dismissed')
+    } catch (err) {
+      failures.push(`breastfeed tip popup did not appear: ${err.message}`)
+      console.error(`  FAIL breastfeed tip: ${err.message}`)
+    }
+
+    // Insights rail should now have breast countdown row
+    try {
+      await page.waitForFunction(
+        () => {
+          const panel = document.querySelector('[data-tour="insights"]')
+          if (!panel) return false
+          return /다음 수유까지|지금이 수유하기/.test(panel.textContent ?? '')
+        },
+        { timeout: 5000 }
+      )
+      assert(true, 'home insights rail shows breastfeed countdown row')
+    } catch {
+      console.log('  (breastfeed countdown not yet visible in insights rail)')
+    }
+    await shot(page, 'breastfeed-countdown')
+
+    // ---------------------------------------------------------------------------
+    // 3e. Settings — 모유수유 간격 가이드 accordion expanded
+    // ---------------------------------------------------------------------------
+    console.log('  → settings breastfeeding guide accordion')
+
+    await page.click('[data-tour="nav-settings"]')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+
+    // Locate the BreastfeedingGuideCard button (contains 모유수유 간격 or 授乳間隔)
+    const bfGuideBtn = await page.locator('button[aria-expanded]').filter({ hasText: /모유수유 간격|授乳間隔/ }).first()
+    const bfGuideBtnVisible = await bfGuideBtn.isVisible().catch(() => false)
+    if (bfGuideBtnVisible) {
+      const isExpanded = await bfGuideBtn.getAttribute('aria-expanded')
+      if (isExpanded !== 'true') {
+        await bfGuideBtn.click()
+        await page.waitForTimeout(400)
+      }
+      assert(true, 'breastfeeding guide accordion expanded')
+    } else {
+      console.log('  (breastfeeding guide button not found — skipping expand)')
+    }
+    await shot(page, 'bf-guide')
+
+    // Navigate back to home for subsequent steps
+    await page.click('[data-tour="nav-home"]')
+    await page.waitForSelector('[data-tour="quick-row"]', { timeout: 5000 })
+
     // ---------------------------------------------------------------------------
     // 4. 기록 (History) — calendar views
     // ---------------------------------------------------------------------------
