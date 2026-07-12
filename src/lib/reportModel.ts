@@ -1,4 +1,4 @@
-import { subDays, differenceInMonths, parseISO, isSameDay, format } from 'date-fns'
+import { subDays, differenceInMonths, differenceInCalendarDays, parseISO, isSameDay, format } from 'date-fns'
 import type { DiaryEvent, AppSettings } from '../../shared/types'
 import type { FormulaData, TempData, SleepData, GrowthData } from '../../shared/types'
 import { computeZ, zToPercentile } from './whoGrowth'
@@ -47,7 +47,8 @@ export interface ReportModel {
 function periodStats(
   events: DiaryEvent[],
   days: number,
-  now: Date
+  now: Date,
+  birthdate?: string,
 ): ReportPeriodStats {
   const cutoff = subDays(now, days)
   const inPeriod = events.filter(e => {
@@ -55,6 +56,14 @@ function periodStats(
     const d = parseISO(e.at)
     return d > cutoff && d <= now
   })
+
+  // MF-04: clamp denominator to days since birth so a 2-day-old's rates
+  // are not diluted by dividing over the full 7- or 30-day window.
+  let effDays = days
+  if (birthdate) {
+    const daysSinceBirth = differenceInCalendarDays(now, parseISO(birthdate)) + 1
+    effDays = Math.max(1, Math.min(days, daysSinceBirth))
+  }
 
   const feedingCount  = inPeriod.filter(e => e.type === 'formula' || e.type === 'breast').length
   const formulaMl     = inPeriod.filter(e => e.type === 'formula')
@@ -75,10 +84,10 @@ function periodStats(
   const feverCount    = tempReadings.filter(c => c >= 38.0).length
 
   return {
-    avgFeedingPerDay:     feedingCount  / days,
-    avgFormulaMlPerDay:   formulaMl     / days,
-    avgDiaperPerDay:      diaperCount   / days,
-    avgSleepHoursPerDay:  sleepMinutes  / 60 / days,
+    avgFeedingPerDay:     feedingCount  / effDays,
+    avgFormulaMlPerDay:   formulaMl     / effDays,
+    avgDiaperPerDay:      diaperCount   / effDays,
+    avgSleepHoursPerDay:  sleepMinutes  / 60 / effDays,
     recentTemp,
     maxTemp,
     feverCount,
@@ -114,11 +123,13 @@ export function buildReportModel(
 
     let weightPct: number | null = null
     let heightPct: number | null = null
-    if (birthdate && gender && gd.weightKg) {
+    // MF-05: only compute WHO percentiles within the 0-24 month table range;
+    // outside that range return null (no silent clamp to a wrong value).
+    if (birthdate && gender && gd.weightKg && evAge >= 0 && evAge <= 24) {
       const z = computeZ('weight', sex, evAge, gd.weightKg)
       weightPct = Math.round(zToPercentile(z) * 10) / 10
     }
-    if (birthdate && gender && gd.heightCm) {
+    if (birthdate && gender && gd.heightCm && evAge >= 0 && evAge <= 24) {
       const z = computeZ('height', sex, evAge, gd.heightCm)
       heightPct = Math.round(zToPercentile(z) * 10) / 10
     }
@@ -155,8 +166,8 @@ export function buildReportModel(
     ageMonths,
     gender,
     language,
-    last7:  periodStats(live, 7,  now),
-    last30: periodStats(live, 30, now),
+    last7:  periodStats(live, 7,  now, birthdate || undefined),
+    last30: periodStats(live, 30, now, birthdate || undefined),
     growthRows,
     last7DayRows,
   }

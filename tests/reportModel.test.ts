@@ -185,4 +185,115 @@ describe('buildReportModel', () => {
     // formulaMl should still be 660 not 660+999
     expect(model.last7.avgFormulaMlPerDay).toBeCloseTo(660 / 7, 1)
   })
+
+  // MF-04: denominator clamped to days since birth for very young babies
+  describe('MF-04: periodStats clamps denominator to days-since-birth', () => {
+    it('baby 2 days old with 10 feedings: last7 avg = 5/day not 10/7', () => {
+      // NOW = 2026-03-15, baby born 2026-03-13 → 2 days old
+      const infantBirthdate = '2026-03-13'
+      const infantSettings: AppSettings = {
+        ...SETTINGS,
+        baby: { ...SETTINGS.baby, birthdate: infantBirthdate },
+      }
+
+      // 10 feedings today and yesterday
+      const feedings: DiaryEvent[] = Array.from({ length: 10 }, (_, i) =>
+        makeEvent({
+          type: 'formula',
+          at: localISO(2026, 2, 14 + (i % 2 === 0 ? 0 : -1), 6 + i, 0),
+          data: { ml: 100 },
+        })
+      )
+
+      const model = buildReportModel(feedings, infantSettings, NOW)
+      // effDays = min(7, 2+1) = 3 (birth day + 1 day elapsed = daysSinceBirth)
+      // The infant is 2 days old (2026-03-13 to 2026-03-15 = 2 days diff + 1 = 3 effDays)
+      // But only 2 of those days have feedings → feedings / 3 max (not /7)
+      // Strictly: avgFeedingPerDay should be > 10/7 (≈1.43)
+      expect(model.last7.avgFeedingPerDay).toBeGreaterThan(10 / 7)
+    })
+
+    it('baby older than 7 days: denominator stays at 7', () => {
+      // Baby is 30 days old
+      const olderSettings: AppSettings = {
+        ...SETTINGS,
+        baby: { ...SETTINGS.baby, birthdate: '2026-02-13' },
+      }
+      // 7 feedings in last 7 days
+      const feedings = Array.from({ length: 7 }, (_, i) =>
+        makeEvent({
+          type: 'formula',
+          at: localISO(2026, 2, 15 - i, 10, 0),
+          data: { ml: 100 },
+        })
+      )
+      const model = buildReportModel(feedings, olderSettings, NOW)
+      expect(model.last7.avgFeedingPerDay).toBeCloseTo(7 / 7, 2)  // = 1.0
+    })
+
+    it('no birthdate: denominator stays at full window (no clamp)', () => {
+      const noDateSettings: AppSettings | null = null
+      const feedings = Array.from({ length: 7 }, (_, i) =>
+        makeEvent({
+          type: 'formula',
+          at: localISO(2026, 2, 15 - i, 10, 0),
+          data: { ml: 100 },
+        })
+      )
+      const model = buildReportModel(feedings, noDateSettings, NOW)
+      // No birthdate → no clamp → 7/7 = 1.0
+      expect(model.last7.avgFeedingPerDay).toBeCloseTo(1.0, 2)
+    })
+  })
+
+  // MF-05: WHO percentile null outside 0-24 months
+  describe('MF-05: WHO percentile null outside 0-24 month range', () => {
+    it('growth event at 26 months: weightPct and heightPct are null', () => {
+      // Baby born 2024-01-15, measurement at 2026-03-15 = ~26 months
+      const settings26mo: AppSettings = {
+        ...SETTINGS,
+        baby: { name: 'Test', birthdate: '2024-01-15', gender: 'boy' },
+      }
+      const growthAt26mo = makeEvent({
+        type: 'growth',
+        at: localISO(2026, 2, 15, 10, 0),
+        data: { weightKg: 12.5, heightCm: 90.0 },
+      })
+      const model = buildReportModel([growthAt26mo], settings26mo, NOW)
+      expect(model.growthRows).toHaveLength(1)
+      expect(model.growthRows[0].weightPct).toBeNull()
+      expect(model.growthRows[0].heightPct).toBeNull()
+    })
+
+    it('growth event at 24 months: still computes normally (boundary included)', () => {
+      // Baby born 2024-03-15, measurement at NOW (2026-03-15) = exactly 24 months
+      const settings24mo: AppSettings = {
+        ...SETTINGS,
+        baby: { name: 'Test', birthdate: '2024-03-15', gender: 'girl' },
+      }
+      const growthAt24mo = makeEvent({
+        type: 'growth',
+        at: localISO(2026, 2, 15, 10, 0),
+        data: { weightKg: 11.0, heightCm: 86.0 },
+      })
+      const model = buildReportModel([growthAt24mo], settings24mo, NOW)
+      expect(model.growthRows).toHaveLength(1)
+      expect(model.growthRows[0].weightPct).not.toBeNull()
+      expect(model.growthRows[0].heightPct).not.toBeNull()
+    })
+
+    it('growth event at 0 months (newborn): computes normally', () => {
+      const settings0mo: AppSettings = {
+        ...SETTINGS,
+        baby: { name: 'Test', birthdate: '2026-03-15', gender: 'boy' },
+      }
+      const growthAt0mo = makeEvent({
+        type: 'growth',
+        at: localISO(2026, 2, 15, 10, 0),
+        data: { weightKg: 3.5, heightCm: 50.0 },
+      })
+      const model = buildReportModel([growthAt0mo], settings0mo, NOW)
+      expect(model.growthRows[0].weightPct).not.toBeNull()
+    })
+  })
 })

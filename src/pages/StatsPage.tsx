@@ -178,6 +178,8 @@ function GrowthChartSection({ metric, sex, birthdate, events, dateFnsLocale }: G
   const percentileLabel = useMemo(() => {
     if (!latestScatter) return null
     const ageMonths = latestScatter.month
+    // MF-05: WHO tables only cover 0-24 months; return null outside that range.
+    if (ageMonths < 0 || ageMonths > 24) return null
     const z = computeZ(metric, sex, ageMonths, latestScatter.value)
     const pct = Math.round(zToPercentile(z))
     const metricLabel = metric === 'weight'
