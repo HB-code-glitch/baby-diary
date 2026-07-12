@@ -19,6 +19,7 @@ import {
   stop,
   restartSync,
   updateFamilyBabyInfo,
+  updateMemberEntry,
   DETAIL_FAMILY_GONE,
 } from './syncEngine'
 import { ipc } from '../lib/ipc'
@@ -86,6 +87,7 @@ export {
   subscribeStatus,
   restartSync,
   updateFamilyBabyInfo,
+  updateMemberEntry,
   DETAIL_FAMILY_GONE,
 }
 

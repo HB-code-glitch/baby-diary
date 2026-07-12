@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 import { DeleteAllModal } from '../components/DeleteAllModal'
 import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
-import { updateFamilyBabyInfo } from '../sync/useSync'
+import { updateFamilyBabyInfo, updateMemberEntry } from '../sync/useSync'
 
 // Re-export for any consumers that already import from this path
 export type { FormSnapshot }
@@ -123,6 +123,14 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
             // best-effort: family doc update failure is non-fatal (local save succeeded)
           })
         }
+
+        // Member entry self-heal: push profile name/role to family doc member entry
+        // so that any role/name change is reflected in the shared family doc.
+        const newProfileName = updated.profile?.name ?? ''
+        const newProfileRole = updated.profile?.role ?? 'mom'
+        updateMemberEntry(newProfileName, newProfileRole).catch(() => {
+          // best-effort: non-fatal
+        })
       }
 
       // Detect race scenario: form was fully blank but disk had data →
@@ -323,6 +331,11 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           <div className="settings-section">
             <div className="settings-section-title">{t('settings.babyInfo')}</div>
             <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {settings?.familyId && (
+                <div style={{ fontSize: 11, color: 'var(--stone-400)', lineHeight: 1.5, marginBottom: -4 }}>
+                  {t('settings.babyInfoSharedHint')}
+                </div>
+              )}
               <div>
                 <div className="label">{t('settings.babyName')}</div>
                 <input

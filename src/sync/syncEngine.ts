@@ -535,6 +535,22 @@ export async function updateFamilyBabyInfo(babyName: string, babyBirthdate: stri
 }
 
 /**
+ * Update own member entry in the family doc.
+ * Called on connect and on settings save when profile name/role changes.
+ * Rules: isMember() update restricted to members.{uid} field-path is allowed.
+ */
+export async function updateMemberEntry(name: string, role: 'dad' | 'mom'): Promise<void> {
+  if (!_db || !_familyId || !_currentUser) return
+  const uid = _currentUser.uid
+  const memberName = name || _currentUser.email?.split('@')[0] || 'user'
+  const { doc, updateDoc } = await _firestoreOps()
+  const familyRef = doc(_db, 'families', _familyId)
+  await updateDoc(familyRef, {
+    [`members.${uid}`]: { name: memberName, role },
+  })
+}
+
+/**
  * 이벤트를 업로드 큐에 추가.
  * 로컬 append 성공 후 즉시 호출.
  * 원격에서 수신한 이벤트는 tag된 docId로 필터링 → 재업로드 없음.
@@ -760,22 +776,48 @@ async function onUserSignedIn(user: User): Promise<void> {
     const familyData = familySnap.data() as FamilyDoc
     setState({ inviteCode: familyData.inviteCode })
 
-    // Reconnect adopt-if-empty: copy babyName/babyBirthdate from family doc when local is blank.
+    // ── C2. Unconditional baby info adopt from family doc ─────────────────
+    // Family doc is the sole authority for babyName/babyBirthdate.
+    // Always adopt cloud→local on connect when family doc values are non-empty
+    // and differ from local. Gender stays local (not stored in family doc).
     try {
       const localSettings2 = await ipc.getSettings()
-      const localName = localSettings2.baby?.name?.trim() ?? ''
-      const isDefault = localName === '' || localName === '아기'
-      if (isDefault && (familyData.babyName || familyData.babyBirthdate)) {
+      const localName      = localSettings2.baby?.name?.trim()      ?? ''
+      const localBirthdate = localSettings2.baby?.birthdate?.trim() ?? ''
+      const cloudName      = (familyData.babyName      ?? '').trim()
+      const cloudBirthdate = (familyData.babyBirthdate ?? '').trim()
+      const nameChanged      = cloudName      && cloudName      !== localName
+      const birthdateChanged = cloudBirthdate && cloudBirthdate !== localBirthdate
+      if (nameChanged || birthdateChanged) {
         await ipc.mergeSettings({
           baby: {
             ...((localSettings2.baby ?? { name: '', birthdate: '' }) as object),
-            name:      familyData.babyName      ?? localSettings2.baby?.name      ?? '',
-            birthdate: familyData.babyBirthdate ?? localSettings2.baby?.birthdate ?? '',
+            name:      cloudName      || localName,
+            birthdate: cloudBirthdate || localBirthdate,
           } as import('../../shared/types').AppSettings['baby'],
         })
       }
     } catch {
       // best-effort: local settings update failure must not block sync
+    }
+
+    // ── C3. Member entry self-heal ────────────────────────────────────────
+    // Ensure own member entry in family doc reflects current profile name/role.
+    // This fixes stale entries (e.g. default 'dad' role for mom) on reconnect.
+    try {
+      const localSettings3 = await ipc.getSettings()
+      const profileName = localSettings3.profile?.name ?? ''
+      const profileRole = localSettings3.profile?.role ?? 'mom'
+      // Only update if our entry is missing or stale
+      const existingEntry = familyData.members?.[user.uid]
+      const entryName = existingEntry?.name ?? ''
+      const entryRole = existingEntry?.role
+      const memberName = profileName || user.email?.split('@')[0] || 'user'
+      if (!existingEntry || entryName !== memberName || entryRole !== profileRole) {
+        await updateMemberEntry(profileName, profileRole)
+      }
+    } catch (e) {
+      console.warn('[syncEngine] member entry self-heal failed (non-fatal)', e)
     }
 
     await reconcile(user)
