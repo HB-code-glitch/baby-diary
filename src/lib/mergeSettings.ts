@@ -23,10 +23,12 @@ function pickString(saved: string | undefined, formVal: string): string {
 }
 
 function pickGender(
-  saved: 'girl' | 'boy' | undefined,
+  _saved: 'girl' | 'boy' | undefined,
   formVal: 'girl' | 'boy' | undefined,
 ): 'girl' | 'boy' | undefined {
-  if (saved && !formVal) return saved
+  // MF-13: gender is a 3-state discrete toggle (girl/boy/unset) with no
+  // hydration-race blank risk, so the form value always wins — including
+  // undefined (clear). This allows users to deselect a previously-saved gender.
   return formVal
 }
 

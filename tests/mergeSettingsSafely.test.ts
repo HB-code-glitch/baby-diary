@@ -29,12 +29,13 @@ const EMPTY_FORM: FormSnapshot = {
 describe('mergeSettingsSafely', () => {
   // ── guard: empty form must never overwrite non-empty disk data ─────────
 
-  it('empty form: keeps all non-empty saved values intact', () => {
+  it('empty form: keeps all non-empty saved string values intact (MF-13: gender clears)', () => {
     const result = mergeSettingsSafely(BASE_CURRENT, EMPTY_FORM)
 
     expect(result.baby.name).toBe('민준')
     expect(result.baby.birthdate).toBe('2024-03-15')
-    expect(result.baby.gender).toBe('boy')
+    // MF-13: gender form=undefined means "user deselected" → clears saved value
+    expect(result.baby.gender).toBeUndefined()
     expect(result.profile.name).toBe('아빠')
   })
 
@@ -80,20 +81,20 @@ describe('mergeSettingsSafely', () => {
     expect(result.profile.name).toBe('엄마')
   })
 
-  it('partial form: only name changed, birthdate and gender protected from empty', () => {
+  it('partial form: only name changed, birthdate protected but gender clearable (MF-13)', () => {
     const form: FormSnapshot = {
       babyName:   '서준',   // changed
       birthdate:  '',        // empty — should fall back to saved
-      babyGender: undefined, // empty — should fall back to saved
+      babyGender: undefined, // MF-13: gender clears intentionally (form wins)
       myName:     '',        // empty — should fall back to saved
     }
 
     const result = mergeSettingsSafely(BASE_CURRENT, form)
 
-    expect(result.baby.name).toBe('서준')        // form value used
-    expect(result.baby.birthdate).toBe('2024-03-15') // kept from disk
-    expect(result.baby.gender).toBe('boy')           // kept from disk
-    expect(result.profile.name).toBe('아빠')         // kept from disk
+    expect(result.baby.name).toBe('서준')            // form value used
+    expect(result.baby.birthdate).toBe('2024-03-15') // kept from disk (string guard)
+    expect(result.baby.gender).toBeUndefined()        // MF-13: cleared (form undefined wins)
+    expect(result.profile.name).toBe('아빠')          // kept from disk
   })
 
   it('whitespace-only form values are treated as empty (trim check)', () => {
@@ -112,21 +113,33 @@ describe('mergeSettingsSafely', () => {
     expect(result.profile.name).toBe('아빠')
   })
 
-  // ── gender edge cases ──────────────────────────────────────────────────
+  // ── gender edge cases — MF-13: gender is clearable ────────────────────
 
-  it('gender: form undefined when disk has value → keeps disk value', () => {
+  it('MF-13: gender form=undefined when disk has value → clear honored (undefined wins)', () => {
+    // User deselected gender → form sends undefined → must persist as undefined
     const form: FormSnapshot = { ...EMPTY_FORM, babyGender: undefined }
     const result = mergeSettingsSafely(BASE_CURRENT, form)
-    expect(result.baby.gender).toBe('boy')
+    // MF-13: form value (undefined = clear) must win over saved 'boy'
+    expect(result.baby.gender).toBeUndefined()
   })
 
-  it('gender: form value provided → uses form value (override to girl)', () => {
+  it('MF-13: gender form=girl when disk has boy → girl wins', () => {
     const form: FormSnapshot = { ...EMPTY_FORM, babyGender: 'girl' }
     const result = mergeSettingsSafely(BASE_CURRENT, form)
     expect(result.baby.gender).toBe('girl')
   })
 
-  it('gender: disk undefined and form undefined → undefined', () => {
+  it('MF-13: gender form=boy when disk is undefined → boy wins', () => {
+    const form: FormSnapshot = { ...EMPTY_FORM, babyGender: 'boy' }
+    const noGenderCurrent: AppSettings = {
+      ...BASE_CURRENT,
+      baby: { name: '아기', birthdate: '2024-01-01' },
+    }
+    const result = mergeSettingsSafely(noGenderCurrent, form)
+    expect(result.baby.gender).toBe('boy')
+  })
+
+  it('MF-13: gender disk undefined and form undefined → undefined (no change)', () => {
     const noGenderCurrent: AppSettings = {
       ...BASE_CURRENT,
       baby: { name: '아기', birthdate: '2024-01-01' },
