@@ -43,6 +43,7 @@ type FirestoreOps = {
   doc: typeof import('firebase/firestore').doc
   getDoc: typeof import('firebase/firestore').getDoc
   setDoc: typeof import('firebase/firestore').setDoc
+  updateDoc: typeof import('firebase/firestore').updateDoc
   getDocs: typeof import('firebase/firestore').getDocs
   onSnapshot: typeof import('firebase/firestore').onSnapshot
   writeBatch: typeof import('firebase/firestore').writeBatch
@@ -64,6 +65,7 @@ async function _firestoreOps(): Promise<FirestoreOps> {
       doc: m.doc,
       getDoc: m.getDoc,
       setDoc: m.setDoc,
+      updateDoc: m.updateDoc,
       getDocs: m.getDocs,
       onSnapshot: m.onSnapshot,
       writeBatch: m.writeBatch,
@@ -136,6 +138,9 @@ export const DETAIL_FAMILY_NOT_FOUND = 'FAMILY_NOT_FOUND'
 
 /** Thrown when createFamily/joinFamily is called while not signed in. */
 export const ERR_NOT_SIGNED_IN = 'NOT_SIGNED_IN'
+
+/** Firestore error code emitted when the security rules reject a request. */
+export const ERR_PERMISSION_DENIED = 'permission-denied'
 
 // ────────────────────────────────────────────────────────────
 // 내부 상태
@@ -451,7 +456,7 @@ export async function joinFamily(
   const memberRole = profile.role ?? 'mom'
 
   // F-RULES: direct get() on invites/{code} — no list needed
-  const { doc, getDoc, setDoc } = await _firestoreOps()
+  const { doc, getDoc, updateDoc } = await _firestoreOps()
   const code = inviteCode.trim().toUpperCase()
   const inviteRef = doc(_db, 'invites', code)
   const inviteSnap = await getDoc(inviteRef)
@@ -460,23 +465,18 @@ export async function joinFamily(
 
   const familyId = (inviteSnap.data() as { familyId: string }).familyId
 
-  // F-RULES: self-join: add only the auth.uid to members (rules verify only members key changes)
+  // F-RULES: self-join — write ONLY the members.{uid} field-path.
+  // Do NOT read families/{familyId} before this write: a non-member cannot
+  // getDoc a family doc (rules: get requires isMember()), so any pre-join
+  // read results in permission-denied.  The rules allow an unauthenticated-
+  // member update as long as:
+  //   (a) only the 'members' top-level key is in diff.affectedKeys()
+  //   (b) auth.uid is added (not existing members removed)
+  // updateDoc with a dotted field-path satisfies (a) cleanly.
   const familyRef = doc(_db, 'families', familyId)
-  const familySnap = await getDoc(familyRef)
-  if (!familySnap.exists()) throw new Error(DETAIL_FAMILY_NOT_FOUND)
-
-  const data = familySnap.data() as FamilyDoc
-
-  // 이미 멤버인 경우
-  if (data.members[authUid]) {
-    _familyId = familyId
-    return familyId
-  }
-
-  // members 맵에 본인만 추가 (rules: diff must only affect members key)
-  await setDoc(familyRef, {
-    members: { [authUid]: { name: memberName, role: memberRole } }
-  }, { merge: true })
+  await updateDoc(familyRef, {
+    [`members.${authUid}`]: { name: memberName, role: memberRole },
+  })
 
   _familyId = familyId
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;

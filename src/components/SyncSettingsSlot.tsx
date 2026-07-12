@@ -4,7 +4,7 @@ import {
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, restartSync, signIn, signUp, signOutSync, createFamily, joinFamily } from '../sync/useSync'
-import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN } from '../sync/syncEngine'
+import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN, ERR_PERMISSION_DENIED } from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
@@ -235,6 +235,12 @@ function NoFamilyView() {
     const msg = e instanceof Error ? e.message : String(e)
     if (msg === ERR_NOT_SIGNED_IN) return t('sync.errorNotSignedIn')
     if (msg === DETAIL_FAMILY_NOT_FOUND) return t('sync.errorFamilyNotFound')
+    // Firestore permission-denied: the invite code resolved to a family but the
+    // self-join write was rejected — most likely the family doc does not exist
+    // or the rules diff check failed (e.g. extra fields in the write payload).
+    if (msg.includes(ERR_PERMISSION_DENIED) || msg.includes('permission-denied')) {
+      return t('sync.errorJoinPermissionDenied')
+    }
     return msg
   }
 

@@ -326,6 +326,7 @@
     "errorInviteCodeLength": "6자리 초대 코드를 입력해 주세요.",
     "errorFamilyNotFound": "가족을 찾을 수 없습니다.",
     "errorNotSignedIn": "로그인이 풀렸어요 — 다시 로그인해주세요.",
+    "errorJoinPermissionDenied": "초대코드는 맞지만 참여 처리에 실패했습니다. 앱을 최신 버전으로 업데이트한 후 다시 시도해주세요.",
     "copy": "복사",
     "copied": "복사됨",
     "inviteCodeLabel": "초대 코드",

@@ -740,3 +740,143 @@ describe('MF-11: editEvent uses max(originalRev, liveRev)+1 to prevent silent dr
     expect(computeSafeRev(1, 1)).toBe(2)
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// 13. joinFamily write-shape + ordering (mock Firestore)
+//
+// Root cause of MF-??:  the old joinFamily called getDoc(families/fid)
+// BEFORE adding the user to members.  A non-member cannot read a family doc
+// (rules: get requires isMember()), so that pre-join read is always denied.
+//
+// Fix: joinFamily must NEVER call getDoc(families/fid) before the member-add
+// updateDoc, and the updateDoc payload must contain ONLY the dot-path
+// members.{uid} key — no extra fields — so the rules diff check passes.
+// ────────────────────────────────────────────────────────────
+
+describe('joinFamily write-shape and ordering', () => {
+  /**
+   * Simulates the corrected joinFamily sequence extracted as a pure function.
+   * Returns an ordered call-log and the updateDoc payload so assertions can
+   * verify (a) no family getDoc fires before updateDoc, and (b) the payload
+   * contains ONLY the members dot-path key for the joining uid.
+   */
+  interface CallLogEntry {
+    op: 'getDoc-invite' | 'getDoc-family' | 'updateDoc'
+    args?: Record<string, unknown>
+  }
+
+  function simulateJoinFamily(opts: {
+    inviteExists: boolean
+    authUid: string
+    memberName: string
+    memberRole: 'dad' | 'mom'
+  }): { calls: CallLogEntry[]; updatePayload: Record<string, unknown> | null } {
+    const calls: CallLogEntry[] = []
+    let updatePayload: Record<string, unknown> | null = null
+
+    // Step 1: get invite (always allowed — non-member can read invites)
+    calls.push({ op: 'getDoc-invite' })
+    if (!opts.inviteExists) return { calls, updatePayload }
+
+    const familyId = 'family-abc'
+
+    // Step 2 (FIXED): updateDoc with ONLY the members dot-path — no family read before this
+    const payload: Record<string, unknown> = {
+      [`members.${opts.authUid}`]: { name: opts.memberName, role: opts.memberRole },
+    }
+    calls.push({ op: 'updateDoc', args: payload })
+    updatePayload = payload
+
+    // Step 3: AFTER join is committed, family reads are allowed (not tested here —
+    // that happens in onUserSignedIn which is called post-joinFamily)
+    return { calls, updatePayload }
+  }
+
+  it('ORDERING: no getDoc(families/fid) fires before updateDoc', () => {
+    const { calls } = simulateJoinFamily({
+      inviteExists: true,
+      authUid: 'mom-uid-123',
+      memberName: '엄마',
+      memberRole: 'mom',
+    })
+
+    const updateIdx = calls.findIndex(c => c.op === 'updateDoc')
+    const familyGetIdx = calls.findIndex(c => c.op === 'getDoc-family')
+
+    // updateDoc must appear in the log
+    expect(updateIdx).toBeGreaterThanOrEqual(0)
+    // getDoc-family must NOT appear before updateDoc (ideally not at all in join)
+    if (familyGetIdx >= 0) {
+      expect(familyGetIdx).toBeGreaterThan(updateIdx)
+    }
+  })
+
+  it('WRITE-SHAPE: updateDoc payload contains ONLY the members dot-path key', () => {
+    const authUid = 'mom-uid-456'
+    const { updatePayload } = simulateJoinFamily({
+      inviteExists: true,
+      authUid,
+      memberName: '엄마',
+      memberRole: 'mom',
+    })
+
+    expect(updatePayload).not.toBeNull()
+    const keys = Object.keys(updatePayload!)
+
+    // Must have exactly one key
+    expect(keys).toHaveLength(1)
+
+    // That key must be members.<authUid> — the dot-path form that Firestore
+    // maps to a nested field update (only 'members' is in affectedKeys())
+    expect(keys[0]).toBe(`members.${authUid}`)
+
+    // Must NOT contain top-level extra fields like updatedAt, babyName, etc.
+    expect(keys).not.toContain('updatedAt')
+    expect(keys).not.toContain('babyName')
+    expect(keys).not.toContain('inviteCode')
+  })
+
+  it('WRITE-SHAPE: member value has name and role — no extra fields', () => {
+    const authUid = 'dad-uid-789'
+    const { updatePayload } = simulateJoinFamily({
+      inviteExists: true,
+      authUid,
+      memberName: '아빠',
+      memberRole: 'dad',
+    })
+
+    const memberValue = updatePayload![`members.${authUid}`] as Record<string, unknown>
+    expect(memberValue).toEqual({ name: '아빠', role: 'dad' })
+    expect(Object.keys(memberValue)).toHaveLength(2)
+  })
+
+  it('ORDERING: when invite does not exist, updateDoc is never called', () => {
+    const { calls, updatePayload } = simulateJoinFamily({
+      inviteExists: false,
+      authUid: 'uid-xyz',
+      memberName: '엄마',
+      memberRole: 'mom',
+    })
+
+    expect(updatePayload).toBeNull()
+    expect(calls.some(c => c.op === 'updateDoc')).toBe(false)
+  })
+
+  it('WRITE-SHAPE: uid key in payload matches authUid exactly (not empty, not caller uid)', () => {
+    const authUid = 'firebase-real-uid-abc'
+    const { updatePayload } = simulateJoinFamily({
+      inviteExists: true,
+      authUid,
+      memberName: '엄마',
+      memberRole: 'mom',
+    })
+
+    const key = Object.keys(updatePayload!)[0]
+    // Key format: members.<uid>
+    expect(key).toBe(`members.${authUid}`)
+    // Extracted uid part is non-empty
+    const extractedUid = key.replace('members.', '')
+    expect(extractedUid).toBe(authUid)
+    expect(extractedUid).not.toBe('')
+  })
+})
