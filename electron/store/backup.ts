@@ -91,12 +91,21 @@ export class BackupManager {
     }
   }
 
+  private copySettingsFile(destDir: string): void {
+    // MF-02: also back up settings.json (baby name, birthdate, familyId, Firebase creds)
+    const settingsSrc = path.join(path.dirname(this.dataDir), 'settings.json')
+    if (fs.existsSync(settingsSrc)) {
+      fs.copyFileSync(settingsSrc, path.join(destDir, 'settings.json'))
+    }
+  }
+
   async backup(): Promise<void> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
 
     try {
       const dest1 = path.join(this.userDataBackupDir, timestamp)
       await this.copyDataFiles(dest1)
+      this.copySettingsFile(dest1)
       console.log(`[Backup] Backed up to ${dest1}`)
     } catch (err) {
       console.error('[Backup] Failed to backup to userData:', err)
@@ -105,6 +114,7 @@ export class BackupManager {
     try {
       const dest2 = path.join(this.documentsBackupDir, timestamp)
       await this.copyDataFiles(dest2)
+      this.copySettingsFile(dest2)
       console.log(`[Backup] Backed up to ${dest2}`)
     } catch (err) {
       console.error('[Backup] Failed to backup to Documents:', err)
