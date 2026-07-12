@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { buildReportModel } from '../src/lib/reportModel'
 import type { DiaryEvent, AppSettings } from '../shared/types'
 
-// Fixed "now" for deterministic date math
-const NOW = new Date('2026-03-15T12:00:00.000Z')
+// Fixed "now" constructed via local-time Date() so date-fns format/subDays
+// produce consistent local-calendar dates in any runner timezone.
+const NOW = new Date(2026, 2, 15, 12, 0)  // local 2026-03-15 12:00
 
 const SETTINGS: AppSettings = {
   baby: { name: 'Hana', birthdate: '2025-09-15', gender: 'girl' },
@@ -28,35 +29,44 @@ function makeEvent(partial: Partial<DiaryEvent> & { type: DiaryEvent['type']; at
 // last-7-day events
 // NOW = 2026-03-15
 // last 7 days = 2026-03-09 .. 2026-03-15 (today inclusive)
+// Helper: construct an ISO string from LOCAL calendar date+time so that
+// date-fns isSameDay() (which uses local time) groups events correctly in
+// any runner timezone. Use this for boundary-case timestamps.
+function localISO(year: number, month0: number, day: number, hour = 12, minute = 0): string {
+  return new Date(year, month0, day, hour, minute).toISOString()
+}
+
 const FORMULA_EVENTS: DiaryEvent[] = [
-  // day -1 (2026-03-14): 3 feedings at 120ml each
-  makeEvent({ type: 'formula', at: '2026-03-14T06:00:00Z', data: { ml: 120 } }),
-  makeEvent({ type: 'formula', at: '2026-03-14T10:00:00Z', data: { ml: 120 } }),
-  makeEvent({ type: 'formula', at: '2026-03-14T14:00:00Z', data: { ml: 120 } }),
-  // day -2 (2026-03-13): 2 feedings at 150ml each
-  makeEvent({ type: 'formula', at: '2026-03-13T08:00:00Z', data: { ml: 150 } }),
-  makeEvent({ type: 'formula', at: '2026-03-13T16:00:00Z', data: { ml: 150 } }),
+  // local day 2026-03-14: 3 feedings at 120ml each
+  makeEvent({ type: 'formula', at: localISO(2026, 2, 14,  6,  0), data: { ml: 120 } }),
+  makeEvent({ type: 'formula', at: localISO(2026, 2, 14, 10,  0), data: { ml: 120 } }),
+  makeEvent({ type: 'formula', at: localISO(2026, 2, 14, 14,  0), data: { ml: 120 } }),
+  // local day 2026-03-13: 2 feedings at 150ml each
+  makeEvent({ type: 'formula', at: localISO(2026, 2, 13,  8,  0), data: { ml: 150 } }),
+  // boundary-crossing event: local 2026-03-14T01:00 — still Mar 14 in local time
+  // (was a fixed UTC instant that relied on UTC+9 to land on Mar 14; now timezone-agnostic)
+  makeEvent({ type: 'formula', at: localISO(2026, 2, 14,  1,  0), data: { ml: 150 } }),
 ]
 const BREAST_EVENTS: DiaryEvent[] = [
-  makeEvent({ type: 'breast', at: '2026-03-14T08:00:00Z', data: { side: 'L' } }),
+  makeEvent({ type: 'breast', at: localISO(2026, 2, 14,  8,  0), data: { side: 'L' } }),
 ]
 const DIAPER_EVENTS: DiaryEvent[] = [
-  makeEvent({ type: 'pee',  at: '2026-03-14T07:00:00Z', data: {} }),
-  makeEvent({ type: 'poop', at: '2026-03-14T09:00:00Z', data: {} }),
-  makeEvent({ type: 'pee',  at: '2026-03-13T07:00:00Z', data: {} }),
+  makeEvent({ type: 'pee',  at: localISO(2026, 2, 14,  7,  0), data: {} }),
+  makeEvent({ type: 'poop', at: localISO(2026, 2, 14,  9,  0), data: {} }),
+  makeEvent({ type: 'pee',  at: localISO(2026, 2, 13,  7,  0), data: {} }),
 ]
 const SLEEP_EVENTS: DiaryEvent[] = [
-  makeEvent({ type: 'sleep', at: '2026-03-14T20:00:00Z', data: { minutes: 480 } }),
-  makeEvent({ type: 'sleep', at: '2026-03-13T20:00:00Z', data: { minutes: 360 } }),
+  makeEvent({ type: 'sleep', at: localISO(2026, 2, 14, 20,  0), data: { minutes: 480 } }),
+  makeEvent({ type: 'sleep', at: localISO(2026, 2, 13, 20,  0), data: { minutes: 360 } }),
 ]
 const TEMP_EVENTS: DiaryEvent[] = [
-  makeEvent({ type: 'temp', at: '2026-03-14T08:00:00Z', data: { celsius: 37.5 } }),
-  makeEvent({ type: 'temp', at: '2026-03-14T20:00:00Z', data: { celsius: 38.2 } }),
-  makeEvent({ type: 'temp', at: '2026-03-13T08:00:00Z', data: { celsius: 37.0 } }),
+  makeEvent({ type: 'temp', at: localISO(2026, 2, 14,  8,  0), data: { celsius: 37.5 } }),
+  makeEvent({ type: 'temp', at: localISO(2026, 2, 14, 20,  0), data: { celsius: 38.2 } }),
+  makeEvent({ type: 'temp', at: localISO(2026, 2, 13,  8,  0), data: { celsius: 37.0 } }),
 ]
 const GROWTH_EVENTS: DiaryEvent[] = [
-  makeEvent({ type: 'growth', at: '2026-02-15T10:00:00Z', data: { weightKg: 6.8, heightCm: 65.0 } }),
-  makeEvent({ type: 'growth', at: '2026-03-01T10:00:00Z', data: { weightKg: 7.2, heightCm: 66.5 } }),
+  makeEvent({ type: 'growth', at: localISO(2026, 1, 15, 10,  0), data: { weightKg: 6.8, heightCm: 65.0 } }),
+  makeEvent({ type: 'growth', at: localISO(2026, 2,  1, 10,  0), data: { weightKg: 7.2, heightCm: 66.5 } }),
 ]
 
 const ALL_EVENTS: DiaryEvent[] = [
@@ -153,11 +163,13 @@ describe('buildReportModel', () => {
   it('last7DayRows aggregates formula and diaper counts per day', () => {
     const model = buildReportModel(ALL_EVENTS, SETTINGS, NOW)
     const mar14 = model.last7DayRows.find(r => r.date === '2026-03-14')!
-    // In UTC+9 timezone, 2026-03-13T16:00Z = 2026-03-14T01:00+09:00
-    // So 4 formula + 1 breast = 5 feedings, formulaMl = 3*120+150 = 510
-    expect(mar14.feedingCount).toBe(5)   // 4 formula + 1 breast (tz-adjusted)
+    // Timestamps constructed via localISO(2026, 2, 14, ...) so they land on
+    // local Mar 14 in any runner timezone (no UTC+9 assumption).
+    // 4 formula (06:00, 10:00, 14:00, 01:00) + 1 breast (08:00) = 5 feedings
+    // formulaMl = 3*120 + 150 = 510
+    expect(mar14.feedingCount).toBe(5)   // 4 formula + 1 breast
     expect(mar14.diaperCount).toBe(2)    // 1 pee + 1 poop
-    expect(mar14.formulaMl).toBe(510)    // 3*120 + 150 (tz-adjusted)
+    expect(mar14.formulaMl).toBe(510)    // 3*120 + 150
   })
 
   it('returns empty/null gracefully with no settings', () => {
