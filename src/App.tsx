@@ -108,6 +108,25 @@ function AppInner() {
   // when the calendar date rolls over (no manual reload required).
   useMidnightRefresh()
 
+  // RC1/RC2: Re-fetch settings from disk on window focus and every 60s while visible.
+  // This ensures external writes (other renderer windows, sync engine adopt paths)
+  // are adopted into the store before any subsequent renderer save — preventing
+  // a stale in-memory snapshot from overwriting a newer disk value.
+  const loadSettings = useAppStore(s => s.loadSettings)
+  useEffect(() => {
+    const onFocus = () => { void loadSettings() }
+    window.addEventListener('focus', onFocus)
+
+    const intervalId = setInterval(() => {
+      if (!document.hidden) void loadSettings()
+    }, 60_000)
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      clearInterval(intervalId)
+    }
+  }, [loadSettings])
+
   useEffect(() => {
     // Guard for non-Electron environments (e.g. vite preview, tests)
     if (typeof window !== 'undefined') {
