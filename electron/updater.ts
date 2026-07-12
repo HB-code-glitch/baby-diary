@@ -1,58 +1,94 @@
 /**
- * Auto-update module for Baby Diary.
+ * Auto-update lifecycle for Baby Diary.
  *
- * Rules:
- *  - Only active when app.isPackaged AND env BABYDIARY_TEST_USERDATA is NOT set.
- *  - Windows: autoDownload true → IPC update:ready when download complete.
- *  - macOS: autoDownload false → IPC update:available with download URL (browser-open).
- *  - All errors are swallowed (updates must never crash or annoy).
- *
- * Check schedule:
- *  - Immediate: 15 s after app ready (startup trigger).
- *  - Interval: every 30 minutes (periodic trigger).
- *  - Focus: when main window gains focus, throttled to at most once per 10 minutes.
- *  - In-flight guard: concurrent checks are skipped (electron-updater tolerates
- *    them, but explicit guard makes log lines unambiguous).
+ * Packaged Windows NSIS installs update automatically. Portable Windows and
+ * macOS builds notify the renderer and send the user to the releases page.
+ * Development and E2E runs keep the updater disabled.
  */
 
-import { app, ipcMain, shell, BrowserWindow } from 'electron'
+import { app, ipcMain, shell, type BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
+import { getUpdateMode } from './updatePolicy'
 
 const DOWNLOAD_PAGE = 'https://github.com/HB-code-glitch/baby-diary-releases/releases/latest'
+const INTERVAL_MS = 30 * 60 * 1_000
+const FOCUS_THROTTLE = 10 * 60 * 1_000
 
-const INTERVAL_MS    = 30 * 60 * 1_000   // 30 minutes
-const FOCUS_THROTTLE = 10 * 60 * 1_000   // 10 minutes
+type CheckTrigger = 'start' | 'interval' | 'focus'
+type ManualUpdatePayload = { version: string; url: string }
 
-/** True only in production, non-E2E runs. */
-function shouldCheck(): boolean {
-  return app.isPackaged && !process.env.BABYDIARY_TEST_USERDATA
-}
-
-function getWindow(): BrowserWindow | null {
-  const wins = BrowserWindow.getAllWindows()
-  return wins.length > 0 ? wins[0] : null
-}
-
-// P22: Module-level timer handles so stopUpdater() can cancel them.
 let _initialTimeout: ReturnType<typeof setTimeout> | null = null
 let _intervalHandle: ReturnType<typeof setInterval> | null = null
-
-// In-flight guard: true while a checkForUpdates() promise is pending.
 let _checking = false
-
-// Timestamp of the last focus-triggered check (ms since epoch, 0 = never).
 let _lastFocusCheck = 0
+let _runCheck: ((trigger: CheckTrigger) => void) | null = null
 
-// Focus listener reference so we can remove it in stopUpdater().
-let _focusListener: (() => void) | null = null
 let _focusWindow: BrowserWindow | null = null
+let _rendererReady = false
+let _rendererReadyListener: (() => void) | null = null
+let _windowClosedListener: (() => void) | null = null
+let _pendingManualUpdate: ManualUpdatePayload | null = null
 
-/** P22: Returns true if the periodic updater interval is currently active. */
+function detachUpdaterWindow(): void {
+  if (_focusWindow !== null) {
+    _focusWindow.removeListener('focus', onWindowFocus)
+    if (_rendererReadyListener !== null) {
+      _focusWindow.webContents.removeListener('did-finish-load', _rendererReadyListener)
+    }
+    if (_windowClosedListener !== null) {
+      _focusWindow.removeListener('closed', _windowClosedListener)
+    }
+  }
+
+  _focusWindow = null
+  _rendererReady = false
+  _rendererReadyListener = null
+  _windowClosedListener = null
+}
+
+function sendPendingManualUpdate(): void {
+  if (_focusWindow === null || !_rendererReady || _pendingManualUpdate === null) return
+  _focusWindow.webContents.send('update:available', _pendingManualUpdate)
+  _pendingManualUpdate = null
+}
+
+function onWindowFocus(): void {
+  if (_runCheck === null) return
+
+  const now = Date.now()
+  if (now - _lastFocusCheck < FOCUS_THROTTLE) {
+    console.log('[Updater] focus check throttled - skipping')
+    return
+  }
+
+  _lastFocusCheck = now
+  _runCheck('focus')
+}
+
+/** Attach updater behavior to the current main window. */
+export function attachUpdaterWindow(window: BrowserWindow): void {
+  detachUpdaterWindow()
+  _focusWindow = window
+  window.on('focus', onWindowFocus)
+
+  _rendererReadyListener = () => {
+    if (_focusWindow !== window) return
+    _rendererReady = true
+    sendPendingManualUpdate()
+  }
+  window.webContents.once('did-finish-load', _rendererReadyListener)
+
+  _windowClosedListener = () => {
+    if (_focusWindow === window) detachUpdaterWindow()
+  }
+  window.once('closed', _windowClosedListener)
+}
+
 export function isUpdaterRunning(): boolean {
   return _intervalHandle !== null
 }
 
-/** P22: Stop the updater timers (idempotent — safe when never started). */
+/** Stop updater timers and detach the active main window. */
 export function stopUpdater(): void {
   if (_initialTimeout !== null) {
     clearTimeout(_initialTimeout)
@@ -62,60 +98,54 @@ export function stopUpdater(): void {
     clearInterval(_intervalHandle)
     _intervalHandle = null
   }
-  if (_focusListener !== null && _focusWindow !== null) {
-    _focusWindow.removeListener('focus', _focusListener)
-    _focusListener = null
-    _focusWindow = null
-  }
+
+  detachUpdaterWindow()
+  _runCheck = null
+  _checking = false
+  _lastFocusCheck = 0
+  _pendingManualUpdate = null
 }
 
 export function setupUpdater(): void {
-  if (!shouldCheck()) return
-  // P22: Idempotent — skip if already running (e.g. after activate re-call).
-  if (_intervalHandle !== null) return
+  const mode = getUpdateMode(
+    app.isPackaged,
+    Boolean(process.env.BABYDIARY_TEST_USERDATA),
+    process.platform,
+    process.env.PORTABLE_EXECUTABLE_FILE,
+  )
+  if (mode === 'off' || _intervalHandle !== null) return
 
-  const isMac = process.platform === 'darwin'
-
-  // Configure feed
   autoUpdater.setFeedURL({
     provider: 'github',
     owner: 'HB-code-glitch',
     repo: 'baby-diary-releases',
   } as Parameters<typeof autoUpdater.setFeedURL>[0])
 
-  autoUpdater.autoDownload = !isMac   // Windows: auto; macOS: manual (unsigned)
+  autoUpdater.autoDownload = mode === 'auto'
   autoUpdater.autoInstallOnAppQuit = false
 
-  // ── Event handlers ──────────────────────────────────────────────────────────
-
   autoUpdater.on('update-available', (info) => {
-    const win = getWindow()
-    if (!win) return
-    if (isMac) {
-      // macOS unsigned: only notify, let user download from browser
-      win.webContents.send('update:available', {
-        version: info.version,
-        url: DOWNLOAD_PAGE,
-      })
+    if (mode !== 'manual') return
+
+    const payload = { version: info.version, url: DOWNLOAD_PAGE }
+    if (_focusWindow !== null && _rendererReady) {
+      _focusWindow.webContents.send('update:available', payload)
+      return
     }
-    // Windows: autoDownload is true — wait for update-downloaded
+    _pendingManualUpdate = payload
   })
 
   autoUpdater.on('update-downloaded', (info) => {
-    if (isMac) return  // Should not occur (autoDownload=false on mac), but guard anyway
-    const win = getWindow()
-    if (!win) return
-    win.webContents.send('update:ready', { version: info.version })
+    if (mode !== 'auto' || _focusWindow === null || !_rendererReady) return
+    _focusWindow.webContents.send('update:ready', { version: info.version })
   })
 
   autoUpdater.on('error', (err) => {
     console.error('[Updater] error:', err?.message ?? err)
   })
 
-  // ── IPC handlers ─────────────────────────────────────────────────────────────
-
   ipcMain.on('update:install', () => {
-    if (isMac) return  // No quitAndInstall path on mac
+    if (mode !== 'auto') return
     try {
       autoUpdater.quitAndInstall(false, true)
     } catch (err) {
@@ -124,63 +154,26 @@ export function setupUpdater(): void {
   })
 
   ipcMain.on('update:openDownload', () => {
+    if (mode !== 'manual') return
     shell.openExternal(DOWNLOAD_PAGE).catch(err =>
       console.error('[Updater] openExternal error:', err)
     )
   })
 
-  // ── Core check runner ────────────────────────────────────────────────────────
-
-  function runCheck(trigger: 'start' | 'interval' | 'focus'): void {
+  function runCheck(trigger: CheckTrigger): void {
     if (_checking) {
-      console.log(`[Updater] check skipped (in-flight) — trigger: ${trigger}`)
+      console.log(`[Updater] check skipped (in-flight) - trigger: ${trigger}`)
       return
     }
-    console.log(`[Updater] checking for updates — trigger: ${trigger}`)
+
+    console.log(`[Updater] checking for updates - trigger: ${trigger}`)
     _checking = true
     autoUpdater.checkForUpdates()
       .catch(err => console.error('[Updater] checkForUpdates error:', err?.message ?? err))
       .finally(() => { _checking = false })
   }
 
-  // ── Scheduled checks ────────────────────────────────────────────────────────
-
-  // First check: 15 s after ready (app already emitted ready when this runs).
-  // P22: store handle so stopUpdater() can cancel it.
+  _runCheck = runCheck
   _initialTimeout = setTimeout(() => runCheck('start'), 15_000)
-
-  // Subsequent checks: every 30 minutes.
-  // P22: store handle so stopUpdater() can cancel it.
   _intervalHandle = setInterval(() => runCheck('interval'), INTERVAL_MS)
-
-  // ── Focus-triggered check ────────────────────────────────────────────────────
-  // Attach to the main window once it exists.  attachFocusListener() is called
-  // from main.ts after createWindow(), and again from setupUpdater() if the
-  // window already exists at the time setupUpdater() runs (e.g. activate path).
-
-  function onWindowFocus(): void {
-    const now = Date.now()
-    if (now - _lastFocusCheck < FOCUS_THROTTLE) {
-      console.log('[Updater] focus check throttled — skipping')
-      return
-    }
-    _lastFocusCheck = now
-    runCheck('focus')
-  }
-
-  // If a window is already open (activate path), attach immediately.
-  const existingWin = getWindow()
-  if (existingWin) {
-    _focusListener = onWindowFocus
-    _focusWindow = existingWin
-    existingWin.on('focus', onWindowFocus)
-  } else {
-    // Otherwise, wait for the app 'browser-window-created' event to attach.
-    app.once('browser-window-created', (_event, win) => {
-      if (_intervalHandle === null) return  // stopUpdater() was already called
-      _focusListener = onWindowFocus
-      _focusWindow = win
-      win.on('focus', onWindowFocus)
-    })
-  }
 }

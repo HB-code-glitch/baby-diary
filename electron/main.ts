@@ -5,7 +5,7 @@ import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
 import { DiaryEvent, AppSettings, ExportFormat, SavePdfResult } from '../shared/types'
-import { setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
+import { attachUpdaterWindow, setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 
@@ -48,6 +48,8 @@ function createWindow(): void {
     title: 'Baby Diary',
     show: false,
   })
+
+  attachUpdaterWindow(mainWindow)
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
@@ -266,7 +268,7 @@ app.whenReady().then(() => {
   backupManager.start()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (mainWindow === null) {
       createWindow()
       // P21: If the backup timer was stopped by window-all-closed (non-darwin
       // doesn't reach here, but on macOS it does), restart it so the 6-hour

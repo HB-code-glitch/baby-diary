@@ -34,26 +34,26 @@ const babyDiaryAPI = {
 
   // ── Auto-update ────────────────────────────────────────────────────────────
 
-  /** Windows: called when installer is downloaded and ready to apply. */
+  /** Automatic mode: called when the installer is downloaded and ready to apply. */
   onUpdateReady: (callback: (payload: { version: string }) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, payload: { version: string }) => callback(payload)
     ipcRenderer.on('update:ready', handler)
     return () => ipcRenderer.removeListener('update:ready', handler)
   },
 
-  /** macOS: called when a new version is available on GitHub Releases. */
+  /** Manual mode: called when a new version is available on GitHub Releases. */
   onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, payload: { version: string; url: string }) => callback(payload)
     ipcRenderer.on('update:available', handler)
     return () => ipcRenderer.removeListener('update:available', handler)
   },
 
-  /** Windows: quit and apply the downloaded update. */
+  /** Automatic mode: quit and apply the downloaded update. */
   installUpdate: (): void => {
     ipcRenderer.send('update:install')
   },
 
-  /** macOS: open the GitHub Releases page in the default browser. */
+  /** Manual mode: open the GitHub Releases page in the default browser. */
   openUpdateDownload: (): void => {
     ipcRenderer.send('update:openDownload')
   },
