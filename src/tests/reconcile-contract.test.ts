@@ -67,8 +67,8 @@ describe('syncEngine exported sentinel constants', () => {
  */
 describe('reconcile decision logic (pure)', () => {
   it('adopts cloud familyId when cloud differs from local', () => {
-    const cloudFamilyId = 'fam-cloud'
-    const localFamilyId = 'fam-local'
+    const cloudFamilyId: string = 'fam-cloud'
+    const localFamilyId: string = 'fam-local'
     const shouldAdopt = !!(cloudFamilyId && cloudFamilyId !== localFamilyId)
     expect(shouldAdopt).toBe(true)
   })
@@ -93,8 +93,8 @@ describe('reconcile decision logic (pure)', () => {
   })
 
   it('family-gone path triggers on permission-denied error code', () => {
-    const permissionDeniedCode = 'permission-denied'
-    const otherCode = 'not-found'
+    const permissionDeniedCode: string = 'permission-denied'
+    const otherCode: string = 'not-found'
     expect(permissionDeniedCode === 'permission-denied').toBe(true)
     expect(otherCode === 'permission-denied').toBe(false)
   })

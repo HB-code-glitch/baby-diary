@@ -5,10 +5,13 @@
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "build": "tsc -p tsconfig.node.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test",
+    "build": "npm run typecheck && tsc -p tsconfig.node.json && vite build",
     "build:win": "npm run build && electron-builder --win && powershell -ExecutionPolicy Bypass -File scripts/update-shortcut.ps1",
     "build:mac": "npm run build && electron-builder --mac",
     "test": "vitest run",
+    "test:e2e": "node scripts/mac-e2e.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

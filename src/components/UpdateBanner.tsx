@@ -1,8 +1,8 @@
 /**
  * UpdateBanner — glass pill shown bottom-right when an update is available.
  *
- * Windows: "update:ready"   → shows version + [지금 재시작] [나중에]
- * macOS:   "update:available" → shows version + [다운로드] [나중에]
+ * Automatic mode: "update:ready" shows version + [지금 재시작] [나중에].
+ * Manual mode: "update:available" shows version + [다운로드] [나중에].
  *
  * [나중에] dismisses until next app start.
  * z-index below FeverModal (z-50 in project convention), above toasts.
@@ -14,6 +14,7 @@ import React, { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ipc } from '../lib/ipc'
 
+// `ready` is automatic (NSIS); `available` is manual (portable Windows/macOS).
 type BannerState =
   | { type: 'idle' }
   | { type: 'ready'; version: string }
@@ -33,6 +34,7 @@ export function UpdateBanner() {
       setState({ type: 'available', version, url })
       setVisible(true)
     })
+    ipc.updateRendererReady()
     return () => {
       offReady()
       offAvailable()

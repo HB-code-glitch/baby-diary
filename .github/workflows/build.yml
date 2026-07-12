@@ -36,14 +36,41 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      # renderer + main only (no DMG/installer needed for E2E)
       - run: npm run build
+      # Launch the unpacked universal app, not the development Electron entrypoint.
+      - run: npx electron-builder --mac --dir --universal --publish never
       # playwright electron support is built-in — no browser download required
-      - run: node scripts/mac-e2e.mjs
+      - run: npm run test:e2e
+        env:
+          BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mac-e2e-screenshots
+          path: |
+            screenshots/
+            e2e-result.json
+          if-no-files-found: warn
+
+  e2e-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      # Launch the unpacked x64 executable, not the development Electron entrypoint.
+      - run: npx electron-builder --win --dir --x64 --publish never
+      - run: npm run test:e2e
+        env:
+          BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-e2e-screenshots
           path: |
             screenshots/
             e2e-result.json

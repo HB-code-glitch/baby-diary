@@ -14,6 +14,7 @@ declare global {
       // Auto-update
       onUpdateReady: (callback: (payload: { version: string }) => void) => () => void
       onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void) => () => void
+      updateRendererReady: () => void
       installUpdate: () => void
       openUpdateDownload: () => void
       savePdf: () => Promise<SavePdfResult>
@@ -139,6 +140,7 @@ const mockBabyDiary: Window['babyDiary'] = {
   // Auto-update — no-ops in browser/mock mode
   onUpdateReady: (_callback: (payload: { version: string }) => void) => () => {},
   onUpdateAvailable: (_callback: (payload: { version: string; url: string }) => void) => () => {},
+  updateRendererReady: () => {},
   installUpdate: () => {},
   openUpdateDownload: () => {},
 
@@ -207,6 +209,7 @@ export const ipc = {
     getApi().onUpdateReady(callback),
   onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void): (() => void) =>
     getApi().onUpdateAvailable(callback),
+  updateRendererReady: (): void => getApi().updateRendererReady(),
   installUpdate:       (): void => getApi().installUpdate(),
   openUpdateDownload:  (): void => getApi().openUpdateDownload(),
   savePdf: (): Promise<SavePdfResult> => getApi().savePdf(),

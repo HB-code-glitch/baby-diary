@@ -69,12 +69,16 @@ function daysAgo(n) {
 async function main() {
   // Fresh isolated userData so we never touch real data
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bd-e2e-'))
+  const executablePath = process.env.BABYDIARY_E2E_EXECUTABLE
   console.log(`userData: ${tmpDir}`)
+  console.log(`executable: ${executablePath ?? 'project Electron'}`)
 
   let app
   try {
+    if (executablePath && !fs.existsSync(executablePath)) throw new Error(`E2E executable not found: ${executablePath}`)
+
     app = await electron.launch({
-      args: ['.'],
+      ...(executablePath ? { executablePath } : { args: ['.'] }),
       cwd: ROOT,
       env: {
         ...process.env,
@@ -350,15 +354,15 @@ async function main() {
     // Locate the BreastfeedingGuideCard button (contains 모유수유 간격 or 授乳間隔)
     const bfGuideBtn = await page.locator('button[aria-expanded]').filter({ hasText: /모유수유 간격|授乳間隔/ }).first()
     const bfGuideBtnVisible = await bfGuideBtn.isVisible().catch(() => false)
+    assert(bfGuideBtnVisible, 'breastfeeding guide accordion button found')
     if (bfGuideBtnVisible) {
       const isExpanded = await bfGuideBtn.getAttribute('aria-expanded')
       if (isExpanded !== 'true') {
         await bfGuideBtn.click()
         await page.waitForTimeout(400)
       }
-      assert(true, 'breastfeeding guide accordion expanded')
-    } else {
-      console.log('  (breastfeeding guide button not found — skipping expand)')
+      const isExpandedAfterClick = await bfGuideBtn.getAttribute('aria-expanded')
+      assert(isExpandedAfterClick === 'true', 'breastfeeding guide accordion expanded')
     }
     await shot(page, 'bf-guide')
 
@@ -413,6 +417,7 @@ async function main() {
     // The sleep button has label from quickBtn.sleep or quickBtn.sleepRunning
     const sleepBtn = await page.locator('[data-tour="quick-row"] button').filter({ hasText: /수면|ねんね/ }).first()
     const sleepBtnVisible = await sleepBtn.isVisible().catch(() => false)
+    assert(sleepBtnVisible, 'sleep button found')
     if (sleepBtnVisible) {
       await sleepBtn.click()
       await page.waitForTimeout(600)
@@ -433,21 +438,19 @@ async function main() {
 
       // SleepConfirmPopover should appear
       const confirmPopover = await page.$('.sleep-confirm-popover, .popover')
+      assert(!!confirmPopover, 'sleep confirm popover found')
       if (confirmPopover) {
         await shot(page, 'sleep-confirm-popover')
         // Click 기록 / record button
         const recordBtn = await page.$('.sleep-confirm-popover .btn-primary, .popover .btn-primary')
+        assert(!!recordBtn, 'sleep confirm record button found')
         if (recordBtn) {
           await recordBtn.click()
           await page.waitForTimeout(400)
           assert(true, 'sleep confirm recorded successfully')
         }
-      } else {
-        console.log('  (sleep confirm popover not found — continuing)')
       }
       await shot(page, 'sleep-recorded')
-    } else {
-      console.log('  sleep button not found — skipping sleep flow')
     }
 
     // ---------------------------------------------------------------------------
@@ -455,8 +458,9 @@ async function main() {
     // ---------------------------------------------------------------------------
     console.log('\n[5b] Growth entry via QuickMenu')
 
-    // Open QuickMenu (... button)
-    const moreBtn = await page.$('.quick-more-btn, button:has-text("…"), [aria-label*="more"]')
+    // Open QuickMenu (+ 기록 button)
+    const moreBtn = await page.$('.btn-add-record')
+    assert(!!moreBtn, 'QuickMenu add-record button found')
     if (moreBtn) {
       await moreBtn.click()
       await page.waitForTimeout(400)
@@ -464,6 +468,7 @@ async function main() {
       // Click 성장 in QuickMenu
       const growthItem = await page.locator('.quick-menu-item, [role="menuitem"]').filter({ hasText: /성장|成長/ }).first()
       const growthVisible = await growthItem.isVisible().catch(() => false)
+      assert(growthVisible, 'growth menu item found')
       if (growthVisible) {
         await growthItem.click()
         await page.waitForSelector('.popover', { timeout: 5000 })
@@ -471,23 +476,22 @@ async function main() {
 
         // Fill weight
         const weightInput = await page.$('.popover input[inputmode="decimal"], .popover input[type="number"]')
+        assert(!!weightInput, 'growth weight input found')
         if (weightInput) {
           await weightInput.fill('7.5')
         }
         // Record
         const growthRecordBtn = await page.$('.popover .btn-primary')
+        assert(!!growthRecordBtn, 'growth record button found')
         if (growthRecordBtn) {
           await growthRecordBtn.click()
           await page.waitForTimeout(400)
           assert(true, 'growth event recorded via QuickMenu')
         }
       } else {
-        console.log('  growth menu item not found — skipping')
         // Close menu if open
         await page.keyboard.press('Escape')
       }
-    } else {
-      console.log('  QuickMenu more button not found — skipping growth flow')
     }
 
     // ---------------------------------------------------------------------------
@@ -515,6 +519,7 @@ async function main() {
     // Open diary editor — try multiple selectors (label varies by language)
     const diaryWriteBtn = await page.locator('button').filter({ hasText: /일기 쓰기|日記を書く/ }).first()
     const diaryBtnVisible = await diaryWriteBtn.isVisible().catch(() => false)
+    assert(diaryBtnVisible, 'diary write button found')
     if (diaryBtnVisible) {
       await diaryWriteBtn.click()
       await page.waitForSelector('textarea', { timeout: 5000 })
@@ -525,6 +530,7 @@ async function main() {
       // Save button inside the diary editor modal
       const saveBtn = await page.locator('button').filter({ hasText: /저장|保存/ }).first()
       const saveBtnVisible = await saveBtn.isVisible().catch(() => false)
+      assert(saveBtnVisible, 'diary save button found')
       if (saveBtnVisible) await saveBtn.click()
       await page.waitForTimeout(800)
     }
@@ -540,6 +546,7 @@ async function main() {
 
     const writeBtn = await page.locator('button').filter({ hasText: /편지 쓰기|手紙を書く/ }).first()
     const writeBtnVisible = await writeBtn.isVisible().catch(() => false)
+    assert(writeBtnVisible, 'message write button found')
     if (writeBtnVisible) {
       await writeBtn.click()
       await page.waitForSelector('textarea', { timeout: 5000 })
@@ -549,6 +556,7 @@ async function main() {
 
       const sendBtn = await page.locator('button').filter({ hasText: /보내기|送る/ }).first()
       const sendBtnVisible = await sendBtn.isVisible().catch(() => false)
+      assert(sendBtnVisible, 'message send button found')
       if (sendBtnVisible) await sendBtn.click()
       await page.waitForTimeout(800)
     }
@@ -593,6 +601,10 @@ async function main() {
     const dataTheme = await page.$eval('html', el => el.getAttribute('data-theme'))
     assert(dataTheme === 'dark', `dark theme applied (data-theme=${dataTheme})`)
 
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    failures.push(`Fatal error: ${message}`)
+    console.error('[E2E fatal]', err)
   } finally {
     // ---------------------------------------------------------------------------
     // Teardown + report
@@ -632,11 +644,11 @@ async function main() {
     }
     console.log('========================================\n')
 
-    process.exit(failures.length > 0 ? 1 : 0)
+    process.exitCode = failures.length > 0 ? 1 : 0
   }
 }
 
 main().catch(err => {
   console.error('[E2E fatal]', err)
-  process.exit(1)
+  process.exitCode = 1
 })
