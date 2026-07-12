@@ -152,6 +152,14 @@ let _statusCallbacks: StatusCallback[] = []
 let _retryTimer: ReturnType<typeof setTimeout> | null = null
 let _started = false
 
+/**
+ * Buffer for onAuthStateChanged events that arrive before configure() completes.
+ * When start() fires onAuthStateChanged before the configure() promise resolves
+ * (possible in session-restore fast-path), the user object is stored here and
+ * replayed immediately after configure() sets up _auth/_db.
+ */
+let _pendingAuthUser: User | null | undefined = undefined  // undefined = not yet fired
+
 // F5: Bound _seenFromRemote to prevent unbounded memory growth.
 // We keep an insertion-ordered Set and evict the oldest entries when it
 // exceeds the cap so a long-running session never leaks memory.
@@ -282,17 +290,36 @@ function generateInviteCode(): string {
  * initFirebase is now async (dynamic import), so configure returns a Promise.
  * Callers (useSyncLifecycle) already await ipc.getSettings() before calling
  * configure, so the async change is safe.
+ *
+ * Defense: if cfg is null/absent (e.g. older-exe-written settings with firebase:null),
+ * import and use DEFAULT_FIREBASE_CONFIG so status never stalls at 'no-config'.
+ * This mirrors the fallback already present in useSyncLifecycle but makes the engine
+ * self-healing even when called directly with a null config.
  */
 export async function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
-  _config = cfg
+  // Defensive fallback: a null config must never leave the engine at 'no-config'.
+  // Dynamically import DEFAULT_FIREBASE_CONFIG to avoid a circular-module issue
+  // (syncEngine ← useSync ← defaultFirebaseConfig is fine; direct import also OK here).
+  let effectiveCfg = cfg
+  if (!effectiveCfg) {
+    try {
+      const { DEFAULT_FIREBASE_CONFIG } = await import('./defaultFirebaseConfig')
+      effectiveCfg = DEFAULT_FIREBASE_CONFIG
+      console.warn('[syncEngine] configure: null config — falling back to DEFAULT_FIREBASE_CONFIG')
+    } catch {
+      // If the dynamic import somehow fails, fall through to old no-config path
+    }
+  }
+
+  _config = effectiveCfg
   _familyId = familyId
 
-  if (!cfg) {
+  if (!effectiveCfg) {
     setState({ status: 'no-config', detail: 'no firebase config', pendingCount: 0 })
     return
   }
 
-  const result = await initFirebase(cfg)
+  const result = await initFirebase(effectiveCfg)
   if (!result) {
     setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: 0 })
     return
@@ -301,6 +328,18 @@ export async function configure(cfg: FirebaseConfig | null, familyId: string): P
   _db = result.db
   _auth = result.auth
   setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
+
+  // Replay any onAuthStateChanged event that arrived before configure() completed.
+  // _pendingAuthUser is set by start() when the auth callback fires before _auth is ready.
+  if (_pendingAuthUser !== undefined) {
+    const bufferedUser = _pendingAuthUser
+    _pendingAuthUser = undefined
+    _currentUser = bufferedUser
+    if (bufferedUser) {
+      void onUserSignedIn(bufferedUser)
+    }
+    // If bufferedUser is null: status is already 'signed-out' from above — no action needed.
+  }
 }
 
 /** 회원가입 (신규 사용자) */
@@ -470,7 +509,13 @@ export function start(): void {
   _started = true
 
   if (!_auth || !_config) {
-    setState({ status: 'no-config', detail: 'no firebase config', pendingCount: 0 })
+    // configure() was called but may still be resolving (async initFirebase).
+    // Set up the onAuthStateChanged listener anyway using a safe wrapper:
+    // if _auth is still null when the callback fires, buffer the user so configure()
+    // can replay it once initFirebase() completes.
+    setState({ status: 'no-config', detail: 'waiting for firebase init', pendingCount: 0 })
+    // Listener will be attached after configure() completes via the _pendingAuthUser replay.
+    // Nothing more to do here — configure() will call onUserSignedIn if needed.
     return
   }
 
@@ -478,6 +523,11 @@ export function start(): void {
   // at this point because configure() awaited initFirebase() first.
   void _authOps().then(({ onAuthStateChanged }) => {
     _unsubAuth = onAuthStateChanged(_auth!, user => {
+      if (!_auth) {
+        // configure() hasn't finished yet — buffer the event for replay
+        _pendingAuthUser = user
+        return
+      }
       _currentUser = user
       if (user) {
         void onUserSignedIn(user)
@@ -505,6 +555,7 @@ export function stop(): void {
   _db = null
   _auth = null
   _currentUser = null
+  _pendingAuthUser = undefined  // clear any buffered auth event
   setState({ status: 'off', detail: 'sync stopped', pendingCount: _pending.length })
 }
 

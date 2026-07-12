@@ -17,6 +17,31 @@ const DEFAULT_SETTINGS: AppSettings = {
   firebase: null,
 }
 
+/** Strip UTF-8 BOM (EF BB BF) that old Windows tools sometimes prepend to JSON files. */
+function stripBom(s: string): string {
+  return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s
+}
+
+/** Attempt to parse a JSON string into AppSettings after stripping BOM. Returns null on failure. */
+function tryParse(raw: string): AppSettings | null {
+  try {
+    return JSON.parse(stripBom(raw)) as AppSettings
+  } catch {
+    return null
+  }
+}
+
+/** Merge a raw parsed object into a validated AppSettings using DEFAULT_SETTINGS as fallback. */
+function mergeDefaults(parsed: AppSettings): AppSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...parsed,
+    baby:    { ...DEFAULT_SETTINGS.baby,    ...(parsed.baby    ?? {}) },
+    profile: { ...DEFAULT_SETTINGS.profile, ...(parsed.profile ?? {}) },
+    firebase: parsed.firebase ?? DEFAULT_SETTINGS.firebase,
+  }
+}
+
 export class SettingsStore {
   private settingsPath: string
   private settings: AppSettings = { ...DEFAULT_SETTINGS }
@@ -27,25 +52,79 @@ export class SettingsStore {
   }
 
   private load(): void {
-    try {
-      if (fs.existsSync(this.settingsPath)) {
-        const raw = fs.readFileSync(this.settingsPath, 'utf-8')
-        const parsed = JSON.parse(raw)
-        // P10: deep-merge nested objects so partial baby/profile JSON (e.g. from
-        // an older version that didn't have every field) never silently yields
-        // undefined sub-fields. Top-level spread is kept for unknown future keys.
-        this.settings = {
-          ...DEFAULT_SETTINGS,
-          ...parsed,
-          baby:    { ...DEFAULT_SETTINGS.baby,    ...(parsed.baby    ?? {}) },
-          profile: { ...DEFAULT_SETTINGS.profile, ...(parsed.profile ?? {}) },
-          firebase: parsed.firebase ?? DEFAULT_SETTINGS.firebase,
-        }
-      }
-    } catch (err) {
-      console.error('[Settings] Failed to load settings, using defaults:', err)
-      this.settings = { ...DEFAULT_SETTINGS }
+    if (!fs.existsSync(this.settingsPath)) return
+
+    const raw = (() => {
+      try { return fs.readFileSync(this.settingsPath, 'utf-8') } catch { return null }
+    })()
+    if (raw === null) return
+
+    const parsed = tryParse(raw)
+    if (parsed !== null) {
+      // P10: deep-merge nested objects so partial baby/profile JSON (e.g. from
+      // an older version that didn't have every field) never silently yields
+      // undefined sub-fields. Top-level spread is kept for unknown future keys.
+      this.settings = mergeDefaults(parsed)
+      return
     }
+
+    // ── Primary file is corrupt ──────────────────────────────────────────────
+    // Write a timestamped .bak copy so we can diagnose the corruption later.
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    const bakPath = this.settingsPath + `.corrupt-${ts}.bak`
+    try {
+      fs.copyFileSync(this.settingsPath, bakPath)
+      console.error(`[Settings] Corrupt settings.json — saved backup to ${bakPath}`)
+    } catch (bakErr) {
+      console.error('[Settings] Could not write corrupt-settings backup:', bakErr)
+    }
+
+    // ── Try latest snapshot from userData/backups/*/settings.json ────────────
+    const backupsDir = path.join(path.dirname(this.settingsPath), 'backups')
+    const restored = this._tryRestoreFromBackups(backupsDir)
+    if (restored !== null) {
+      console.error('[Settings] Restored settings from backup snapshot.')
+      this.settings = restored
+      return
+    }
+
+    // ── Nothing could be parsed — use hard defaults ──────────────────────────
+    console.error('[Settings] No parseable backup found — falling back to DEFAULT_SETTINGS.')
+    this.settings = { ...DEFAULT_SETTINGS }
+  }
+
+  /** Scan backups dir, try each settings.json newest-first, return first parseable AppSettings. */
+  private _tryRestoreFromBackups(backupsDir: string): AppSettings | null {
+    if (!fs.existsSync(backupsDir)) return null
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(backupsDir, { withFileTypes: true })
+    } catch {
+      return null
+    }
+
+    // Sort snapshot dirs newest-first by name (ISO-timestamp dirs sort correctly lexicographically)
+    const dirs = entries
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .sort()
+      .reverse()
+
+    for (const dir of dirs) {
+      const candidate = path.join(backupsDir, dir, 'settings.json')
+      try {
+        if (!fs.existsSync(candidate)) continue
+        const raw = fs.readFileSync(candidate, 'utf-8')
+        const parsed = tryParse(raw)
+        if (parsed !== null) {
+          console.error(`[Settings] Restored from backup snapshot: ${candidate}`)
+          return mergeDefaults(parsed)
+        }
+      } catch {
+        // corrupt backup entry — continue to next
+      }
+    }
+    return null
   }
 
   get(): AppSettings {

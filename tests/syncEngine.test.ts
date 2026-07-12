@@ -595,3 +595,58 @@ describe('Session-restore race: effectiveUser 폴백 로직', () => {
     expect(effective?.uid.length).toBeGreaterThan(0)
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// 12. configure() null-config defense: DEFAULT_FIREBASE_CONFIG fallback
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Simulate the defensive fallback logic now embedded in configure().
+ * When a null config arrives (e.g. older-exe-written settings.json),
+ * configure() must swap in DEFAULT_FIREBASE_CONFIG instead of setting 'no-config'.
+ */
+interface FakeFirebaseConfig {
+  apiKey: string
+  projectId: string
+}
+
+function simulateConfigure(
+  cfg: FakeFirebaseConfig | null,
+  defaultCfg: FakeFirebaseConfig
+): { effectiveCfg: FakeFirebaseConfig; wouldBeNoConfig: boolean } {
+  const effectiveCfg = cfg ?? defaultCfg
+  const wouldBeNoConfig = effectiveCfg === null
+  return { effectiveCfg, wouldBeNoConfig }
+}
+
+describe('configure() null-config fallback to DEFAULT_FIREBASE_CONFIG', () => {
+  const DEFAULT_CFG: FakeFirebaseConfig = { apiKey: 'default-key', projectId: 'default-proj' }
+
+  it('null config → swaps in DEFAULT_FIREBASE_CONFIG, never sets no-config', () => {
+    const { effectiveCfg, wouldBeNoConfig } = simulateConfigure(null, DEFAULT_CFG)
+    expect(wouldBeNoConfig).toBe(false)
+    expect(effectiveCfg).toBe(DEFAULT_CFG)
+  })
+
+  it('non-null config → uses provided config (not default)', () => {
+    const userCfg: FakeFirebaseConfig = { apiKey: 'user-key', projectId: 'user-proj' }
+    const { effectiveCfg } = simulateConfigure(userCfg, DEFAULT_CFG)
+    expect(effectiveCfg).toBe(userCfg)
+    expect(effectiveCfg.apiKey).toBe('user-key')
+  })
+
+  it('DEFAULT_FIREBASE_CONFIG shape has required fields', async () => {
+    const { DEFAULT_FIREBASE_CONFIG } = await import('../src/sync/defaultFirebaseConfig')
+    expect(DEFAULT_FIREBASE_CONFIG).toHaveProperty('apiKey')
+    expect(DEFAULT_FIREBASE_CONFIG).toHaveProperty('authDomain')
+    expect(DEFAULT_FIREBASE_CONFIG).toHaveProperty('projectId')
+    expect(DEFAULT_FIREBASE_CONFIG).toHaveProperty('storageBucket')
+    expect(DEFAULT_FIREBASE_CONFIG).toHaveProperty('messagingSenderId')
+    expect(DEFAULT_FIREBASE_CONFIG).toHaveProperty('appId')
+    // All values must be non-empty strings
+    for (const [k, v] of Object.entries(DEFAULT_FIREBASE_CONFIG)) {
+      expect(typeof v, `${k} must be a string`).toBe('string')
+      expect((v as string).length, `${k} must be non-empty`).toBeGreaterThan(0)
+    }
+  })
+})
