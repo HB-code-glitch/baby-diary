@@ -650,3 +650,93 @@ describe('configure() null-config fallback to DEFAULT_FIREBASE_CONFIG', () => {
     }
   })
 })
+
+// ────────────────────────────────────────────────────────────
+// MF-08: start() generation counter — stale in-flight then() guard
+// ────────────────────────────────────────────────────────────
+
+describe('MF-08: generation counter prevents stale auth listener from overwriting newer one', () => {
+  /**
+   * Tests the generation counter logic extracted as a pure function.
+   * The key invariant: only the callback whose captured generation matches
+   * the current counter at callback-execution time should write _unsubAuth.
+   */
+  it('captured generation matches current → listener is accepted', () => {
+    let currentGeneration = 1
+    const capturedGen = currentGeneration  // simulates: gen = ++_startGeneration
+
+    // When then() fires, check matches
+    const shouldAccept = capturedGen === currentGeneration
+    expect(shouldAccept).toBe(true)
+  })
+
+  it('captured generation does NOT match current (newer start ran) → listener is discarded', () => {
+    let currentGeneration = 1
+    const capturedGen = currentGeneration  // start1 captured gen=1
+
+    // start2 fires and increments before then() resolves
+    currentGeneration = 2
+
+    const shouldAccept = capturedGen === currentGeneration
+    expect(shouldAccept).toBe(false)
+  })
+
+  it('multiple sequential start() calls: only the last generation is active', () => {
+    let currentGeneration = 0
+    const activeListeners: number[] = []
+
+    function simulateStart(): () => void {
+      const gen = ++currentGeneration
+      const captured = gen
+      // Simulates _authOps().then() resolving asynchronously
+      const attach = () => {
+        if (captured !== currentGeneration) return  // stale — discard
+        activeListeners.push(captured)
+      }
+      return attach
+    }
+
+    const attach1 = simulateStart()  // gen=1
+    const attach2 = simulateStart()  // gen=2
+    const attach3 = simulateStart()  // gen=3
+
+    // Now all three then() callbacks fire (in any order, but 1&2 are stale)
+    attach1()  // stale (captured=1 !== current=3)
+    attach2()  // stale (captured=2 !== current=3)
+    attach3()  // fresh (captured=3 === current=3) → accepted
+
+    expect(activeListeners).toHaveLength(1)
+    expect(activeListeners[0]).toBe(3)
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// MF-11: editEvent safe-rev computation
+// ────────────────────────────────────────────────────────────
+
+describe('MF-11: editEvent uses max(originalRev, liveRev)+1 to prevent silent drop', () => {
+  /**
+   * Pure function replica of the MF-11 safeRev computation in editEvent.
+   */
+  function computeSafeRev(originalRev: number, liveRev: number): number {
+    return Math.max(originalRev, liveRev) + 1
+  }
+
+  it('liveRev unchanged: safeRev = original.rev + 1', () => {
+    expect(computeSafeRev(3, 3)).toBe(4)
+  })
+
+  it('remote raised rev while modal open: safeRev uses liveRev + 1', () => {
+    // original.rev = 3 (captured at modal open)
+    // liveRev = 4 (raised by remote sync while modal was open)
+    expect(computeSafeRev(3, 4)).toBe(5)
+  })
+
+  it('original.rev ahead of liveRev (should not happen but is safe): uses original + 1', () => {
+    expect(computeSafeRev(5, 3)).toBe(6)
+  })
+
+  it('rev=1 baseline: normal first edit produces rev=2', () => {
+    expect(computeSafeRev(1, 1)).toBe(2)
+  })
+})

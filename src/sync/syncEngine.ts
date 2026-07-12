@@ -188,6 +188,12 @@ const _seenFromRemote = new BoundedSet()
 
 let _state: SyncState = { status: 'no-config', detail: '', pendingCount: 0 }
 
+/** MF-08: monotonically increasing counter; each start() call increments this.
+ * The then()-callback captures the generation at call time and only writes
+ * _unsubAuth if the current generation still matches — preventing a stale
+ * in-flight then() from overwriting a newer auth listener. */
+let _startGeneration = 0
+
 // ────────────────────────────────────────────────────────────
 // 상태 관리
 // ────────────────────────────────────────────────────────────
@@ -519,9 +525,18 @@ export function start(): void {
     return
   }
 
+  // MF-08: capture generation before the async gap so a stale then() from a
+  // previous start() call cannot overwrite the newer auth listener.
+  const gen = ++_startGeneration
   // onAuthStateChanged is loaded dynamically — firebase chunk already in cache
   // at this point because configure() awaited initFirebase() first.
   void _authOps().then(({ onAuthStateChanged }) => {
+    if (gen !== _startGeneration) {
+      // A newer start() has already run — discard this in-flight listener.
+      return
+    }
+    // Unsubscribe any prior auth listener before attaching the new one.
+    _unsubAuth?.()
     _unsubAuth = onAuthStateChanged(_auth!, user => {
       if (!_auth) {
         // configure() hasn't finished yet — buffer the event for replay
