@@ -294,4 +294,59 @@ describe('EventLog', () => {
     const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim())
     expect(lines).toHaveLength(1)
   })
+
+  // ── MF-07: seenIdRevs prevents re-appending already-present old revisions ──
+
+  it('MF-07: appending an already-present old revision returns duplicate (no re-append)', () => {
+    const id = uuidv4()
+    const now = new Date().toISOString()
+    // Write revisions 1, 2, 3 — index will hold rev=3 as max
+    const e1 = makeEvent({ id, rev: 1, at: now })
+    const e2 = makeEvent({ id, rev: 2, at: now })
+    const e3 = makeEvent({ id, rev: 3, at: now })
+    expect(log.append(e1)).toBe('ok')
+    expect(log.append(e2)).toBe('ok')
+    expect(log.append(e3)).toBe('ok')
+
+    // Now simulate reconcile re-downloading rev=1 and rev=2 (they're missing from index)
+    // These are already on disk — must return 'duplicate', not 'ok'
+    expect(log.append(e1)).toBe('duplicate')
+    expect(log.append(e2)).toBe('duplicate')
+  })
+
+  it('MF-07: re-appending old revisions does not add new lines to JSONL', () => {
+    const id = uuidv4()
+    const now = new Date().toISOString()
+    const e1 = makeEvent({ id, rev: 1, at: now })
+    const e2 = makeEvent({ id, rev: 2, at: now })
+    const e3 = makeEvent({ id, rev: 3, at: now })
+    log.append(e1)
+    log.append(e2)
+    log.append(e3)
+
+    const files = fs.readdirSync(tmpDir)
+    const filePath = path.join(tmpDir, files[0])
+    const linesBefore = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim()).length
+
+    // Simulate reconcile re-appending old revisions
+    log.append(e1)
+    log.append(e2)
+
+    const linesAfter = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim()).length
+    expect(linesAfter).toBe(linesBefore)  // no new lines written
+  })
+
+  it('MF-07: seenIdRevs persists across reload — new EventLog instance also rejects old revs', () => {
+    const id = uuidv4()
+    const now = new Date().toISOString()
+    const e1 = makeEvent({ id, rev: 1, at: now })
+    const e2 = makeEvent({ id, rev: 2, at: now })
+    log.append(e1)
+    log.append(e2)
+
+    // New instance after reload must also reject old revisions
+    const log2 = new EventLog({ dataDir: tmpDir })
+    log2.loadAll()  // warm the index and seenIdRevs
+    expect(log2.append(e1)).toBe('duplicate')
+  })
 })

@@ -27,6 +27,9 @@ export interface EventLogOptions {
 export class EventLog {
   private dataDir: string
   private index: Map<string, DiaryEvent> = new Map()
+  /** MF-07: tracks every id_rev pair physically present on disk to prevent re-appending
+   * older remote revisions on every reconnect (unbounded bloat + Firestore quota burn). */
+  private seenIdRevs: Set<string> = new Set()
   private loaded = false
 
   constructor(options: EventLogOptions) {
@@ -49,6 +52,7 @@ export class EventLog {
   loadAll(): DiaryEvent[] {
     this.ensureDataDir()
     this.index.clear()
+    this.seenIdRevs.clear()
 
     let files: string[] = []
     try {
@@ -85,6 +89,9 @@ export class EventLog {
           }
           continue
         }
+
+        // MF-07: track every id_rev physically on disk
+        this.seenIdRevs.add(`${event.id}_${event.rev}`)
 
         const existing = this.index.get(event.id)
         if (!existing) {
@@ -123,10 +130,15 @@ export class EventLog {
       this.loadAll()
     }
 
+    // MF-07: short-circuit if this exact id_rev is already on disk (prevents
+    // reconcile from re-appending old remote revisions on every reconnect).
+    const idRev = `${event.id}_${event.rev}`
     const existing = this.index.get(event.id)
-    if (existing && existing.rev === event.rev) {
-      // P3: allow a tombstone (deleted:true) to propagate even at the same rev
-      // as a non-deleted local copy — the deletion must win and be written to disk.
+    if (this.seenIdRevs.has(idRev)) {
+      // P3: allow a tombstone to propagate even at the same rev as a non-deleted copy
+      if (!(event.deleted && existing && !existing.deleted)) return 'duplicate'
+    } else if (existing && existing.rev === event.rev) {
+      // identical rev not yet in seenIdRevs (edge: index loaded without disk)
       if (!(event.deleted && !existing.deleted)) return 'duplicate'
     }
 
@@ -178,6 +190,9 @@ export class EventLog {
       console.error('[EventLog] Failed to write event to disk:', err)
       return 'error'
     }
+
+    // MF-07: record this id_rev as seen after successful disk write
+    this.seenIdRevs.add(idRev)
 
     if (!existing || event.rev > existing.rev) {
       this.index.set(event.id, event)
