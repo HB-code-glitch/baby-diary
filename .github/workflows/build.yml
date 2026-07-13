@@ -44,6 +44,10 @@ jobs:
         with:
           node-version: '24.18.0'
           cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
       - run: npm ci
       - run: npm run build
       # Launch the unpacked universal app, not the development Electron entrypoint.
@@ -52,6 +56,10 @@ jobs:
       - run: npm run test:e2e
         env:
           BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary
+      - run: npm run test:e2e:sync
+        timeout-minutes: 12
+        env:
+          BABYDIARY_SYNC_E2E_EXECUTABLE: ${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -69,6 +77,10 @@ jobs:
         with:
           node-version: '24.18.0'
           cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
       - run: npm ci
       - run: npm run build
       # Launch the unpacked x64 executable, not the development Electron entrypoint.
@@ -76,6 +88,10 @@ jobs:
       - run: npm run test:e2e
         env:
           BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
+      - run: npm run test:e2e:sync
+        timeout-minutes: 12
+        env:
+          BABYDIARY_SYNC_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
       - uses: actions/upload-artifact@v4
         if: always()
         with:

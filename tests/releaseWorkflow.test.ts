@@ -11,6 +11,7 @@ interface WorkflowStep {
   'continue-on-error'?: unknown
   env?: Record<string, string>
   with?: Record<string, string | number>
+  'timeout-minutes'?: number
 }
 
 interface WorkflowJob {
@@ -45,11 +46,13 @@ interface PackagedE2ESpec {
   runner: string
   packageCommand: string
   executable: string
+  syncExecutable: string
 }
 
 const workflowSource = readFileSync('.github/workflows/build.yml', 'utf8')
 const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as {
   build?: { publish?: Array<{ provider?: string; releaseType?: string }> }
+  scripts?: Record<string, string>
 }
 // js-yaml v4 uses its YAML 1.2-oriented default schema and rejects duplicate
 // mapping keys. It is declared directly so this CI contract does not rely on a
@@ -83,12 +86,14 @@ const PACKAGED_E2E_SPECS: PackagedE2ESpec[] = [
     runner: 'macos-latest',
     packageCommand: 'npx electron-builder --mac --dir --universal --publish never',
     executable: '${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary',
+    syncExecutable: '${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary',
   },
   {
     jobName: 'e2e-win',
     runner: 'windows-latest',
     packageCommand: 'npx electron-builder --win --dir --x64 --publish never',
     executable: '${{ github.workspace }}/release/win-unpacked/Baby Diary.exe',
+    syncExecutable: '${{ github.workspace }}/release/win-unpacked/Baby Diary.exe',
   },
 ]
 
@@ -108,19 +113,29 @@ function packagedE2EContractErrors(candidate: ReleaseWorkflow, spec: PackagedE2E
     return command == null ? [] : [command]
   })
   const builderCommands = runCommands.filter(command => command.includes('electron-builder'))
-  const e2eCommands = runCommands.filter(command => command.includes('test:e2e'))
+  const e2eCommands = runCommands.filter(command => command === 'npm run test:e2e')
+  const syncE2eCommands = runCommands.filter(command => command === 'npm run test:e2e:sync')
   if (builderCommands.length !== 1 || builderCommands[0] !== spec.packageCommand) {
     errors.push(`packaging must be exactly: ${spec.packageCommand}`)
   }
   if (e2eCommands.length !== 1 || e2eCommands[0] !== 'npm run test:e2e') {
     errors.push('packaged E2E command must be exactly: npm run test:e2e')
   }
+  if (syncE2eCommands.length !== 1) {
+    errors.push('packaged sync E2E command must be exactly: npm run test:e2e:sync')
+  }
 
   const compileIndex = job.steps.findIndex(step => normalizedRun(step) === 'npm run build')
   const packageIndex = job.steps.findIndex(step => normalizedRun(step) === spec.packageCommand)
   const e2eIndex = job.steps.findIndex(step => normalizedRun(step) === 'npm run test:e2e')
-  if (compileIndex < 0 || packageIndex <= compileIndex || e2eIndex <= packageIndex) {
-    errors.push('compile, package, and packaged E2E steps must run in order')
+  const syncE2eIndex = job.steps.findIndex(step => normalizedRun(step) === 'npm run test:e2e:sync')
+  if (
+    compileIndex < 0
+    || packageIndex <= compileIndex
+    || e2eIndex <= packageIndex
+    || syncE2eIndex <= e2eIndex
+  ) {
+    errors.push('compile, package, packaged E2E, and packaged sync E2E steps must run in order')
   }
 
   const expectedEnv = JSON.stringify({ BABYDIARY_E2E_EXECUTABLE: spec.executable })
@@ -132,6 +147,51 @@ function packagedE2EContractErrors(candidate: ReleaseWorkflow, spec: PackagedE2E
   }
   if (e2eIndex >= 0 && Boolean(job.steps[e2eIndex]['continue-on-error'])) {
     errors.push('packaged E2E execution step must not continue on error')
+  }
+
+  const expectedSyncEnv = JSON.stringify({ BABYDIARY_SYNC_E2E_EXECUTABLE: spec.syncExecutable })
+  if (syncE2eIndex < 0 || JSON.stringify(job.steps[syncE2eIndex].env) !== expectedSyncEnv) {
+    errors.push(`BABYDIARY_SYNC_E2E_EXECUTABLE must target: ${spec.syncExecutable}`)
+  }
+  if (syncE2eIndex >= 0 && Object.prototype.hasOwnProperty.call(job.steps[syncE2eIndex], 'if')) {
+    errors.push('packaged sync E2E execution step must not have an if condition')
+  }
+  if (syncE2eIndex >= 0 && Boolean(job.steps[syncE2eIndex]['continue-on-error'])) {
+    errors.push('packaged sync E2E execution step must not continue on error')
+  }
+  if (syncE2eIndex >= 0 && job.steps[syncE2eIndex]['timeout-minutes'] !== 12) {
+    errors.push('packaged sync E2E execution step must have a 12 minute timeout')
+  }
+
+  const javaSteps = job.steps.filter(step => step.uses === 'actions/setup-java@v4')
+  if (javaSteps.length !== 1) {
+    errors.push('packaged sync E2E job must have exactly one Java setup step')
+  } else if (JSON.stringify(javaSteps[0].with) !== JSON.stringify({
+    distribution: 'temurin',
+    'java-version': 21,
+  })) {
+    errors.push('packaged sync E2E job must use Temurin Java 21')
+  }
+  const javaIndex = job.steps.findIndex(step => step.uses === 'actions/setup-java@v4')
+  if (javaIndex < 0 || javaIndex >= syncE2eIndex) {
+    errors.push('Java 21 must be configured before packaged sync E2E')
+  }
+
+  if (Object.prototype.hasOwnProperty.call(job, 'if')) {
+    errors.push('packaged E2E job must not have an if condition')
+  }
+  if (Object.prototype.hasOwnProperty.call(job, 'continue-on-error')) {
+    errors.push('packaged E2E job must not declare continue-on-error')
+  }
+  for (const index of [compileIndex, packageIndex, e2eIndex, syncE2eIndex, javaIndex]) {
+    if (index < 0) continue
+    const step = job.steps[index]
+    if (Object.prototype.hasOwnProperty.call(step, 'if')) {
+      errors.push(`required packaged E2E step ${index} must not have an if condition`)
+    }
+    if (Object.prototype.hasOwnProperty.call(step, 'continue-on-error')) {
+      errors.push(`required packaged E2E step ${index} must not declare continue-on-error`)
+    }
   }
 
   const commandText = runCommands.join('\n')
@@ -414,6 +474,10 @@ describe('release workflow CI gates', () => {
     expect(packagedE2EContractErrors(workflow, spec)).toEqual([])
   })
 
+  it('exposes the packaged sync E2E runner as an exact package script', () => {
+    expect(packageJson.scripts?.['test:e2e:sync']).toBe('node scripts/sync-e2e.mjs')
+  })
+
   it.each([
     {
       label: 'false && packaging no-op',
@@ -422,6 +486,8 @@ describe('release workflow CI gates', () => {
     },
     { label: 'development Electron', from: 'npm run test:e2e', to: 'electron .' },
     { label: 'successful no-op', from: 'npm run test:e2e', to: 'true' },
+    { label: 'sync successful no-op', from: 'npm run test:e2e:sync', to: 'true' },
+    { label: 'sync development Electron', from: 'npm run test:e2e:sync', to: 'npm run dev' },
   ])('rejects $label mutations in packaged E2E', ({ from, to }) => {
     const mutatedSource = workflowSource.replace(from, to)
     expect(mutatedSource).not.toBe(workflowSource)
@@ -432,6 +498,7 @@ describe('release workflow CI gates', () => {
   it.each([
     { label: 'if false', property: '        if: false' },
     { label: 'continue-on-error true', property: '        continue-on-error: true' },
+    { label: 'continue-on-error false', property: '        continue-on-error: false' },
   ])('rejects $label on the packaged E2E execution step', ({ property }) => {
     const mutatedSource = workflowSource.replace(
       /(      - run: npm run test:e2e\r?\n)/,
@@ -460,6 +527,88 @@ describe('release workflow CI gates', () => {
 
     expect(matching.status, matching.stderr).toBe(0)
     expect(mismatched.status).not.toBe(0)
+  })
+
+  it.each([
+    { label: 'if false', property: '        if: false' },
+    { label: 'continue-on-error true', property: '        continue-on-error: true' },
+    { label: 'continue-on-error false', property: '        continue-on-error: false' },
+  ])('rejects $label on the packaged sync E2E execution step', ({ property }) => {
+    const mutatedSource = workflowSource.replace(
+      /(      - run: npm run test:e2e:sync\r?\n)/,
+      `$1${property}\n`,
+    )
+    expect(mutatedSource).not.toBe(workflowSource)
+    const mutatedWorkflow = parseWorkflow(mutatedSource)
+    expect(packagedE2EContractErrors(mutatedWorkflow, PACKAGED_E2E_SPECS[0])).not.toEqual([])
+  })
+
+  it.each([
+    {
+      label: 'missing Java setup',
+      mutate: (candidate: ReleaseWorkflow) => {
+        candidate.jobs['e2e-mac'].steps = candidate.jobs['e2e-mac'].steps
+          .filter(step => step.uses !== 'actions/setup-java@v4')
+      },
+    },
+    {
+      label: 'wrong Java distribution',
+      mutate: (candidate: ReleaseWorkflow) => {
+        const java = candidate.jobs['e2e-mac'].steps.find(step => step.uses === 'actions/setup-java@v4')
+        expect(java).toBeDefined()
+        java!.with = { distribution: 'zulu', 'java-version': 21 }
+      },
+    },
+    {
+      label: 'wrong Java version',
+      mutate: (candidate: ReleaseWorkflow) => {
+        const java = candidate.jobs['e2e-mac'].steps.find(step => step.uses === 'actions/setup-java@v4')
+        expect(java).toBeDefined()
+        java!.with = { distribution: 'temurin', 'java-version': 17 }
+      },
+    },
+    {
+      label: 'sync before normal packaged E2E',
+      mutate: (candidate: ReleaseWorkflow) => {
+        const steps = candidate.jobs['e2e-mac'].steps
+        const normal = steps.findIndex(step => normalizedRun(step) === 'npm run test:e2e')
+        const sync = steps.findIndex(step => normalizedRun(step) === 'npm run test:e2e:sync')
+        ;[steps[normal], steps[sync]] = [steps[sync], steps[normal]]
+      },
+    },
+    {
+      label: 'wrong sync executable',
+      mutate: (candidate: ReleaseWorkflow) => {
+        const sync = candidate.jobs['e2e-mac'].steps
+          .find(step => normalizedRun(step) === 'npm run test:e2e:sync')
+        expect(sync).toBeDefined()
+        sync!.env = { BABYDIARY_SYNC_E2E_EXECUTABLE: './node_modules/electron/dist/electron' }
+      },
+    },
+  ])('rejects $label in the sync release-gate contract', ({ mutate }) => {
+    const candidate = structuredClone(workflow)
+    mutate(candidate)
+    expect(packagedE2EContractErrors(candidate, PACKAGED_E2E_SPECS[0])).not.toEqual([])
+  })
+
+  it.each(PACKAGED_E2E_SPECS)('$jobName rejects conditional or fail-open build, package, Java, and both E2E steps', spec => {
+    const requiredSteps = [
+      (step: WorkflowStep) => step.uses === 'actions/setup-java@v4',
+      (step: WorkflowStep) => normalizedRun(step) === 'npm run build',
+      (step: WorkflowStep) => normalizedRun(step) === spec.packageCommand,
+      (step: WorkflowStep) => normalizedRun(step) === 'npm run test:e2e',
+      (step: WorkflowStep) => normalizedRun(step) === 'npm run test:e2e:sync',
+    ]
+    for (const findStep of requiredSteps) {
+      for (const property of ['if', 'continue-on-error'] as const) {
+        const candidate = structuredClone(workflow)
+        const step = candidate.jobs[spec.jobName].steps.find(findStep)
+        expect(step).toBeDefined()
+        if (property === 'if') step!.if = 'false'
+        else step!['continue-on-error'] = false
+        expect(packagedE2EContractErrors(candidate, spec)).not.toEqual([])
+      }
+    }
   })
 
   it('checks the authenticated external release state before either platform upload', () => {

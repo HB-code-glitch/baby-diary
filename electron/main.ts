@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, session, shell } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import { pathToFileURL } from 'url'
@@ -10,6 +10,7 @@ import { attachUpdaterWindow, setupUpdater, stopUpdater, isUpdaterRunning } from
 import { registerEvidenceExternalLinkIPC } from './evidenceExternalLink'
 import { hardenBrowserWindow } from './windowSecurity'
 import { readFirebaseEmulatorBridge } from './firebaseEmulatorConfig'
+import { createSyncE2EGuard, readSyncE2EGuardConfig } from './syncE2EGuard'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 const rendererEntryPath = path.join(__dirname, '../../dist/index.html')
@@ -30,6 +31,9 @@ if (process.env.BABYDIARY_TEST_USERDATA) {
 // preload cannot import local runtime helpers, so it forwards this value over
 // a fixed IPC channel. Non-isolated production runs always receive null.
 const firebaseEmulatorBridge = readFirebaseEmulatorBridge(process.env)
+const syncE2EGuardConfig = readSyncE2EGuardConfig(process.env, app.getPath('userData'))
+const syncE2EGuard = syncE2EGuardConfig ? createSyncE2EGuard(syncE2EGuardConfig) : null
+const rendererResourceRoot = path.dirname(rendererEntryPath)
 
 // F3: Prevent concurrent instances from writing to the same JSONL files simultaneously.
 // requestSingleInstanceLock() is synchronous and must be called before app is ready.
@@ -62,6 +66,7 @@ function createWindow(): void {
     title: 'Baby Diary',
     show: false,
   })
+  syncE2EGuard?.attachWindowDiagnostics(mainWindow, rendererResourceRoot)
   hardenBrowserWindow(mainWindow, rendererEntryUrl)
 
   attachUpdaterWindow(mainWindow)
@@ -226,6 +231,7 @@ function setupIPC(): void {
         nodeIntegration: false,
       },
     })
+    syncE2EGuard?.attachWindowDiagnostics(printWin, rendererResourceRoot)
     hardenBrowserWindow(printWin, rendererEntryUrl)
 
     try {
@@ -277,6 +283,7 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(() => {
+  syncE2EGuard?.installSessionGuard(session.defaultSession, rendererResourceRoot)
   const userDataPath = app.getPath('userData')
 
   eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })
@@ -303,6 +310,10 @@ app.whenReady().then(() => {
       setupUpdater()
     }
   })
+})
+
+app.on('will-quit', () => {
+  syncE2EGuard?.close()
 })
 
 // P9 + V3: defer quit until backup() has fully settled so a crash mid-backup
