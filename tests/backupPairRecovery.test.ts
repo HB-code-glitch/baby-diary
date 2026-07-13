@@ -202,26 +202,62 @@ function syntheticMaximumJournal(prefix: Buffer): SyntheticMaximumJournal {
 function guardBufferAllocations(
   maximum: number,
   action: () => void,
-): number[] {
-  const sizes: number[] = []
+): Array<{ method: string; size: number }> {
+  const allocations: Array<{ method: string; size: number }> = []
   const originalAlloc = Buffer.alloc
-  const spy = vi.spyOn(Buffer, 'alloc').mockImplementation(((
+  const originalAllocUnsafe = Buffer.allocUnsafe
+  const originalFrom = Buffer.from
+  const originalConcat = Buffer.concat
+  const record = (method: string, size: number): void => {
+    allocations.push({ method, size })
+    if (size > maximum) throw new Error(`oversized Buffer.${method}: ${size}`)
+  }
+  const allocSpy = vi.spyOn(Buffer, 'alloc').mockImplementation(((
     size: number,
     fill?: string | number | Uint8Array,
     encoding?: BufferEncoding,
   ): Buffer => {
-    sizes.push(size)
-    if (size > maximum) throw new Error(`oversized Buffer.alloc: ${size}`)
+    record('alloc', size)
     if (fill === undefined) return originalAlloc(size)
     if (encoding === undefined) return originalAlloc(size, fill)
     return originalAlloc(size, fill as string, encoding)
   }) as typeof Buffer.alloc)
+  const allocUnsafeSpy = vi.spyOn(Buffer, 'allocUnsafe').mockImplementation(((size: number): Buffer => {
+    record('allocUnsafe', size)
+    return originalAllocUnsafe(size)
+  }) as typeof Buffer.allocUnsafe)
+  const fromSpy = vi.spyOn(Buffer, 'from').mockImplementation(((...args: unknown[]): Buffer => {
+    const [value, second, third] = args
+    let size: number
+    if (typeof value === 'string') {
+      size = Buffer.byteLength(value, typeof second === 'string' ? second as BufferEncoding : undefined)
+    } else if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) {
+      const offset = typeof second === 'number' ? second : 0
+      size = typeof third === 'number' ? third : value.byteLength - offset
+    } else {
+      const candidate = value as { byteLength?: number; length?: number }
+      size = candidate?.byteLength ?? candidate?.length ?? 0
+    }
+    record('from', size)
+    return (originalFrom as (...input: unknown[]) => Buffer)(...args)
+  }) as typeof Buffer.from)
+  const concatSpy = vi.spyOn(Buffer, 'concat').mockImplementation(((
+    list: readonly Uint8Array[],
+    totalLength?: number,
+  ): Buffer => {
+    const size = totalLength ?? list.reduce((total, item) => total + item.byteLength, 0)
+    record('concat', size)
+    return originalConcat(list, totalLength)
+  }) as typeof Buffer.concat)
   try {
     action()
   } finally {
-    spy.mockRestore()
+    concatSpy.mockRestore()
+    fromSpy.mockRestore()
+    allocUnsafeSpy.mockRestore()
+    allocSpy.mockRestore()
   }
-  return sizes
+  return allocations
 }
 
 function simulatedPosixOps(): DurableFileOps {
@@ -331,18 +367,18 @@ function prepareMaximumCompletedRestore(
   fixture: SyntheticMaximumJournal
   intentPath: string
   expectedProfileName: string
-  expectedJournalScans: number
+  expectedJournalFiles: number
 } {
   const completed = reachPrimaryVerifiedWindowsRestore(root, index, bootPrefix)
   let expectedProfileName = JSON.parse(fs.readFileSync(path.join(root, 'settings.json'), 'utf8')).profile.name
   if (advanceSettings) {
-    const opened = new SettingsStore(root, {
-      platform: 'win32',
-      startupId: `${bootPrefix}-boot-3`,
-    })
-    const settings = opened.get()
-    settings.profile.name = 'Same-size settings-only advancement'
-    opened.save(settings)
+    const settingsPath = path.join(root, 'settings.json')
+    const before = fs.readFileSync(settingsPath)
+    const settings = JSON.parse(before.toString('utf8')) as AppSettings
+    settings.profile.name = 'Keeper'
+    const after = Buffer.from(JSON.stringify(settings, null, 2), 'utf8')
+    expect(after.byteLength).toBe(before.byteLength)
+    fs.writeFileSync(settingsPath, after)
     expectedProfileName = settings.profile.name
   }
 
@@ -381,7 +417,7 @@ function prepareMaximumCompletedRestore(
     fixture,
     intentPath,
     expectedProfileName,
-    expectedJournalScans: fs.existsSync(stagingPath) ? 3 : 2,
+    expectedJournalFiles: fs.existsSync(stagingPath) ? 3 : 2,
   }
 }
 
@@ -1200,7 +1236,7 @@ describe('verified settings/journal pair recovery', () => {
 
     const rssBefore = process.memoryUsage().rss
     const startedAt = Date.now()
-    let allocations: number[] = []
+    let allocations: Array<{ method: string; size: number }> = []
     expect(() => {
       allocations = guardBufferAllocations(64 * 1024, () => {
         recoverSettingsAndJournalPair(tmpDir, {
@@ -1213,17 +1249,703 @@ describe('verified settings/journal pair recovery', () => {
     const elapsedMs = Date.now() - startedAt
     const rssGrowthDiagnostic = Math.max(0, process.memoryUsage().rss - rssBefore)
 
-    expect(Math.max(...allocations), `RSS growth diagnostic only: ${rssGrowthDiagnostic}`)
+    expect(Math.max(...allocations.map(allocation => allocation.size)), `RSS growth diagnostic only: ${rssGrowthDiagnostic}`)
       .toBeLessThanOrEqual(64 * 1024)
     expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
     expect(readRequests.reduce((total, request) => total + request.length, 0))
-      .toBe(prepared.fixture.size * prepared.expectedJournalScans)
+      .toBe(prepared.fixture.size * prepared.expectedJournalFiles * 2)
     expect(readRequests.filter(request => request.position + request.length === prepared.fixture.size))
-      .toHaveLength(prepared.expectedJournalScans)
+      .toHaveLength(prepared.expectedJournalFiles * 2)
     expect(elapsedMs).toBeLessThan(10_000)
     expect(fs.existsSync(prepared.intentPath)).toBe(false)
     expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).profile.name)
       .toBe(prepared.expectedProfileName)
+  })
+
+  it.each([
+    ['same-inode same-size rewrite', false],
+    ['same-path atomic replacement', true],
+  ])('keeps settings held and rejects a %s during live journal replay', (label, replacePath) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, replacePath ? 205 : 204, `settings-race-${label}`)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const journalIdentity = fs.statSync(journalPath)
+    const beforeJournal = fs.readFileSync(journalPath)
+    const beforeSettings = fs.readFileSync(settingsPath)
+    const changedSettings = JSON.parse(beforeSettings.toString('utf8')) as AppSettings
+    changedSettings.profile.name = 'Keeper'
+    const changedBytes = Buffer.from(JSON.stringify(changedSettings, null, 2), 'utf8')
+    expect(changedBytes.byteLength).toBe(beforeSettings.byteLength)
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+    const temporary = path.join(tmpDir, '.settings-race-replacement')
+    if (replacePath) fs.writeFileSync(temporary, changedBytes)
+
+    let mutated = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!mutated && opened.dev === journalIdentity.dev && opened.ino === journalIdentity.ino) {
+          mutated = true
+          if (replacePath) {
+            fs.renameSync(temporary, settingsPath)
+          } else {
+            const settingsFd = fs.openSync(settingsPath, 'r+')
+            try {
+              expect(fs.writeSync(settingsFd, changedBytes, 0, changedBytes.byteLength, 0))
+                .toBe(changedBytes.byteLength)
+            } finally {
+              fs.closeSync(settingsFd)
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `settings-race-${label}-boot-3`,
+      durableFs,
+    }))
+    expect(mutated).toBe(true)
+    expect(error.message).toMatch(/settings|changed|identity|path/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    for (const [name, bytes] of stagedBefore) {
+      expect(fs.readFileSync(path.join(stagingPath, name))).toEqual(bytes)
+    }
+    expect(fs.readFileSync(settingsPath)).toEqual(
+      replacePath && fs.existsSync(temporary) ? beforeSettings : changedBytes,
+    )
+    expect(fs.readFileSync(journalPath)).toEqual(beforeJournal)
+  })
+
+  it.each([
+    ['same-inode same-size rewrite', false],
+    ['same-path atomic replacement', true],
+  ])('rejects an already-scanned live journal %s', (label, replacePath) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, replacePath ? 207 : 206, `journal-race-${label}`)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const journalIdentity = fs.statSync(journalPath)
+    const beforeSettings = fs.readFileSync(settingsPath)
+    const beforeJournal = fs.readFileSync(journalPath)
+    const changedJournal = Buffer.from(beforeJournal)
+    changedJournal[0] = changedJournal[0] === 0x7b ? 0x5b : 0x7b
+    const replacement = path.join(tmpDir, '.journal-race-replacement')
+    fs.writeFileSync(replacement, replacePath ? beforeJournal : changedJournal)
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+
+    let mutated = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!mutated
+          && opened.dev === journalIdentity.dev
+          && opened.ino === journalIdentity.ino
+          && position !== null
+          && position + count === opened.size) {
+          mutated = true
+          if (replacePath) {
+            fs.renameSync(replacement, journalPath)
+          } else {
+            const journalFd = fs.openSync(journalPath, 'r+')
+            try {
+              expect(fs.writeSync(journalFd, changedJournal, 0, changedJournal.byteLength, 0))
+                .toBe(changedJournal.byteLength)
+            } finally {
+              fs.closeSync(journalFd)
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `journal-race-${label}-boot-3`,
+      durableFs,
+    }))
+    expect(mutated).toBe(true)
+    expect(error.message).toMatch(/journal|changed|identity|path/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    for (const [name, bytes] of stagedBefore) {
+      expect(fs.readFileSync(path.join(stagingPath, name))).toEqual(bytes)
+    }
+    expect(fs.readFileSync(settingsPath)).toEqual(beforeSettings)
+    expect(fs.readFileSync(journalPath)).toEqual(replacePath ? beforeJournal : changedJournal)
+  })
+
+  it.each([
+    ['same-inode rewrite', false],
+    ['atomic path swap', true],
+  ])('rejects a live journal %s during the final held-settings reread', (label, replacePath) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(
+      tmpDir,
+      replacePath ? 223 : 222,
+      `live-held-${replacePath ? 'swap' : 'rewrite'}`,
+    )
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const settingsIdentity = fs.statSync(settingsPath)
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const settingsBefore = fs.readFileSync(settingsPath)
+    const journalBefore = fs.readFileSync(journalPath)
+    const journalAfter = Buffer.from(journalBefore)
+    journalAfter[0] = journalAfter[0] === 0x7b ? 0x5b : 0x7b
+    const replacement = path.join(tmpDir, '.live-held-journal-replacement')
+    if (replacePath) fs.writeFileSync(replacement, journalBefore)
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+
+    let settingsPasses = 0
+    let mutated = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (opened.dev === settingsIdentity.dev
+          && opened.ino === settingsIdentity.ino
+          && position !== null
+          && position + count === opened.size) {
+          settingsPasses += 1
+          if (!mutated && settingsPasses === 2) {
+            mutated = true
+            if (replacePath) {
+              fs.renameSync(replacement, journalPath)
+            } else {
+              const journalFd = fs.openSync(journalPath, 'r+')
+              try {
+                expect(fs.writeSync(journalFd, journalAfter, 0, journalAfter.byteLength, 0))
+                  .toBe(journalAfter.byteLength)
+              } finally {
+                fs.closeSync(journalFd)
+              }
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `live-held-${label.replaceAll(' ', '-')}-boot-3`,
+      durableFs,
+    }))
+    expect(mutated).toBe(true)
+    expect(error.message).toMatch(/journal|changed|identity|path/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    for (const [name, bytes] of stagedBefore) {
+      expect(fs.readFileSync(path.join(stagingPath, name))).toEqual(bytes)
+    }
+    expect(fs.readFileSync(settingsPath)).toEqual(settingsBefore)
+    expect(fs.readFileSync(journalPath)).toEqual(replacePath ? journalBefore : journalAfter)
+  })
+
+  it.each([
+    ['same-inode same-size rewrite', false],
+    ['same-path atomic replacement', true],
+  ])('rejects an already-scanned backup auxiliary file %s', (label, replacePath) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, replacePath ? 209 : 208, `aux-race-${label}`)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+    const dataPath = path.join(tmpDir, 'backups', '2026-07-13_10-20-30', 'data', '2026-07.jsonl')
+    const dataIdentity = fs.statSync(dataPath)
+    const beforeData = fs.readFileSync(dataPath)
+    const changedData = Buffer.from('{"event":null}\n', 'utf8')
+    expect(changedData.byteLength).toBe(beforeData.byteLength)
+    const replacement = path.join(tmpDir, '.aux-race-replacement')
+    fs.writeFileSync(replacement, replacePath ? beforeData : changedData)
+
+    let mutated = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!mutated
+          && opened.dev === dataIdentity.dev
+          && opened.ino === dataIdentity.ino
+          && position !== null
+          && position + count === opened.size) {
+          mutated = true
+          if (replacePath) {
+            fs.renameSync(replacement, dataPath)
+          } else {
+            const dataFd = fs.openSync(dataPath, 'r+')
+            try {
+              expect(fs.writeSync(dataFd, changedData, 0, changedData.byteLength, 0))
+                .toBe(changedData.byteLength)
+            } finally {
+              fs.closeSync(dataFd)
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `aux-race-${label}-boot-3`,
+      durableFs,
+    }))
+    expect(mutated).toBe(true)
+    expect(error.message).toMatch(/backup|changed|checksum|identity|path/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+    expect(fs.readFileSync(dataPath)).toEqual(replacePath ? beforeData : changedData)
+  })
+
+  it.each([
+    ['journal same-inode rewrite', BABY_INFO_JOURNAL_FILE, false],
+    ['journal atomic path swap', BABY_INFO_JOURNAL_FILE, true],
+    ['earlier auxiliary same-inode rewrite', 'data/2026-07.jsonl', false],
+    ['earlier auxiliary atomic path swap', 'data/2026-07.jsonl', true],
+  ])('rejects an already-closed backup %s while a later auxiliary file is scanned', (
+    _label,
+    relativeTarget,
+    replacePath,
+  ) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(
+      tmpDir,
+      relativeTarget === BABY_INFO_JOURNAL_FILE
+        ? (replacePath ? 218 : 216)
+        : (replacePath ? 219 : 217),
+      `closed-proof-${relativeTarget === BABY_INFO_JOURNAL_FILE ? 'journal' : 'data'}-${replacePath ? 'swap' : 'rewrite'}`,
+    )
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const snapshot = path.join(tmpDir, 'backups', '2026-07-13_10-20-30')
+    const laterDataPath = path.join(snapshot, 'data', '2026-08.jsonl')
+    fs.writeFileSync(laterDataPath, '{"later":true}\n')
+    writeManifest(snapshot)
+    const laterIdentity = fs.statSync(laterDataPath)
+    const targetPath = path.join(snapshot, ...relativeTarget.split('/'))
+    const targetBefore = fs.readFileSync(targetPath)
+    const targetAfter = Buffer.from(targetBefore)
+    targetAfter[0] = targetAfter[0] === 0x7b ? 0x5b : 0x7b
+    const replacementPath = path.join(
+      tmpDir,
+      `.closed-proof-${relativeTarget === BABY_INFO_JOURNAL_FILE ? 'journal' : 'data'}-replacement`,
+    )
+    if (replacePath) fs.writeFileSync(replacementPath, targetBefore)
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+
+    let rewritten = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!rewritten && opened.dev === laterIdentity.dev && opened.ino === laterIdentity.ino) {
+          rewritten = true
+          if (replacePath) {
+            fs.renameSync(replacementPath, targetPath)
+          } else {
+            const targetFd = fs.openSync(targetPath, 'r+')
+            try {
+              expect(fs.writeSync(targetFd, targetAfter, 0, targetAfter.byteLength, 0))
+                .toBe(targetAfter.byteLength)
+            } finally {
+              fs.closeSync(targetFd)
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `closed-proof-${relativeTarget === BABY_INFO_JOURNAL_FILE ? 'journal' : 'data'}-${replacePath ? 'swap' : 'rewrite'}-boot-3`,
+      durableFs,
+    }))
+    expect(rewritten).toBe(true)
+    expect(error.message).toMatch(/backup|changed|identity|path/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    for (const [name, bytes] of stagedBefore) {
+      expect(fs.readFileSync(path.join(stagingPath, name))).toEqual(bytes)
+    }
+    expect(fs.readFileSync(targetPath)).toEqual(replacePath ? targetBefore : targetAfter)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+  })
+
+  it('rejects a backup file added after its bounded pre-scan inventory', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 210, 'backup-set-add')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const snapshot = path.join(tmpDir, 'backups', '2026-07-13_10-20-30')
+    const journalPath = path.join(snapshot, BABY_INFO_JOURNAL_FILE)
+    const journalIdentity = fs.statSync(journalPath)
+    const extraPath = path.join(snapshot, 'data', 'scan-extra.jsonl')
+    let added = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!added && opened.dev === journalIdentity.dev && opened.ino === journalIdentity.ino) {
+          added = true
+          fs.writeFileSync(extraPath, '{}\n')
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'backup-set-add-boot-3',
+      durableFs,
+    }))
+    expect(added).toBe(true)
+    expect(error.message).toMatch(/manifest|complete|identity|backup/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    expect(fs.existsSync(extraPath)).toBe(true)
+  })
+
+  it('rejects a same-content backup data-directory replacement during verification', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 211, 'backup-set-swap')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const snapshot = path.join(tmpDir, 'backups', '2026-07-13_10-20-30')
+    const journalPath = path.join(snapshot, BABY_INFO_JOURNAL_FILE)
+    const journalIdentity = fs.statSync(journalPath)
+    const dataDir = path.join(snapshot, 'data')
+    const displacedDataDir = path.join(tmpDir, '.displaced-backup-data')
+    let swapped = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!swapped && opened.dev === journalIdentity.dev && opened.ino === journalIdentity.ino) {
+          swapped = true
+          fs.renameSync(dataDir, displacedDataDir)
+          fs.mkdirSync(dataDir)
+          fs.copyFileSync(
+            path.join(displacedDataDir, '2026-07.jsonl'),
+            path.join(dataDir, '2026-07.jsonl'),
+          )
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'backup-set-swap-boot-3',
+      durableFs,
+    }))
+    expect(swapped).toBe(true)
+    expect(error.message).toMatch(/directory|identity|backup|changed/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+  })
+
+  it('rejects a forensic extra entry before scanning any evidence file', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 212, 'forensic-set-pre')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const forensicJournalPath = path.join(completed.forensicArchive, BABY_INFO_JOURNAL_FILE)
+    const forensicJournalIdentity = fs.statSync(forensicJournalPath)
+    const extraPath = path.join(completed.forensicArchive, 'scan-extra')
+    fs.writeFileSync(extraPath, 'remove during scan')
+    const realFstat = fs.fstatSync.bind(fs)
+    let removed = false
+    const fstatSpy = vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number): fs.Stats => {
+      const opened = realFstat(fd)
+      if (!removed && opened.dev === forensicJournalIdentity.dev && opened.ino === forensicJournalIdentity.ino) {
+        removed = true
+        fs.unlinkSync(extraPath)
+      }
+      return opened
+    }) as typeof fs.fstatSync)
+
+    let error: Error & Record<string, unknown>
+    try {
+      error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+        platform: 'win32',
+        startupId: 'forensic-set-pre-boot-3',
+      }))
+    } finally {
+      fstatSpy.mockRestore()
+    }
+    expect(error!.message).toMatch(/forensic|unexpected|entry/i)
+    expect(removed).toBe(false)
+    expect(fs.existsSync(extraPath)).toBe(true)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+  })
+
+  it.each([
+    ['same-inode rewrite', false],
+    ['atomic path swap', true],
+  ])('rejects a forensic journal %s during the final held-settings reread', (label, replacePath) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(
+      tmpDir,
+      replacePath ? 221 : 220,
+      `forensic-held-${replacePath ? 'swap' : 'rewrite'}`,
+    )
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const forensicSettingsPath = path.join(completed.forensicArchive, 'settings.json')
+    const forensicSettingsIdentity = fs.statSync(forensicSettingsPath)
+    const forensicJournalPath = path.join(completed.forensicArchive, BABY_INFO_JOURNAL_FILE)
+    const journalBefore = fs.readFileSync(forensicJournalPath)
+    const journalAfter = Buffer.from(journalBefore)
+    journalAfter[0] = journalAfter[0] === 0x7b ? 0x5b : 0x7b
+    const replacement = path.join(tmpDir, '.forensic-held-journal-replacement')
+    if (replacePath) fs.writeFileSync(replacement, journalBefore)
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+
+    let settingsPasses = 0
+    let mutated = false
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (opened.dev === forensicSettingsIdentity.dev
+          && opened.ino === forensicSettingsIdentity.ino
+          && position !== null
+          && position + count === opened.size) {
+          settingsPasses += 1
+          if (!mutated && settingsPasses === 2) {
+            mutated = true
+            if (replacePath) {
+              fs.renameSync(replacement, forensicJournalPath)
+            } else {
+              const journalFd = fs.openSync(forensicJournalPath, 'r+')
+              try {
+                expect(fs.writeSync(journalFd, journalAfter, 0, journalAfter.byteLength, 0))
+                  .toBe(journalAfter.byteLength)
+              } finally {
+                fs.closeSync(journalFd)
+              }
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `forensic-held-${label.replaceAll(' ', '-')}-boot-3`,
+      durableFs,
+    }))
+    expect(mutated).toBe(true)
+    expect(error.message).toMatch(/forensic|journal|changed|identity|path/i)
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    for (const [name, bytes] of stagedBefore) {
+      expect(fs.readFileSync(path.join(stagingPath, name))).toEqual(bytes)
+    }
+    expect(fs.readFileSync(forensicJournalPath)).toEqual(replacePath ? journalBefore : journalAfter)
+  })
+
+  it.each([
+    ['matching descriptor', true],
+    ['mismatched descriptor', false],
+  ])('streams a logical 128 MiB forensic journal with a %s using bounded allocations', (
+    _label,
+    descriptorMatches,
+  ) => {
+    const advanced = cleanRestoreAndAdvanceSettings(
+      tmpDir,
+      descriptorMatches ? 213 : 214,
+      descriptorMatches ? 'forensic-max-ok' : 'forensic-max-bad',
+    )
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const snapshotJournalPath = path.join(
+      tmpDir,
+      'backups',
+      '2026-07-13_10-20-30',
+      BABY_INFO_JOURNAL_FILE,
+    )
+    const fixture = syntheticMaximumJournal(fs.readFileSync(snapshotJournalPath))
+    const forensicJournalPath = path.join(advanced.forensicArchive, BABY_INFO_JOURNAL_FILE)
+    fs.truncateSync(forensicJournalPath, fixture.size)
+    const forensicIdentity = fs.statSync(forensicJournalPath)
+
+    const manifestPath = path.join(advanced.forensicArchive, MANIFEST_FILE)
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const journalEntry = manifest.files.find((entry: { path: string }) => (
+      entry.path === BABY_INFO_JOURNAL_FILE
+    ))
+    journalEntry.size = fixture.size
+    journalEntry.sha256 = descriptorMatches ? fixture.sha256 : '0'.repeat(64)
+    const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf8')
+    fs.writeFileSync(manifestPath, manifestBytes)
+
+    const transaction = JSON.parse(advanced.staleIntent.toString('utf8'))
+    transaction.forensicManifest = {
+      size: manifestBytes.byteLength,
+      sha256: digest(manifestBytes),
+    }
+    fs.writeFileSync(intentPath, JSON.stringify(transaction, null, 2), 'utf8')
+
+    const realRead = fs.readSync.bind(fs)
+    const readRequests: Array<{ position: number; length: number }> = []
+    const streamedRead = (
+      fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number | null,
+    ): number => {
+      const opened = fs.fstatSync(fd)
+      if (opened.dev !== forensicIdentity.dev || opened.ino !== forensicIdentity.ino) {
+        return realRead(fd, buffer, offset, length, position)
+      }
+      if (position === null) throw new Error('forensic journal reads must be positional')
+      readRequests.push({ position, length })
+      const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+      return fixture.readInto(target, offset, length, position)
+    }
+    const readSpy = vi.spyOn(fs, 'readSync').mockImplementation(streamedRead as typeof fs.readSync)
+    const streamingFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync: streamedRead,
+    }
+    let caught: Error & Record<string, unknown> | undefined
+    let allocations: Array<{ method: string; size: number }> = []
+    const startedAt = Date.now()
+    try {
+      allocations = guardBufferAllocations(64 * 1024, () => {
+        try {
+          recoverSettingsAndJournalPair(tmpDir, {
+            platform: 'win32',
+            startupId: descriptorMatches ? 'forensic-max-ok-boot-4' : 'forensic-max-bad-boot-4',
+            durableFs: streamingFs,
+          })
+        } catch (error) {
+          caught = error as Error & Record<string, unknown>
+        }
+      })
+    } finally {
+      readSpy.mockRestore()
+    }
+    const elapsedMs = Date.now() - startedAt
+
+    expect(Math.max(...allocations.map(allocation => allocation.size))).toBeLessThanOrEqual(64 * 1024)
+    expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
+    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(fixture.size * 2)
+    expect(readRequests.filter(request => request.position + request.length === fixture.size)).toHaveLength(2)
+    expect(elapsedMs).toBeLessThan(10_000)
+    if (descriptorMatches) {
+      expect(caught).toBeUndefined()
+      expect(fs.existsSync(intentPath)).toBe(false)
+    } else {
+      expect(caught?.message).toMatch(/forensic|checksum/i)
+      expect(fs.existsSync(intentPath)).toBe(true)
+      expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(advanced.liveSettings)
+      expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(advanced.liveJournal)
+    }
+  })
+
+  it('handles real-disk short reads, reaches each bounded EOF twice, and closes every source handle', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 215, 'short-read')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const snapshotPath = path.join(tmpDir, 'backups', '2026-07-13_10-20-30')
+    const snapshotJournalPath = path.join(snapshotPath, BABY_INFO_JOURNAL_FILE)
+    const liveJournalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const stagingJournalPath = path.join(stagingPath, BABY_INFO_JOURNAL_FILE)
+    const prefix = fs.readFileSync(snapshotJournalPath)
+    const importJson = Buffer.from('{"version":1,"type":"import","sourceId":"short-read"}', 'utf8')
+    const line = Buffer.concat([
+      importJson,
+      Buffer.alloc((4 * 1024) - importJson.byteLength - 1, 0x20),
+      Buffer.from('\n'),
+    ], 4 * 1024)
+    const journalBytes = Buffer.concat([prefix, ...Array.from({ length: 64 }, () => line)])
+    for (const target of [snapshotJournalPath, liveJournalPath, stagingJournalPath]) {
+      fs.writeFileSync(target, journalBytes)
+    }
+
+    const manifestPath = path.join(snapshotPath, MANIFEST_FILE)
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const manifestJournal = manifest.files.find((entry: { path: string }) => (
+      entry.path === BABY_INFO_JOURNAL_FILE
+    ))
+    manifestJournal.size = journalBytes.byteLength
+    manifestJournal.sha256 = digest(journalBytes)
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+    const transaction = JSON.parse(completed.staleIntent.toString('utf8'))
+    transaction.journal = { size: journalBytes.byteLength, sha256: digest(journalBytes) }
+    fs.writeFileSync(intentPath, JSON.stringify(transaction, null, 2), 'utf8')
+    fs.writeFileSync(
+      path.join(stagingPath, 'restore-transaction.json'),
+      JSON.stringify(transaction, null, 2),
+      'utf8',
+    )
+
+    const targetIdentities = new Set([snapshotJournalPath, liveJournalPath, stagingJournalPath].map(target => {
+      const stat = fs.statSync(target)
+      return `${stat.dev}:${stat.ino}`
+    }))
+    const reads: Array<{ position: number; requested: number; count: number }> = []
+    const shortReadFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const opened = fs.fstatSync(fd)
+        const isTarget = opened.size === journalBytes.byteLength
+          && targetIdentities.has(`${opened.dev}:${opened.ino}`)
+        const requested = isTarget ? Math.min(length, 4 * 1024) : length
+        const count = fs.readSync(fd, buffer, offset, requested, position)
+        if (isTarget) {
+          if (position === null) throw new Error('short-read verification must be positional')
+          reads.push({ position, requested, count })
+        }
+        return count
+      },
+    }
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'short-read-boot-3',
+      durableFs: shortReadFs,
+    })).not.toThrow()
+    expect(Math.max(...reads.map(read => read.requested))).toBeLessThanOrEqual(4 * 1024)
+    expect(reads.reduce((total, read) => total + read.count, 0)).toBe(journalBytes.byteLength * 6)
+    expect(reads.filter(read => read.position + read.count === journalBytes.byteLength)).toHaveLength(6)
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.existsSync(stagingPath)).toBe(false)
+
+    const reopened = fs.openSync(liveJournalPath, 'r')
+    fs.closeSync(reopened)
+    const moved = `${liveJournalPath}.closed-check`
+    fs.renameSync(liveJournalPath, moved)
+    fs.renameSync(moved, liveJournalPath)
   })
 
   it('streams a valid 128 MiB advancement end-to-end, bounds invalid reads, and rejects one byte over', () => {
@@ -1314,7 +2036,7 @@ describe('verified settings/journal pair recovery', () => {
       Math.max(...readRequests.map(request => request.length)),
       `RSS growth diagnostic only: ${rssGrowth}`,
     ).toBeLessThanOrEqual(64 * 1024)
-    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(maximumJournalBytes)
+    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(maximumJournalBytes * 2)
     expect(readRequests.at(-1)!.position + readRequests.at(-1)!.length).toBe(maximumJournalBytes)
     expect(elapsedMs).toBeLessThan(10_000)
     expect(fs.existsSync(intentPath)).toBe(false)
