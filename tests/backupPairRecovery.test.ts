@@ -18,6 +18,16 @@ const MANIFEST_FILE = 'manifest.json'
 const RESTORE_INTENT_FILE = '.baby-info-pair-restore-v1.json'
 const RESTORE_STAGING_DIR = '.baby-info-pair-restore-v1'
 
+type InstrumentedDurableFileOps = DurableFileOps & {
+  readSync(
+    fd: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): number
+}
+
 function mutation(index: number, familyId = 'family-A'): BabyInfoMutation {
   return {
     mutationId: `40000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
@@ -98,6 +108,23 @@ function writeCorruptLivePair(root: string): { settings: Buffer; journal: Buffer
   fs.writeFileSync(path.join(root, 'settings.json'), settings)
   fs.writeFileSync(path.join(root, BABY_INFO_JOURNAL_FILE), journal)
   return { settings, journal }
+}
+
+function captureThrown(action: () => unknown): Error & Record<string, unknown> {
+  try {
+    action()
+  } catch (error) {
+    if (error instanceof Error) return error as Error & Record<string, unknown>
+    throw new Error(`Expected an Error instance, received ${String(error)}`)
+  }
+  throw new Error('Expected action to throw')
+}
+
+function copyRestoreStaging(source: string, destination: string): void {
+  fs.mkdirSync(destination)
+  for (const name of ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']) {
+    fs.copyFileSync(path.join(source, name), path.join(destination, name))
+  }
 }
 
 function simulatedPosixOps(): DurableFileOps {
@@ -846,6 +873,268 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(advanced.liveJournal)
   })
 
+  it('cleans a reappeared stale intent and staging pair after a valid live advancement', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 144, 'stale-both')
+    const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-stale-stage-'))
+    const stageCopy = path.join(holder, 'stage')
+    try {
+      copyRestoreStaging(path.join(tmpDir, RESTORE_STAGING_DIR), stageCopy)
+      const opened = new SettingsStore(tmpDir, {
+        platform: 'win32',
+        startupId: 'stale-both-boot-3',
+      })
+      const changed = opened.get()
+      changed.profile.name = 'Valid advancement with both stale artifacts'
+      opened.save(changed)
+      const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+      const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+      fs.writeFileSync(path.join(tmpDir, RESTORE_INTENT_FILE), completed.staleIntent)
+      copyRestoreStaging(stageCopy, path.join(tmpDir, RESTORE_STAGING_DIR))
+
+      const nextBoot = new SettingsStore(tmpDir, {
+        platform: 'win32',
+        startupId: 'stale-both-boot-4',
+      })
+      expect(nextBoot.get().profile.name).toBe('Valid advancement with both stale artifacts')
+      expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+      expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+      expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+      expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+    } finally {
+      fs.rmSync(holder, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a real journal append with its matching settings projection as restored lineage', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 145, 'lineage-append')
+    const opened = new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-append-boot-3',
+    })
+    const restoredJournalSize = fs.statSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE)).size
+    opened.commitBabyInfo({
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'Valid lineage descendant',
+      babyBirthdate: '2026-05-05',
+    })
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+    expect(liveJournal.byteLength).toBeGreaterThan(restoredJournalSize)
+
+    fs.writeFileSync(path.join(tmpDir, RESTORE_INTENT_FILE), completed.staleIntent)
+    const nextBoot = new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-append-boot-4',
+    })
+
+    expect(nextBoot.get().baby).toMatchObject({
+      name: 'Valid lineage descendant',
+      birthdate: '2026-05-05',
+    })
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+  })
+
+  it('rejects a live journal shorter than the restored lineage without overwriting it', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 146, 'lineage-short')
+    new SettingsStore(tmpDir, { platform: 'win32', startupId: 'lineage-short-boot-3' })
+    const intent = JSON.parse(completed.staleIntent.toString('utf8'))
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const shorter = fs.readFileSync(journalPath).subarray(0, intent.journal.size - 1)
+    fs.writeFileSync(journalPath, shorter)
+    fs.writeFileSync(path.join(tmpDir, RESTORE_INTENT_FILE), completed.staleIntent)
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+
+    const error = captureThrown(() => new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-short-boot-4',
+    }))
+    expect(error.message).toMatch(/lineage/i)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(journalPath)).toEqual(shorter)
+  })
+
+  it.each([
+    ['same-size', [mutation(202, 'family-B')]],
+    ['longer', [mutation(202, 'family-B'), mutation(203, 'family-B')]],
+  ])('rejects a valid %s journal whose prefix diverges from the restored lineage', (label, mutations) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 201, `lineage-${label}`)
+    new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: `lineage-${label}-boot-3`,
+    })
+    const intent = JSON.parse(completed.staleIntent.toString('utf8'))
+    const unrelatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-lineage-unrelated-'))
+    try {
+      const unrelated = writeSnapshot(unrelatedRoot, '2026-07-13_10-20-30', mutations)
+      if (label === 'same-size') expect(unrelated.journal.byteLength).toBe(intent.journal.size)
+      else expect(unrelated.journal.byteLength).toBeGreaterThan(intent.journal.size)
+      fs.copyFileSync(path.join(unrelated.snapshot, 'settings.json'), path.join(tmpDir, 'settings.json'))
+      fs.copyFileSync(
+        path.join(unrelated.snapshot, BABY_INFO_JOURNAL_FILE),
+        path.join(tmpDir, BABY_INFO_JOURNAL_FILE),
+      )
+      fs.writeFileSync(path.join(tmpDir, RESTORE_INTENT_FILE), completed.staleIntent)
+      const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+      const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+      const error = captureThrown(() => new SettingsStore(tmpDir, {
+        platform: 'win32',
+        startupId: `lineage-${label}-boot-4`,
+      }))
+      expect(error.message).toMatch(/lineage/i)
+      expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
+      expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+      expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+    } finally {
+      fs.rmSync(unrelatedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a bounded torn final suffix under normal journal replay policy', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 147, 'lineage-torn')
+    new SettingsStore(tmpDir, { platform: 'win32', startupId: 'lineage-torn-boot-3' })
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    fs.appendFileSync(journalPath, '{"version":1')
+    fs.writeFileSync(path.join(tmpDir, RESTORE_INTENT_FILE), completed.staleIntent)
+    const tornJournal = fs.readFileSync(journalPath)
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+
+    const nextBoot = new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-torn-boot-4',
+    })
+    expect(nextBoot.get().baby.name).toBe('Snapshot 147')
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(journalPath)).toEqual(tornJournal)
+  })
+
+  it('streams a valid 128 MiB advancement end-to-end, bounds invalid reads, and rejects one byte over', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 148, 'lineage-boundary')
+    new SettingsStore(tmpDir, { platform: 'win32', startupId: 'lineage-boundary-boot-3' })
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const maximumJournalBytes = 128 * 1024 * 1024
+    const restoredPrefix = fs.readFileSync(journalPath)
+    expect(restoredPrefix.at(-1)).toBe(0x0a)
+    const importJson = Buffer.from('{"version":1,"type":"import","sourceId":"boundary-fill"}', 'utf8')
+    const makeImportLine = (size: number): Buffer => {
+      if (size < importJson.byteLength + 1 || size > 64 * 1024) {
+        throw new Error(`invalid synthetic import line size: ${size}`)
+      }
+      return Buffer.concat([
+        importJson,
+        Buffer.alloc(size - importJson.byteLength - 1, 0x20),
+        Buffer.from('\n'),
+      ], size)
+    }
+    const fullLine = makeImportLine(64 * 1024)
+    const tailBytes = maximumJournalBytes - restoredPrefix.byteLength
+    const fullLineCount = Math.floor(tailBytes / fullLine.byteLength)
+    const finalLineSize = tailBytes - (fullLineCount * fullLine.byteLength)
+    expect(finalLineSize).toBeGreaterThanOrEqual(importJson.byteLength + 1)
+    const finalLine = makeImportLine(finalLineSize)
+    const fullLineRegionBytes = fullLineCount * fullLine.byteLength
+
+    fs.writeFileSync(intentPath, completed.staleIntent)
+    fs.truncateSync(journalPath, maximumJournalBytes)
+    const readRequests: Array<{ position: number; length: number }> = []
+    const streamingFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        if (position === null) throw new Error('live advancement reads must be positional')
+        readRequests.push({ position, length })
+        const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+        let sourcePosition = position
+        let targetOffset = offset
+        let remaining = length
+        while (remaining > 0) {
+          if (sourcePosition < restoredPrefix.byteLength) {
+            const count = Math.min(remaining, restoredPrefix.byteLength - sourcePosition)
+            restoredPrefix.copy(target, targetOffset, sourcePosition, sourcePosition + count)
+            sourcePosition += count
+            targetOffset += count
+            remaining -= count
+            continue
+          }
+
+          const tailPosition = sourcePosition - restoredPrefix.byteLength
+          if (tailPosition < fullLineRegionBytes) {
+            const lineOffset = tailPosition % fullLine.byteLength
+            const count = Math.min(remaining, fullLine.byteLength - lineOffset)
+            fullLine.copy(target, targetOffset, lineOffset, lineOffset + count)
+            sourcePosition += count
+            targetOffset += count
+            remaining -= count
+            continue
+          }
+
+          const finalOffset = tailPosition - fullLineRegionBytes
+          const count = Math.min(remaining, finalLine.byteLength - finalOffset)
+          finalLine.copy(target, targetOffset, finalOffset, finalOffset + count)
+          sourcePosition += count
+          targetOffset += count
+          remaining -= count
+        }
+        return length
+      },
+    }
+
+    const rssBefore = process.memoryUsage().rss
+    const startedAt = Date.now()
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-boundary-boot-4',
+      durableFs: streamingFs,
+    })).not.toThrow()
+    const elapsedMs = Date.now() - startedAt
+    const rssGrowth = Math.max(0, process.memoryUsage().rss - rssBefore)
+    expect(readRequests.length).toBeGreaterThan(0)
+    expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
+    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(maximumJournalBytes)
+    expect(readRequests.at(-1)!.position + readRequests.at(-1)!.length).toBe(maximumJournalBytes)
+    expect(elapsedMs).toBeLessThan(10_000)
+    expect(rssGrowth).toBeLessThan(96 * 1024 * 1024)
+    expect(fs.existsSync(intentPath)).toBe(false)
+
+    fs.writeFileSync(intentPath, completed.staleIntent)
+    const invalidReadRequests: Array<{ position: number; length: number }> = []
+    const actualStreamingFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        if (position === null) throw new Error('live advancement reads must be positional')
+        invalidReadRequests.push({ position, length })
+        return fs.readSync(fd, buffer, offset, length, position)
+      },
+    }
+    const atBoundary = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-boundary-invalid-boot-4',
+      durableFs: actualStreamingFs,
+    }))
+    expect(atBoundary.message).toMatch(/journal record exceeds its size bound/i)
+    expect(atBoundary.message).not.toMatch(/backup file exceeds its size bound/i)
+    expect(Math.max(...invalidReadRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
+    expect(invalidReadRequests.reduce((total, request) => total + request.length, 0))
+      .toBeLessThanOrEqual(128 * 1024)
+    const invalidReadsAtBoundary = invalidReadRequests.length
+
+    fs.truncateSync(journalPath, maximumJournalBytes + 1)
+    const overBoundary = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'lineage-boundary-boot-5',
+      durableFs: actualStreamingFs,
+    }))
+    expect(overBoundary.message).toMatch(/exceeds its size bound/i)
+    expect(invalidReadRequests).toHaveLength(invalidReadsAtBoundary)
+    expect(fs.existsSync(intentPath)).toBe(true)
+  })
+
   it.each([
     ['missing settings', 135, (root: string) => fs.unlinkSync(path.join(root, 'settings.json'))],
     ['missing journal', 136, (root: string) => fs.unlinkSync(path.join(root, BABY_INFO_JOURNAL_FILE))],
@@ -896,10 +1185,19 @@ describe('verified settings/journal pair recovery', () => {
     forged.snapshotId = 'forged-snapshot-identity'
     fs.writeFileSync(intentPath, JSON.stringify(forged, null, 2))
 
-    expect(() => new SettingsStore(tmpDir, {
+    const error = captureThrown(() => new SettingsStore(tmpDir, {
       platform: 'win32',
       startupId: 'stale-identity-boot-4',
-    })).toThrow(/transaction identity|verified backup|snapshot/i)
+    }))
+    expect(error.message).toMatch(/transaction identity|verified backup|snapshot/i)
+    expect(error).toMatchObject({
+      restartRequired: false,
+      primaryUntouched: false,
+      restoreApplied: true,
+      recoveryFollowUpRequired: true,
+      localDataModified: true,
+      originalsPreserved: false,
+    })
     expect(fs.existsSync(intentPath)).toBe(true)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(advanced.liveSettings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(advanced.liveJournal)
@@ -953,10 +1251,19 @@ describe('verified settings/journal pair recovery', () => {
     const liveSettings = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath) : null
     const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
 
-    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
       platform: 'win32',
       startupId: `${_case}-boot-3`,
-    })).toThrow(/live settings\/journal pair|does not match|settings\/journal/i)
+    }))
+    expect(error.message).toMatch(/live settings\/journal pair|does not match|settings\/journal|lineage/i)
+    expect(error).toMatchObject({
+      restartRequired: false,
+      primaryUntouched: false,
+      restoreApplied: true,
+      recoveryFollowUpRequired: true,
+      localDataModified: true,
+      originalsPreserved: true,
+    })
     expect(fs.existsSync(intentPath)).toBe(true)
     expect(fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath) : null).toEqual(liveSettings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
@@ -981,10 +1288,19 @@ describe('verified settings/journal pair recovery', () => {
     const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
     const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
 
-    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
       platform: 'win32',
       startupId: 'forensic-gone-boot-3',
-    })).toThrow(/forensic|checksum/i)
+    }))
+    expect(error.message).toMatch(/forensic|checksum/i)
+    expect(error).toMatchObject({
+      restartRequired: false,
+      primaryUntouched: false,
+      restoreApplied: true,
+      recoveryFollowUpRequired: true,
+      localDataModified: true,
+      originalsPreserved: false,
+    })
     expect(fs.existsSync(intentPath)).toBe(true)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
@@ -1237,6 +1553,37 @@ describe('verified settings/journal pair recovery', () => {
     expect(directorySyncs).toBeGreaterThan(0)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+  })
+
+  it('recovers production POSIX orphan staging after intent deletion and a cleanup crash', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(149)])
+    writeCorruptLivePair(tmpDir)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const posixOps = simulatedPosixOps()
+    let failAfterIntentDeletion = true
+    const durableFs: DurableFileOps = {
+      ...posixOps,
+      unlinkSync(target) {
+        posixOps.unlinkSync(target)
+        if (failAfterIntentDeletion
+          && path.resolve(String(target)) === path.resolve(path.join(tmpDir, RESTORE_INTENT_FILE))) {
+          failAfterIntentDeletion = false
+          throw new Error('simulated POSIX crash after intent deletion')
+        }
+      },
+    }
+
+    expect(() => new SettingsStore(tmpDir, { platform: 'linux', durableFs }))
+      .toThrow(/simulated POSIX crash after intent deletion/i)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+
+    expect(() => new SettingsStore(tmpDir, { platform: 'linux', durableFs })).not.toThrow()
+    expect(fs.existsSync(stagingPath)).toBe(false)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(
+      fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
+    )
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(snapshot.journal)
   })
 
   it('fails closed when a surviving restore intent has lost its staging directory', () => {

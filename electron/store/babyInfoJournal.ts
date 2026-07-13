@@ -37,6 +37,10 @@ import {
 import { OrderedStringSet } from './orderedStringSet'
 
 export const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
+// The strict schema's largest bounded text fields serialize well below this;
+// the headroom permits ordinary JSON escaping without allowing one line to
+// defeat chunk-bounded replay.
+export const MAX_BABY_INFO_JOURNAL_RECORD_BYTES = 64 * 1024
 const MAX_PAGE_SIZE = 500
 const MAX_IMPORT_ID_BYTES = 512
 
@@ -48,6 +52,11 @@ export class BabyInfoStorageUncertainError extends Error {
     super('Baby-info storage durability is uncertain; restart before reading cloud work or writing again.')
     this.name = 'BabyInfoStorageUncertainError'
   }
+}
+
+export interface BabyInfoJournalChunkReplay {
+  push(chunk: Uint8Array): void
+  finish(): BabyInfoJournal
 }
 
 function newestArchiveOrderKey(archive: BabyInfoUnlinkedArchive): string {
@@ -152,6 +161,64 @@ export class BabyInfoJournal {
     this.load()
   }
 
+  /**
+   * Replays a journal without retaining its whole byte representation. The
+   * final unterminated JSON fragment follows normal startup semantics: it is
+   * ignored as a torn tail, while a valid unterminated record is applied.
+   */
+  static createChunkReplay(
+    options: { allowTornFinal?: boolean } = {},
+  ): BabyInfoJournalChunkReplay {
+    const journal = new BabyInfoJournal('', { strict: true, sourceBuffer: Buffer.alloc(0) })
+    const allowTornFinal = options.allowTornFinal ?? false
+    let residual = Buffer.alloc(0)
+    let absoluteOffset = 0
+    let recordOffset = 0
+
+    return {
+      push(source: Uint8Array): void {
+        const chunk = Buffer.from(source.buffer, source.byteOffset, source.byteLength)
+        let cursor = 0
+        while (cursor < chunk.byteLength) {
+          const newline = chunk.indexOf(0x0a, cursor)
+          if (newline < 0) {
+            const tail = chunk.subarray(cursor)
+            if (residual.byteLength + tail.byteLength > MAX_BABY_INFO_JOURNAL_RECORD_BYTES) {
+              throw new Error(`baby info journal is corrupt at byte ${recordOffset}: journal record exceeds its size bound`)
+            }
+            residual = residual.byteLength === 0
+              ? Buffer.from(tail)
+              : Buffer.concat([residual, tail], residual.byteLength + tail.byteLength)
+            absoluteOffset += tail.byteLength
+            break
+          }
+
+          const segment = chunk.subarray(cursor, newline)
+          const recordLength = residual.byteLength + segment.byteLength
+          if (recordLength > MAX_BABY_INFO_JOURNAL_RECORD_BYTES) {
+            throw new Error(`baby info journal is corrupt at byte ${recordOffset}: journal record exceeds its size bound`)
+          }
+          const record = residual.byteLength === 0
+            ? segment
+            : Buffer.concat([residual, segment], recordLength)
+          journal.applyReplayLine(record, recordOffset, false)
+          residual = Buffer.alloc(0)
+          absoluteOffset += segment.byteLength + 1
+          recordOffset = absoluteOffset
+          cursor = newline + 1
+        }
+      },
+      finish(): BabyInfoJournal {
+        if (residual.byteLength > 0) {
+          const result = journal.applyReplayLine(residual, recordOffset, allowTornFinal)
+          if (result === 'torn') journal.tornOffset = recordOffset
+          else journal.needsSeparator = true
+        }
+        return journal
+      },
+    }
+  }
+
   private resetIndexes(): void {
     this.mutationsByKey.clear()
     this.families.clear()
@@ -171,6 +238,32 @@ export class BabyInfoJournal {
     if (this.readOnlyBuffer) throw new Error('buffer-backed baby info journal is read-only')
   }
 
+  private applyReplayLine(
+    bytes: Uint8Array,
+    offset: number,
+    allowTornJson: boolean,
+  ): 'empty' | 'applied' | 'torn' {
+    const raw = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8')
+    if (raw.length === 0) return 'empty'
+
+    let candidate: unknown
+    try {
+      candidate = JSON.parse(raw)
+    } catch {
+      if (allowTornJson) return 'torn'
+      throw new Error(`baby info journal is corrupt at byte ${offset}`)
+    }
+
+    try {
+      this.applyRecord(this.parseRecord(candidate))
+    } catch (error) {
+      throw new Error(
+        `baby info journal is corrupt at byte ${offset}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    return 'applied'
+  }
+
   private load(sourceBuffer?: Buffer): void {
     if (sourceBuffer === undefined && !fs.existsSync(this.journalPath)) return
     const content = sourceBuffer ?? fs.readFileSync(this.journalPath)
@@ -179,29 +272,21 @@ export class BabyInfoJournal {
       const newline = content.indexOf(0x0a, offset)
       const terminated = newline >= 0
       const end = terminated ? newline : content.byteLength
-      const raw = content.subarray(offset, end).toString('utf8')
-      if (raw.length === 0) {
+      if (end - offset > MAX_BABY_INFO_JOURNAL_RECORD_BYTES) {
+        throw new Error(`baby info journal is corrupt at byte ${offset}: journal record exceeds its size bound`)
+      }
+      const result = this.applyReplayLine(
+        content.subarray(offset, end),
+        offset,
+        !this.strictReplay && !terminated && end === content.byteLength,
+      )
+      if (result === 'empty') {
         offset = terminated ? end + 1 : end
         continue
       }
-
-      let candidate: unknown
-      try {
-        candidate = JSON.parse(raw)
-      } catch {
-        if (!this.strictReplay && !terminated && end === content.byteLength) {
-          this.tornOffset = offset
-          return
-        }
-        throw new Error(`baby info journal is corrupt at byte ${offset}`)
-      }
-
-      try {
-        this.applyRecord(this.parseRecord(candidate))
-      } catch (error) {
-        throw new Error(
-          `baby info journal is corrupt at byte ${offset}: ${error instanceof Error ? error.message : String(error)}`,
-        )
+      if (result === 'torn') {
+        this.tornOffset = offset
+        return
       }
       offset = terminated ? end + 1 : end
       if (!terminated) this.needsSeparator = true

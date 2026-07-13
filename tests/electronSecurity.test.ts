@@ -436,6 +436,36 @@ describe('Electron BrowserWindow security boundary', () => {
     expect(MockBrowserWindow.instances).toHaveLength(0)
   })
 
+  it('reports primary-verified follow-up damage without promising a restart will repair it', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        restartRequired: false,
+        restoreApplied: true,
+        recoveryFollowUpRequired: true,
+        localDataModified: true,
+        primaryUntouched: false,
+        originalsPreserved: true,
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    const message = electron.dialog.showErrorBox.mock.calls[0][1]
+    expect(message).toMatch(/previously verified restore was applied/i)
+    expect(message).toContain('복구 트랜잭션')
+    expect(message).toContain('다시 시작하는 것만으로는')
+    expect(message).toContain('復旧トランザクション')
+    expect(message).toContain('再起動するだけでは')
+    expect(message).not.toMatch(/Restart Baby Diary|stopped before overwrite/i)
+    expect(electron.app.exit).toHaveBeenCalledWith(1)
+    expect(MockBrowserWindow.instances).toHaveLength(0)
+  })
+
   it('admits a durable local archive-only mutation in startup copy', async () => {
     settingsStoreMocks.construct.mockImplementationOnce(() => {
       throw Object.assign(new Error('redacted'), {

@@ -66,6 +66,7 @@ type StartupRecoveryEvidence = {
   originalsPreserved?: unknown
   restartRequired?: unknown
   restoreApplied?: unknown
+  recoveryFollowUpRequired?: unknown
   primaryUntouched?: unknown
   localDataModified?: unknown
   archiveEvidence?: { archiveId?: unknown; durable?: unknown }
@@ -88,6 +89,12 @@ function startupFailureMessage(error: unknown, recoveryRequired: boolean): strin
     && restartRequired
     && evidence.restoreApplied === true
   const primaryUntouched = recoveryRequired && evidence.primaryUntouched === true
+  const recoveryFollowUpRequired = recoveryRequired
+    && evidence.recoveryFollowUpRequired === true
+    && evidence.restoreApplied === true
+    && evidence.localDataModified === true
+    && !restartRequired
+    && !primaryUntouched
   const durableLocalArchive = recoveryRequired
     && evidence.localDataModified === true
     && evidence.archiveEvidence?.durable === true
@@ -120,6 +127,13 @@ function startupFailureMessage(error: unknown, recoveryRequired: boolean): strin
       'A verified settings and baby journal pair was applied locally. Baby Diary did not open the app UI. Restart Baby Diary once more so an independent startup can verify the restored pair. Cloud synchronization was not started in this launch.',
       '검증된 설정 및 아기 기록 쌍이 로컬에 적용되었습니다. 앱 화면은 열리지 않았습니다. 별도의 시작 과정에서 복원된 쌍을 확인할 수 있도록 Baby Diary를 한 번 더 다시 시작해 주세요. 이번 실행에서는 클라우드 동기화가 시작되지 않았습니다.',
       '検証済みの設定と赤ちゃん記録のペアをローカルに適用しました。アプリ画面は開いていません。別の起動で復元済みペアを確認するため、Baby Diaryをもう一度再起動してください。この起動ではクラウド同期は開始されていません。',
+    ].join('\n\n')
+  }
+  if (recoveryFollowUpRequired) {
+    return [
+      'A previously verified restore was applied, but the current local settings/journal pair or its recovery evidence no longer verifies. Recovery transaction and forensic follow-up data remain for support inspection. Restarting alone will not repair damaged data; contact support before making further local changes. Cloud synchronization was not started in this launch.',
+      '이전에 검증된 복원이 적용되었지만 현재 로컬 설정/기록 쌍 또는 복구 증거를 더 이상 검증할 수 없습니다. 지원 확인을 위한 복구 트랜잭션과 포렌식 후속 자료는 남아 있습니다. 다시 시작하는 것만으로는 손상된 데이터를 복구할 수 없으므로 추가 로컬 변경 전에 지원팀에 문의해 주세요. 이번 실행에서는 클라우드 동기화가 시작되지 않았습니다.',
+      '以前に検証済みの復元が適用されましたが、現在のローカル設定・記録ペアまたは復旧証拠を検証できなくなりました。サポート確認用の復旧トランザクションとフォレンジック追跡資料は残っています。再起動するだけでは破損データは修復されないため、追加のローカル変更を行う前にサポートへ連絡してください。この起動ではクラウド同期は開始されていません。',
     ].join('\n\n')
   }
   if (durableLocalArchive) {

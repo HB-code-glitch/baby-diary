@@ -17,6 +17,7 @@ import {
 import {
   BABY_INFO_JOURNAL_FILE,
   BabyInfoJournal,
+  MAX_BABY_INFO_JOURNAL_RECORD_BYTES,
 } from '../electron/store/babyInfoJournal'
 import type { DurableFileOps } from '../electron/store/durableFs'
 
@@ -139,6 +140,18 @@ describe('main-process baby-info append-only journal', () => {
 
     fs.writeFileSync(journalPath, '{bad}\n{"version":1', 'utf8')
     expect(() => new BabyInfoJournal(tmpDir)).toThrow(/corrupt|journal/i)
+  })
+
+  it('applies the same single-record bound to normal and chunked replay', () => {
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const oversized = Buffer.alloc(MAX_BABY_INFO_JOURNAL_RECORD_BYTES + 1, 0x20)
+    fs.writeFileSync(journalPath, oversized)
+    expect(() => new BabyInfoJournal(tmpDir)).toThrow(/record exceeds its size bound/i)
+
+    const replay = BabyInfoJournal.createChunkReplay({ allowTornFinal: true })
+    replay.push(oversized.subarray(0, MAX_BABY_INFO_JOURNAL_RECORD_BYTES))
+    expect(() => replay.push(oversized.subarray(MAX_BABY_INFO_JOURNAL_RECORD_BYTES)))
+      .toThrow(/record exceeds its size bound/i)
   })
 
   it('imports legacy settings state once while retaining its pending/ack meaning', () => {

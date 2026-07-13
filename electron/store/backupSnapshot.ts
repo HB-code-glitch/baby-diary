@@ -181,6 +181,17 @@ export class SettingsRestoreFinalizationError extends SettingsRecoveryError {
   }
 }
 
+export class SettingsRestoreFollowUpError extends SettingsRecoveryError {
+  readonly restoreApplied = true as const
+  readonly recoveryFollowUpRequired = true as const
+  readonly localDataModified = true as const
+
+  constructor(message: string, originalsPreserved: boolean) {
+    super(message, [], originalsPreserved, false, false)
+    this.name = 'SettingsRestoreFollowUpError'
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
@@ -954,21 +965,6 @@ function removeStagingDurably(
   syncDirectory(userDataPath, platform, ops)
 }
 
-function livePairMatches(
-  userDataPath: string,
-  transaction: RestoreTransactionFile,
-  stagedPair: VerifiedBackupPair,
-  options: BackupReadOptions,
-): boolean {
-  try {
-    const pair = verifyPairDirectory(userDataPath, transaction, options)
-    return pair.settingsBytes.equals(stagedPair.settingsBytes)
-      && pair.journalBytes.equals(stagedPair.journalBytes)
-  } catch {
-    return false
-  }
-}
-
 function sameDescriptor(left: DigestDescriptor, right: DigestDescriptor): boolean {
   return left.size === right.size && left.sha256 === right.sha256
 }
@@ -1019,10 +1015,92 @@ function transactionMatchesVerifiedBackup(
   return false
 }
 
+function regularFileSizeOnce(
+  root: string,
+  relativePath: string,
+  options: BackupReadOptions,
+): number {
+  const source = openRegularFileOnce(root, relativePath, options)
+  try {
+    assertOpenFileUnchanged(source)
+    return source.opened.size
+  } finally {
+    fs.closeSync(source.fd)
+  }
+}
+
+type RecoveryReadOps = DurableFileOps & {
+  readSync?(
+    fd: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): number
+}
+
+function verifyLiveAdvancementPair(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+): void {
+  const settings = parseSettingsBytes(readRegularFileOnce(userDataPath, SETTINGS_FILE, options))
+  const source = openRegularFileOnce(userDataPath, BABY_INFO_JOURNAL_FILE, options)
+  try {
+    if (source.opened.size < transaction.journal.size) {
+      throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+    }
+
+    const prefixHash = createHash('sha256')
+    let prefixVerified = false
+    const verifyPrefix = (): void => {
+      if (prefixVerified) return
+      prefixVerified = true
+      if (prefixHash.digest('hex') !== transaction.journal.sha256) {
+        throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+      }
+    }
+    if (transaction.journal.size === 0) verifyPrefix()
+
+    const recoveryOps = options.durableFs as RecoveryReadOps | undefined
+    const readSync = recoveryOps?.readSync
+      ? recoveryOps.readSync.bind(recoveryOps)
+      : fs.readSync.bind(fs)
+    const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+    const replay = BabyInfoJournal.createChunkReplay({ allowTornFinal: true })
+    let offset = 0
+    while (offset < source.opened.size) {
+      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
+      const count = readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error(`backup file changed during read: ${BABY_INFO_JOURNAL_FILE}`)
+      }
+      const bytes = chunk.subarray(0, count)
+      if (!prefixVerified) {
+        const prefixCount = Math.min(count, transaction.journal.size - offset)
+        if (prefixCount > 0) prefixHash.update(bytes.subarray(0, prefixCount))
+        if (offset + prefixCount === transaction.journal.size) verifyPrefix()
+      }
+      replay.push(bytes)
+      offset += count
+    }
+
+    const journal = replay.finish()
+    if (!prefixVerified) {
+      throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+    }
+    assertOpenFileUnchanged(source)
+    validateProjection(settings, journal)
+  } finally {
+    fs.closeSync(source.fd)
+  }
+}
+
 function verifyCompletedRestoreLiveState(
   userDataPath: string,
   transaction: RestoreTransactionFile,
   options: RecoveryOptions,
+  onForensicVerified?: () => void,
 ): 'exact-restored' | 'valid-advancement' {
   const platform = options.platform ?? process.platform
   if (transaction.phase !== 'primary-verified'
@@ -1035,27 +1113,29 @@ function verifyCompletedRestoreLiveState(
   }
 
   verifyForensicEvidence(userDataPath, transaction, options)
+  onForensicVerified?.()
+  let liveJournalSize: number
   try {
-    verifyPairDirectory(userDataPath, transaction, options)
-    return 'exact-restored'
-  } catch { /* an exact valid descendant is checked below */ }
-
-  let advanced: VerifiedBackupPair
-  try {
-    // Unlike general startup compatibility, completed-restore cleanup requires
-    // both real files plus the full strict settings/journal projection contract.
-    advanced = verifyPairDirectory(userDataPath, undefined, options)
+    liveJournalSize = regularFileSizeOnce(userDataPath, BABY_INFO_JOURNAL_FILE, options)
   } catch (error) {
     throw new Error(
       `primary-verified live settings/journal pair is neither exact nor a valid advancement: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-  if (advanced.journalBytes.byteLength < transaction.journal.size) {
-    throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+
+  if (liveJournalSize === transaction.journal.size) {
+    try {
+      verifyPairDirectory(userDataPath, transaction, options)
+      return 'exact-restored'
+    } catch { /* a strict descendant with the same journal size is checked below */ }
   }
-  const restoredJournalPrefix = advanced.journalBytes.subarray(0, transaction.journal.size)
-  if (!sameDescriptor(descriptor(restoredJournalPrefix), transaction.journal)) {
-    throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+
+  try {
+    verifyLiveAdvancementPair(userDataPath, transaction, options)
+  } catch (error) {
+    throw new Error(
+      `primary-verified live settings/journal pair is neither exact nor a valid advancement: ${error instanceof Error ? error.message : String(error)}`,
+    )
   }
   return 'valid-advancement'
 }
@@ -1102,10 +1182,15 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
   if (!fs.existsSync(intentPath)) return false
   const stagingPath = path.join(userDataPath, RESTORE_STAGING_DIR)
   let primaryWriteStarted = false
+  let completedRestoreWasPublished = false
   let forensicConfirmed = platform !== 'win32'
   try {
     const parsedIntent = readTransactionFile(userDataPath, RESTORE_INTENT_FILE, { platform })
     const intentTransaction = normalizeTransaction(parsedIntent)
+    if (intentTransaction.phase === 'primary-verified') {
+      primaryWriteStarted = true
+      completedRestoreWasPublished = true
+    }
     if (!fs.existsSync(stagingPath)) {
       if (intentTransaction.phase !== 'primary-verified') {
         throw new SettingsRecoveryError(
@@ -1117,8 +1202,9 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
         )
       }
 
-      verifyCompletedRestoreLiveState(userDataPath, intentTransaction, options)
-      forensicConfirmed = true
+      verifyCompletedRestoreLiveState(userDataPath, intentTransaction, options, () => {
+        forensicConfirmed = true
+      })
       removeIntentDurably(userDataPath, platform, ops)
       return true
     }
@@ -1148,11 +1234,11 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     }
 
     if (transaction.phase === 'primary-verified') {
-      if (!livePairMatches(userDataPath, transaction, pair, { platform })) {
-        throw new Error('primary-verified staging does not match the live settings/journal pair')
-      }
-      verifyForensicEvidence(userDataPath, transaction, { platform, now: options.now })
-      forensicConfirmed = true
+      primaryWriteStarted = true
+      completedRestoreWasPublished = true
+      verifyCompletedRestoreLiveState(userDataPath, transaction, options, () => {
+        forensicConfirmed = true
+      })
       removeIntentDurably(userDataPath, platform, ops)
       removeStagingDurably(userDataPath, platform, ops)
       return true
@@ -1216,8 +1302,12 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     return true
   } catch (error) {
     if (error instanceof SettingsRecoveryError) throw error
+    const message = `Unable to resume the settings/journal restore transaction: ${error instanceof Error ? error.message : String(error)}`
+    if (completedRestoreWasPublished) {
+      throw new SettingsRestoreFollowUpError(message, forensicConfirmed)
+    }
     throw new SettingsRecoveryError(
-      `Unable to resume the settings/journal restore transaction: ${error instanceof Error ? error.message : String(error)}`,
+      message,
       [],
       forensicConfirmed,
       platform === 'win32' && !primaryWriteStarted,
@@ -1239,6 +1329,8 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
     removeStagingDurably(userDataPath, platform, ops)
     return false
   }
+  let completedRestoreWasPublished = false
+  let forensicConfirmed = false
   try {
     const parsed = normalizeTransaction(
       readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform }),
@@ -1248,7 +1340,10 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
       return false
     }
     if (parsed.phase === 'primary-verified') {
-      verifyCompletedRestoreLiveState(userDataPath, parsed, options)
+      completedRestoreWasPublished = true
+      verifyCompletedRestoreLiveState(userDataPath, parsed, options, () => {
+        forensicConfirmed = true
+      })
       removeStagingDurably(userDataPath, platform, ops)
       return true
     }
@@ -1282,8 +1377,12 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
     return resumeRestoreIntent(userDataPath, options)
   } catch (error) {
     if (error instanceof SettingsRecoveryError) throw error
+    const message = `Unable to recover orphan restore staging: ${error instanceof Error ? error.message : String(error)}`
+    if (completedRestoreWasPublished) {
+      throw new SettingsRestoreFollowUpError(message, forensicConfirmed)
+    }
     throw new SettingsRecoveryError(
-      `Unable to recover orphan restore staging: ${error instanceof Error ? error.message : String(error)}`,
+      message,
       [],
       false,
       platform === 'win32',
@@ -1768,7 +1867,7 @@ function prepareRestoreIntent(
     journal: descriptor(pair.journalBytes),
     phase: 'allocated',
     windowsVerifiedStartups: 0,
-    lastWindowsStartupId: options.startupId ?? '',
+    lastWindowsStartupId: platform === 'win32' ? options.startupId ?? '' : '',
     forensicArchiveId: forensic.archiveId,
     forensicManifest: forensic.manifest,
   }
