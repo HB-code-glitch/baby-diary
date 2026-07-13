@@ -99,4 +99,21 @@ describe('EventTimeline interactions and accessibility', () => {
     expect(editEvent.mock.calls[0][0]).toEqual(EVENT)
     expect(editEvent.mock.calls[0][1]).toEqual({ at: new Date('2026-07-13T11:45').toISOString() })
   })
+
+  it('restores focus to the original delete action when soft delete fails', async () => {
+    softDeleteEvent.mockRejectedValueOnce(new Error('delete failed'))
+    await act(async () => root.render(<EventTimeline events={[EVENT]} />))
+    const time = formatTime(EVENT.at)
+    const deleteButton = container.querySelector<HTMLButtonElement>(`button[aria-label="소변 ${time} 삭제"]`)!
+
+    await act(async () => deleteButton.click())
+    const confirm = Array.from(container.querySelectorAll<HTMLButtonElement>('.timeline-delete-confirm button'))
+      .find(button => button.textContent?.trim() === '삭제')!
+    await act(async () => confirm.click())
+
+    expect(softDeleteEvent).toHaveBeenCalledWith(EVENT)
+    expect(container.querySelector('.timeline-delete-confirm')).toBeNull()
+    const restoredDeleteButton = container.querySelector<HTMLButtonElement>(`button[aria-label="소변 ${time} 삭제"]`)!
+    expect(document.activeElement).toBe(restoredDeleteButton)
+  })
 })

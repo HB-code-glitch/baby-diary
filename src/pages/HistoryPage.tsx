@@ -12,6 +12,7 @@ import {
   isSameDay,
   isSameMonth,
   isToday,
+  isValid,
   parseISO,
   startOfMonth,
   startOfWeek,
@@ -53,12 +54,35 @@ const WEEKDAY_KEYS = [
   'weekdaySat',
 ] as const
 
-// History follows the device-local day boundary used throughout the app.
-function eventsForDay(events: DiaryEvent[], date: Date): DiaryEvent[] {
-  return events.filter(event => !event.deleted && isSameDay(parseISO(event.at), date))
+type EventsByLocalDay = ReadonlyMap<string, readonly DiaryEvent[]>
+
+const EMPTY_DAY_EVENTS: readonly DiaryEvent[] = []
+
+// History follows the device-local day boundary used throughout the app. Build
+// one immutable lookup per store snapshot so month/week/day consumers never
+// rescan and reparse the full event list for every rendered calendar cell.
+export function groupEventsByLocalDay(events: readonly DiaryEvent[]): EventsByLocalDay {
+  const grouped = new Map<string, DiaryEvent[]>()
+
+  events.forEach(event => {
+    if (event.deleted) return
+    const parsedAt = parseISO(event.at)
+    if (!isValid(parsedAt)) return
+    const dayKey = format(parsedAt, 'yyyy-MM-dd')
+    const bucket = grouped.get(dayKey)
+    if (bucket) bucket.push(event)
+    else grouped.set(dayKey, [event])
+  })
+
+  grouped.forEach(bucket => bucket.sort((a, b) => b.at.localeCompare(a.at)))
+  return grouped
 }
 
-function eventCounts(events: DiaryEvent[]): Record<EventType, number> {
+function eventsForDay(eventsByDay: EventsByLocalDay, date: Date): readonly DiaryEvent[] {
+  return eventsByDay.get(format(date, 'yyyy-MM-dd')) ?? EMPTY_DAY_EVENTS
+}
+
+function eventCounts(events: readonly DiaryEvent[]): Record<EventType, number> {
   const counts: Record<EventType, number> = {
     pee: 0,
     poop: 0,
@@ -74,18 +98,18 @@ function eventCounts(events: DiaryEvent[]): Record<EventType, number> {
   return counts
 }
 
-function categorySummaryParts(events: DiaryEvent[], t: Translate): string[] {
+function categorySummaryParts(events: readonly DiaryEvent[], t: Translate): string[] {
   const counts = eventCounts(events)
   return EVENT_TYPE_OPTIONS
     .filter(({ type }) => counts[type] > 0)
     .map(({ type, labelKey, summaryLabelKey }) => `${t(summaryLabelKey ?? labelKey)} ${counts[type]}`)
 }
 
-function categorySummary(events: DiaryEvent[], t: Translate): string {
+function categorySummary(events: readonly DiaryEvent[], t: Translate): string {
   return categorySummaryParts(events, t).join(' · ')
 }
 
-function conciseCategorySummary(events: DiaryEvent[], t: Translate): string {
+function conciseCategorySummary(events: readonly DiaryEvent[], t: Translate): string {
   const parts = categorySummaryParts(events, t)
   if (parts.length <= 3) return parts.join(' · ')
   return `${parts.slice(0, 3).join(' · ')} · ${t('history.moreCategories', { count: parts.length - 3 })}`
@@ -94,7 +118,7 @@ function conciseCategorySummary(events: DiaryEvent[], t: Translate): string {
 interface MonthViewProps {
   selectedDate: Date
   displayMonth: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   onSelectDay: (date: Date) => void
   milestones: Milestone[]
   guidanceItems: GuidanceItem[]
@@ -104,7 +128,7 @@ interface MonthViewProps {
 function MonthView({
   selectedDate,
   displayMonth,
-  allEvents,
+  eventsByDay,
   onSelectDay,
   milestones,
   guidanceItems,
@@ -138,7 +162,7 @@ function MonthView({
             day={day}
             displayMonth={displayMonth}
             selectedDate={selectedDate}
-            allEvents={allEvents}
+            eventsByDay={eventsByDay}
             onSelect={onSelectDay}
             milestones={milestones}
             guidanceItems={guidanceItems}
@@ -154,7 +178,7 @@ interface MonthDayCellProps {
   day: Date
   displayMonth: Date
   selectedDate: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   onSelect: (date: Date) => void
   milestones: Milestone[]
   guidanceItems: GuidanceItem[]
@@ -165,14 +189,14 @@ function MonthDayCell({
   day,
   displayMonth,
   selectedDate,
-  allEvents,
+  eventsByDay,
   onSelect,
   milestones,
   guidanceItems,
   birthdate,
 }: MonthDayCellProps) {
   const { t, i18n } = useTranslation()
-  const dayEvents = eventsForDay(allEvents, day)
+  const dayEvents = eventsForDay(eventsByDay, day)
   const summary = categorySummary(dayEvents, t)
   const dayString = format(day, 'yyyy-MM-dd')
   const dayMilestones = milestones.filter(milestone => milestone.date === dayString)
@@ -234,12 +258,12 @@ function MonthDayCell({
 interface WeekViewProps {
   selectedDate: Date
   displayWeek: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   birthdate?: string
   onSelectDay: (date: Date) => void
 }
 
-function WeekView({ selectedDate, displayWeek, allEvents, birthdate, onSelectDay }: WeekViewProps) {
+function WeekView({ selectedDate, displayWeek, eventsByDay, birthdate, onSelectDay }: WeekViewProps) {
   const { t, i18n } = useTranslation()
   const dateFnsLocale = i18n.language === 'ja' ? ja : ko
   const weekStart = startOfWeek(displayWeek, { weekStartsOn: 0 })
@@ -252,7 +276,7 @@ function WeekView({ selectedDate, displayWeek, allEvents, birthdate, onSelectDay
     <div className="card cal-week">
       <div className="cal-week-rows">
         {days.map(day => {
-          const dayEvents = eventsForDay(allEvents, day)
+          const dayEvents = eventsForDay(eventsByDay, day)
           const summary = categorySummary(dayEvents, t)
           const conciseSummary = conciseCategorySummary(dayEvents, t)
           const selected = isSameDay(day, selectedDate)
@@ -307,15 +331,14 @@ function WeekView({ selectedDate, displayWeek, allEvents, birthdate, onSelectDay
 
 interface SelectedDayPreviewProps {
   selectedDate: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   onOpenDay: () => void
 }
 
-function SelectedDayPreview({ selectedDate, allEvents, onOpenDay }: SelectedDayPreviewProps) {
+function SelectedDayPreview({ selectedDate, eventsByDay, onOpenDay }: SelectedDayPreviewProps) {
   const { t, i18n } = useTranslation()
   const dateFnsLocale = i18n.language === 'ja' ? ja : ko
-  const selectedEvents = eventsForDay(allEvents, selectedDate)
-    .sort((a, b) => b.at.localeCompare(a.at))
+  const selectedEvents = eventsForDay(eventsByDay, selectedDate)
   const latestEvents = selectedEvents.slice(0, 3)
 
   return (
@@ -353,7 +376,7 @@ function SelectedDayPreview({ selectedDate, allEvents, onOpenDay }: SelectedDayP
 
 interface DayViewProps {
   selectedDate: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   filterType: EventType | null
   onFilterChange: (type: EventType | null) => void
   milestones: Milestone[]
@@ -363,7 +386,7 @@ interface DayViewProps {
 
 function DayView({
   selectedDate,
-  allEvents,
+  eventsByDay,
   filterType,
   onFilterChange,
   milestones,
@@ -372,8 +395,7 @@ function DayView({
 }: DayViewProps) {
   const { t, i18n } = useTranslation()
   const language = i18n.language
-  const dayEvents = eventsForDay(allEvents, selectedDate)
-    .sort((a, b) => b.at.localeCompare(a.at))
+  const dayEvents = eventsForDay(eventsByDay, selectedDate)
   const counts = eventCounts(dayEvents)
   const availableTypes = EVENT_TYPE_OPTIONS.filter(({ type }) => counts[type] > 0)
   const activeFilter = filterType && counts[filterType] > 0 ? filterType : null
@@ -476,7 +498,7 @@ export function HistoryPage() {
   const { t, i18n } = useTranslation()
   const dateFnsLocale = i18n.language === 'ja' ? ja : ko
 
-  const allEvents = useMemo(() => events.filter(event => !event.deleted), [events])
+  const eventsByDay = useMemo(() => groupEventsByLocalDay(events), [events])
   const birthdate = settings?.baby?.birthdate
   const milestones = useMemo(
     () => birthdate ? getMilestones(birthdate, settings?.baby?.gender) : [],
@@ -660,13 +682,13 @@ export function HistoryPage() {
             <MonthView
               selectedDate={selectedDate}
               displayMonth={displayMonth}
-              allEvents={allEvents}
+              eventsByDay={eventsByDay}
               onSelectDay={selectMonthDate}
               milestones={milestones}
               guidanceItems={guidanceItems}
               birthdate={birthdate}
             />
-            <SelectedDayPreview selectedDate={selectedDate} allEvents={allEvents} onOpenDay={openSelectedDay} />
+            <SelectedDayPreview selectedDate={selectedDate} eventsByDay={eventsByDay} onOpenDay={openSelectedDay} />
           </div>
         )}
         {view === 'week' && (
@@ -674,17 +696,17 @@ export function HistoryPage() {
             <WeekView
               selectedDate={selectedDate}
               displayWeek={displayWeek}
-              allEvents={allEvents}
+              eventsByDay={eventsByDay}
               birthdate={birthdate}
               onSelectDay={selectWeekDate}
             />
-            <SelectedDayPreview selectedDate={selectedDate} allEvents={allEvents} onOpenDay={openSelectedDay} />
+            <SelectedDayPreview selectedDate={selectedDate} eventsByDay={eventsByDay} onOpenDay={openSelectedDay} />
           </div>
         )}
         {view === 'day' && (
           <DayView
             selectedDate={selectedDate}
-            allEvents={allEvents}
+            eventsByDay={eventsByDay}
             filterType={filterType}
             onFilterChange={setFilterType}
             milestones={milestones}

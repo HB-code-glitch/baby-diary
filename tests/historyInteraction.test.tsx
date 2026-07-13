@@ -11,6 +11,10 @@ import { formatTime, useAppStore } from '../src/store/useAppStore'
 
 const NOW = new Date(2026, 6, 13, 12, 0, 0)
 
+type GroupEventsByLocalDay = (
+  events: readonly DiaryEvent[],
+) => ReadonlyMap<string, readonly DiaryEvent[]>
+
 const EVENT_DATA: Record<EventType, EventData> = {
   pee: {},
   poop: {},
@@ -248,5 +252,41 @@ describe('History interactions', () => {
     expect(empty.textContent).toContain('선택한 날짜에 기록이 없어요')
     expect(empty.textContent).not.toContain('오늘')
     expect(empty.textContent).not.toContain('위 버튼')
+  })
+
+  it('indexes 5,000 events once by local day without mutating the source order', async () => {
+    const historyModule = await import('../src/pages/HistoryPage')
+    const groupEventsByLocalDay = (
+      historyModule as typeof historyModule & { groupEventsByLocalDay?: GroupEventsByLocalDay }
+    ).groupEventsByLocalDay
+
+    expect(groupEventsByLocalDay).toBeTypeOf('function')
+    if (!groupEventsByLocalDay) return
+
+    const eventTypes = Object.keys(EVENT_DATA) as EventType[]
+    const events = Array.from({ length: 5_000 }, (_, index) => {
+      const day = new Date(2026, 6, (index % 31) + 1, 12, 0, index % 60)
+      return {
+        ...makeEvent(eventTypes[index % eventTypes.length], day, index % 24, `event-${index}`),
+        deleted: index % 10 === 0,
+      }
+    })
+    const localBoundary = makeEvent('pee', new Date(2026, 6, 13, 0, 5, 0), 0, 'local-boundary')
+    const invalidDate = { ...makeEvent('poop', NOW, 1, 'invalid-date'), at: 'not-a-date' }
+    const input = [invalidDate, localBoundary, ...events]
+    const originalOrder = input.map(event => event.id)
+
+    const grouped = groupEventsByLocalDay(input)
+
+    expect(input.map(event => event.id)).toEqual(originalOrder)
+    expect(grouped.size).toBe(31)
+    expect(grouped.get('2026-07-13')?.some(event => event.id === 'local-boundary')).toBe(true)
+    expect(Array.from(grouped.values()).flat()).toHaveLength(4_501)
+    expect(Array.from(grouped.values()).flat().some(event => event.id === 'invalid-date' || event.deleted)).toBe(false)
+    for (const bucket of grouped.values()) {
+      for (let index = 1; index < bucket.length; index += 1) {
+        expect(bucket[index - 1].at.localeCompare(bucket[index].at)).toBeGreaterThanOrEqual(0)
+      }
+    }
   })
 })

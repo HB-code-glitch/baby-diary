@@ -9,7 +9,7 @@ import { useToast } from './Toast'
 import { useTranslation } from 'react-i18next'
 
 interface EventTimelineProps {
-  events: DiaryEvent[]
+  events: readonly DiaryEvent[]
   showAuthor?: boolean
   editable?: boolean
   emptyTitle?: string
@@ -88,7 +88,7 @@ export function EventTimeline({
       setConfirmDelete(null)
       showToast({ message: t('toast.deleted') })
     } catch {
-      setConfirmDelete(null)
+      closeDeleteConfirmation(event.id)
       showToast({ message: t('toast.deleteFailed') })
     }
   }
