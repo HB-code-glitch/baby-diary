@@ -177,14 +177,54 @@ describe('P20: getAll() serves from cache without re-scanning disk', () => {
 })
 
 // ---------------------------------------------------------------------------
-// P33/P34 — superseded: fixed-day quota bands are unsafe across calendar months
+// Formula bands must not be extrapolated beyond their source age window.
 // ---------------------------------------------------------------------------
-describe('P33/P34 replacement: fixed-day formula bands are retired', () => {
-  it('returns no numeric quota band at any day age', () => {
-    expect(FEEDING_BANDS).toEqual([])
-    for (const ageDays of [-1, 0, 30, 45, 60, 75, 90, 181, 365]) {
-      expect(getFeedingBand(ageDays)).toBeNull()
-    }
+describe('getFeedingBand valid window cutoff', () => {
+  it('ageDays 179 returns formula_3_6mo band', () => {
+    expect(getFeedingBand(179)?.id).toBe('formula_3_6mo')
+  })
+
+  it('ageDays 180 and later return null', () => {
+    expect(getFeedingBand(180)).toBeNull()
+    expect(getFeedingBand(365)).toBeNull()
+  })
+
+  it('ageDays -1 returns null', () => {
+    expect(getFeedingBand(-1)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P34 — FeedingBand split: formula_1_2mo / formula_2_3mo
+// ---------------------------------------------------------------------------
+describe('P34: formula band split at 60 days', () => {
+  it('ageDays 30 → formula_1_2mo (perMax 160)', () => {
+    const band = getFeedingBand(30)
+    expect(band!.id).toBe('formula_1_2mo')
+    expect(band!.perFeedMlMax).toBe(160)
+  })
+
+  it('ageDays 45 → formula_1_2mo (perMax 160)', () => {
+    const band = getFeedingBand(45)
+    expect(band!.id).toBe('formula_1_2mo')
+    expect(band!.perFeedMlMax).toBe(160)
+  })
+
+  it('ageDays 60 → formula_2_3mo (perMax 180)', () => {
+    const band = getFeedingBand(60)
+    expect(band!.id).toBe('formula_2_3mo')
+    expect(band!.perFeedMlMax).toBe(180)
+  })
+
+  it('ageDays 75 → formula_2_3mo (perMax 180)', () => {
+    const band = getFeedingBand(75)
+    expect(band!.id).toBe('formula_2_3mo')
+    expect(band!.perFeedMlMax).toBe(180)
+  })
+
+  it('ageDays 90 → formula_3_6mo', () => {
+    const band = getFeedingBand(90)
+    expect(band!.id).toBe('formula_3_6mo')
   })
 })
 
@@ -211,22 +251,20 @@ describe('P35: hatsu-sekku postpone inclusive boundary', () => {
 })
 
 // ---------------------------------------------------------------------------
-// P32 — superseded: copy uses the age label without claiming a measurement site
+// P32 — Fever guidance text: "12주" updated to "90일" / "12週" to "90日"
 // ---------------------------------------------------------------------------
-describe('P32 replacement: fever copy stays conservative', () => {
-  it('Korean body states under 3 months and 38°C without rectal inference', () => {
+describe('P32: fever_under_3mo_emergency text uses 90 not 12', () => {
+  it('Korean body contains "90일" not "12주"', () => {
     const marker = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')
     expect(marker).toBeDefined()
-    expect(marker!.bodyKo).toContain('3개월 미만')
-    expect(marker!.bodyKo).toContain('38.0°C 이상')
-    expect(marker!.bodyKo).not.toContain('직장')
+    expect(marker!.bodyKo).toContain('90일')
+    expect(marker!.bodyKo).not.toContain('12주')
   })
 
-  it('Japanese body states under 3 months and 38°C without rectal inference', () => {
+  it('Japanese body contains "90日" not "12週"', () => {
     const marker = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')
-    expect(marker!.bodyJa).toContain('3か月未満')
-    expect(marker!.bodyJa).toContain('38.0°C以上')
-    expect(marker!.bodyJa).not.toContain('直腸')
+    expect(marker!.bodyJa).toContain('90日')
+    expect(marker!.bodyJa).not.toContain('12週')
   })
 })
 

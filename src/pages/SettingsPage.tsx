@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { IconFolderOpen, IconDownload, IconInfo } from '../components/icons'
 import { GUIDANCE_MARKERS, GUIDANCE_DISCLAIMER } from '../lib/guidance'
-import { BREASTFEEDING_BANDS, BF_DISCLAIMER, BF_CLUSTER_NOTE, BF_NEWBORN_RULE } from '../lib/breastfeeding'
+import {
+  BF_CLUSTER_NOTE,
+  BF_DISCLAIMER,
+  BF_NEWBORN_GUIDANCE,
+  BF_RESPONSIVE_GUIDANCE,
+} from '../lib/breastfeeding'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useAppStore } from '../store/useAppStore'
@@ -569,7 +574,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 모유수유 간격 참고 / 授乳間隔の目安 — band table + notes accordion
+// 반응형 수유 안내 / 赤ちゃんのサインに応じる授乳
 // ---------------------------------------------------------------------------
 function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
   const { t } = useTranslation()
@@ -604,41 +609,17 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
       </button>
       {open && (
         <div className="card" style={{ marginTop: 8 }}>
-          {/* Band table */}
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 14 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  {lang === 'ja' ? '月齢' : '월령'}
-                </th>
-                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  {t('guidance.bfGuideIntervalHeader')}
-                </th>
-                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  {t('guidance.bfGuideFeedsHeader')}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {BREASTFEEDING_BANDS.map(band => (
-                <tr key={band.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '5px 6px', color: 'var(--text-primary)', fontWeight: 500 }}>
-                    {lang === 'ja' ? band.ageLabelJa : band.ageLabelKo}
-                  </td>
-                  <td style={{ padding: '5px 6px', color: 'var(--text-secondary)' }}>
-                    {band.intervalMaxHours != null
-                      ? `${band.intervalMinHours}~${band.intervalMaxHours}${lang === 'ja' ? '時間' : '시간'}`
-                      : `${band.intervalMinHours}${lang === 'ja' ? '時間以上' : '시간 이상'}`}
-                  </td>
-                  <td style={{ padding: '5px 6px', color: 'var(--text-secondary)' }}>
-                    {band.feedsPerDayMin}~{band.feedsPerDayMax}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div style={{
+            fontSize: 12,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.6,
+            marginBottom: 10,
+            borderLeft: '3px solid var(--sky)',
+            paddingLeft: 10,
+          }}>
+            {BF_RESPONSIVE_GUIDANCE[lang]}
+          </div>
 
-          {/* Newborn rule */}
           <div style={{
             fontSize: 12,
             color: 'var(--text-secondary)',
@@ -647,10 +628,9 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
             borderLeft: '3px solid var(--butter)',
             paddingLeft: 10,
           }}>
-            {lang === 'ja' ? BF_NEWBORN_RULE.ja : BF_NEWBORN_RULE.ko}
+            {BF_NEWBORN_GUIDANCE[lang]}
           </div>
 
-          {/* Cluster note */}
           <div style={{
             fontSize: 12,
             color: 'var(--text-secondary)',
@@ -659,10 +639,9 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
             borderLeft: '3px solid var(--mint)',
             paddingLeft: 10,
           }}>
-            {lang === 'ja' ? BF_CLUSTER_NOTE.ja : BF_CLUSTER_NOTE.ko}
+            {BF_CLUSTER_NOTE[lang]}
           </div>
 
-          {/* Disclaimer */}
           <div style={{
             fontSize: 11.5,
             color: 'var(--text-muted)',
@@ -671,10 +650,9 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
             borderLeft: '3px solid var(--sky)',
             paddingLeft: 10,
           }}>
-            {lang === 'ja' ? BF_DISCLAIMER.ja : BF_DISCLAIMER.ko}
+            {BF_DISCLAIMER[lang]}
           </div>
 
-          {/* Source */}
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {t('guidance.bfGuideSourceLabel')}
           </div>
