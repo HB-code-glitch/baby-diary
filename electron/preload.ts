@@ -62,10 +62,40 @@ function parseFirebaseConfig(value: unknown): FirebaseConfig {
   ) as unknown as FirebaseConfig
 }
 
+function fnv1a32(value: string, seed: number): string {
+  let hash = seed >>> 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+function unreleasedFNVAppName(configIdentity: string): string {
+  return `baby-diary-${fnv1a32(configIdentity, 0x811c9dc5)}${
+    fnv1a32(configIdentity.split('').reverse().join(''), 0x9e3779b9)
+  }`
+}
+
 function parseFirebaseClaim(value: unknown, config: FirebaseConfig): FirebasePersistenceClaim {
   const configIdentity = JSON.stringify(Object.fromEntries(
     FIREBASE_CONFIG_FIELDS.map(field => [field, config[field]]),
   ))
+  if (isPlainRecord(value) && value.version === 2) {
+    const appName = unreleasedFNVAppName(configIdentity)
+    if (Object.keys(value).sort().join(',') !== 'appName,configIdentity,ownership,version'
+      || value.ownership !== 'main-registry-fnv-evidence'
+      || value.configIdentity !== configIdentity
+      || value.appName !== appName) {
+      throw new Error('Firebase persistence claim response is invalid')
+    }
+    return {
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity,
+      appName,
+    }
+  }
   if (!isPlainRecord(value)
     || Object.keys(value).sort().join(',') !== 'appName,configIdentity,version'
     || value.version !== 1

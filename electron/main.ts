@@ -585,16 +585,29 @@ app.whenReady().then(() => {
   // create settings/journal/backup files. The immutable registry then prevents
   // every later restart from reclassifying a fresh profile as legacy.
   const firebaseProfileEligibility = detectPreexistingFirebaseProfile(userDataPath)
-  firebasePersistenceRegistry = FirebasePersistenceRegistry.open(
-    userDataPath,
-    firebaseProfileEligibility,
-  )
-
   backupManager = new BackupManager(userDataPath)
+  if (firebaseProfileEligibility.kind === 'settings-invalid') {
+    // SettingsStore owns verified pair recovery. On Windows it throws until the
+    // independent restart protocol is fully complete, so no immutable Firebase
+    // ownership can be published from damaged or half-restored settings.
+    settingsStore = new SettingsStore(userDataPath, {
+      documentsBackupDir: backupManager.getDocumentsBackupDir(),
+    })
+    firebasePersistenceRegistry = FirebasePersistenceRegistry.openAfterSettingsRecovery(
+      userDataPath,
+      firebaseProfileEligibility,
+      settingsStore.get(),
+    )
+  } else {
+    firebasePersistenceRegistry = FirebasePersistenceRegistry.open(
+      userDataPath,
+      firebaseProfileEligibility,
+    )
+    settingsStore = new SettingsStore(userDataPath, {
+      documentsBackupDir: backupManager.getDocumentsBackupDir(),
+    })
+  }
   eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })
-  settingsStore = new SettingsStore(userDataPath, {
-    documentsBackupDir: backupManager.getDocumentsBackupDir(),
-  })
 
   // P20: Explicit startup scan so index is warm before any IPC arrives.
   // After this, getAll() is used for 'events:list' (no re-scan per call).

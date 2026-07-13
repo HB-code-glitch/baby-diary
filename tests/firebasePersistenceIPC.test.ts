@@ -2,23 +2,41 @@ import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { registerFirebasePersistenceIPC } from '../electron/firebasePersistenceIPC'
+import { DEFAULT_FIREBASE_CONFIG } from '../shared/defaultFirebaseConfig'
+import {
+  canonicalFirebaseConfig,
+  getUnreleasedFNVFirebaseAppName,
+} from '../shared/firebasePersistence'
 
 describe('Firebase persistence claim IPC boundary', () => {
-  it('publishes/loads the immutable registry before current stores, IPC, or renderer startup', () => {
+  it('recovers corrupt settings before publication and otherwise publishes before SettingsStore', () => {
     const main = readFileSync(resolve(import.meta.dirname, '../electron/main.ts'), 'utf8')
     const startup = main.slice(main.indexOf('app.whenReady().then'))
     const snapshot = startup.indexOf('detectPreexistingFirebaseProfile(userDataPath)')
-    const registry = startup.indexOf('FirebasePersistenceRegistry.open(')
     const backup = startup.indexOf('new BackupManager(userDataPath)')
-    const settings = startup.indexOf('new SettingsStore(userDataPath')
+    const recoveryBranch = startup.indexOf("if (firebaseProfileEligibility.kind === 'settings-invalid')")
+    const recoverySettings = startup.indexOf('new SettingsStore(userDataPath', recoveryBranch)
+    const recoveredRegistry = startup.indexOf(
+      'FirebasePersistenceRegistry.openAfterSettingsRecovery(',
+      recoverySettings,
+    )
+    const normalBranch = startup.indexOf('} else {', recoveredRegistry)
+    const normalRegistry = startup.indexOf('FirebasePersistenceRegistry.open(', normalBranch)
+    const normalSettings = startup.indexOf('new SettingsStore(userDataPath', normalRegistry)
+    const eventLog = startup.indexOf('new EventLog(', normalSettings)
     const ipc = startup.indexOf('setupIPC()')
     const renderer = startup.indexOf('createWindow()')
 
     expect(snapshot).toBeGreaterThanOrEqual(0)
-    expect(snapshot).toBeLessThan(registry)
-    expect(registry).toBeLessThan(backup)
-    expect(registry).toBeLessThan(settings)
-    expect(settings).toBeLessThan(ipc)
+    expect(snapshot).toBeLessThan(backup)
+    expect(backup).toBeLessThan(recoveryBranch)
+    expect(recoveryBranch).toBeLessThan(recoverySettings)
+    expect(recoverySettings).toBeLessThan(recoveredRegistry)
+    expect(recoveredRegistry).toBeLessThan(normalBranch)
+    expect(normalBranch).toBeLessThan(normalRegistry)
+    expect(normalRegistry).toBeLessThan(normalSettings)
+    expect(normalSettings).toBeLessThan(eventLog)
+    expect(eventLog).toBeLessThan(ipc)
     expect(ipc).toBeLessThan(renderer)
   })
 
@@ -28,6 +46,51 @@ describe('Firebase persistence claim IPC boundary', () => {
     expect(preload).toContain('parseFirebaseConfig(rawConfig)')
     expect(preload).toContain('parseFirebaseClaim(response, config)')
     expect(preload).not.toContain('rendererFingerprint')
+  })
+
+  it('accepts only the exact evidence-owned FNV v2 claim in the sandboxed preload', async () => {
+    vi.resetModules()
+    let exposedApi: {
+      claimFirebasePersistence(config: typeof DEFAULT_FIREBASE_CONFIG): Promise<unknown>
+    } | undefined
+    let response: unknown
+    const invoke = vi.fn(async () => response)
+    vi.doMock('electron', () => ({
+      contextBridge: {
+        exposeInMainWorld: (_key: string, api: typeof exposedApi) => { exposedApi = api },
+      },
+      ipcRenderer: {
+        invoke,
+        on: vi.fn(),
+        removeListener: vi.fn(),
+        send: vi.fn(),
+      },
+    }))
+    await import('../electron/preload')
+    expect(exposedApi).toBeDefined()
+
+    const configIdentity = canonicalFirebaseConfig(DEFAULT_FIREBASE_CONFIG)
+    const appName = getUnreleasedFNVFirebaseAppName(DEFAULT_FIREBASE_CONFIG)
+    response = {
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity,
+      appName,
+    }
+    await expect(exposedApi!.claimFirebasePersistence(DEFAULT_FIREBASE_CONFIG)).resolves.toEqual(response)
+
+    for (const invalid of [
+      { version: 1, configIdentity, appName },
+      { version: 2, ownership: 'main-registry-fnv-evidence', configIdentity, appName: 'baby-diary-deadbeefdeadbeef' },
+      { version: 2, ownership: 'renderer-fnv-evidence', configIdentity, appName },
+      { version: 2, ownership: 'main-registry-fnv-evidence', configIdentity, appName, extra: true },
+    ]) {
+      response = invalid
+      await expect(exposedApi!.claimFirebasePersistence(DEFAULT_FIREBASE_CONFIG))
+        .rejects.toThrow(/claim response is invalid/i)
+    }
+    vi.doUnmock('electron')
+    vi.resetModules()
   })
 
   it('accepts only the current main frame and delegates raw config to main validation', async () => {

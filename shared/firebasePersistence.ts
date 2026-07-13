@@ -41,11 +41,22 @@ export interface FirebasePersistenceIdentity {
   firestorePersistenceKey: string
 }
 
-export interface FirebasePersistenceClaim {
+export interface FirebaseStandardPersistenceClaim {
   version: 1
   configIdentity: string
   appName: string
 }
+
+export interface FirebaseFNVRegistryPersistenceClaim {
+  version: 2
+  ownership: 'main-registry-fnv-evidence'
+  configIdentity: string
+  appName: string
+}
+
+export type FirebasePersistenceClaim =
+  | FirebaseStandardPersistenceClaim
+  | FirebaseFNVRegistryPersistenceClaim
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -173,7 +184,7 @@ export function sha256Hex(value: string): string {
   return Array.from(state).map(word => word.toString(16).padStart(8, '0')).join('')
 }
 
-/** The pre-release FNV namespace is diagnostic only and is never selected for new writes. */
+/** Exact pre-release FNV namespace; selected only by an explicit main-registry v2 evidence claim. */
 export function getUnreleasedFNVFirebaseAppName(configValue: unknown): string {
   const configIdentity = canonicalFirebaseConfig(configValue)
   const digest = fnv1a32(configIdentity, 0x811c9dc5)
@@ -218,8 +229,27 @@ export function parseFirebasePersistenceClaim(
   value: unknown,
   configValue: unknown,
 ): FirebasePersistenceClaim {
-  if (!isPlainRecord(value)
-    || !hasExactKeys(value, ['version', 'configIdentity', 'appName'])
+  if (!isPlainRecord(value)) {
+    throw new Error('Firebase persistence claim response is invalid')
+  }
+  if (value.version === 2) {
+    const config = parseFirebaseConfig(configValue)
+    const configIdentity = canonicalFirebaseConfig(config)
+    const appName = getUnreleasedFNVFirebaseAppName(config)
+    if (!hasExactKeys(value, ['version', 'ownership', 'configIdentity', 'appName'])
+      || value.ownership !== 'main-registry-fnv-evidence'
+      || value.configIdentity !== configIdentity
+      || value.appName !== appName) {
+      throw new Error('Firebase persistence claim response is invalid')
+    }
+    return {
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity,
+      appName,
+    }
+  }
+  if (!hasExactKeys(value, ['version', 'configIdentity', 'appName'])
     || value.version !== 1
     || typeof value.configIdentity !== 'string'
     || typeof value.appName !== 'string') {

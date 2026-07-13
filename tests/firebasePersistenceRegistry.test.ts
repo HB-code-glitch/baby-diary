@@ -7,6 +7,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'fs'
 import { tmpdir } from 'os'
@@ -18,13 +19,18 @@ import {
   FirebasePersistenceRegistry,
   detectPreexistingFirebaseProfile,
 } from '../electron/store/firebasePersistenceRegistry'
+import { BABY_INFO_JOURNAL_FILE } from '../electron/store/babyInfoJournal'
+import { SettingsStore } from '../electron/store/settings'
 import {
   LEGACY_FIREBASE_APP_NAME,
   canonicalFirebaseConfig,
   getDigestFirebasePersistenceIdentity,
+  getUnreleasedFNVFirebaseAppName,
+  parseFirebasePersistenceClaim,
   sha256Hex,
 } from '../shared/firebasePersistence'
 import { DEFAULT_FIREBASE_CONFIG } from '../shared/defaultFirebaseConfig'
+import { V038_AUTH_LEVELDB_FIXTURE } from './fixtures/firebaseV038AuthLevelDb'
 
 const roots: string[] = []
 
@@ -59,6 +65,228 @@ function writeSettingsEvidence(root: string, firebase: typeof customConfig | nul
   }))
 }
 
+function writeV038AuthLevelDb(root: string, authLog?: Buffer): string {
+  const levelDb = join(root, 'IndexedDB', 'file__0.indexeddb.leveldb')
+  mkdirSync(levelDb, { recursive: true })
+  writeFileSync(join(levelDb, 'CURRENT'), Buffer.from(V038_AUTH_LEVELDB_FIXTURE.current, 'base64'))
+  writeFileSync(join(levelDb, 'MANIFEST-000001'), Buffer.from(V038_AUTH_LEVELDB_FIXTURE.manifest, 'base64'))
+  writeFileSync(join(levelDb, '000005.ldb'), Buffer.from(V038_AUTH_LEVELDB_FIXTURE.table, 'base64'))
+  writeFileSync(
+    join(levelDb, '000004.log'),
+    authLog ?? Buffer.from(V038_AUTH_LEVELDB_FIXTURE.authLog, 'base64'),
+  )
+  return levelDb
+}
+
+function writeVerifiedRecoveryBackup(root: string): void {
+  const snapshot = join(root, 'backups', '2026-07-13_10-20-30')
+  mkdirSync(join(snapshot, 'data'), { recursive: true })
+  const settings = {
+    baby: { name: 'Recovery Baby', birthdate: '2026-01-01', gender: 'girl' },
+    profile: { uid: 'recovery-parent', name: 'Recovery Parent', role: 'mom' },
+    familyId: 'ABCDEFGHJKLM',
+    firebase: customConfig,
+  }
+  writeFileSync(join(snapshot, 'settings.json'), JSON.stringify(settings, null, 2))
+  writeFileSync(join(snapshot, BABY_INFO_JOURNAL_FILE), '')
+  writeFileSync(join(snapshot, 'data', '2026-07.jsonl'), '{"event":true}\n')
+  const relativePaths = [
+    'settings.json',
+    BABY_INFO_JOURNAL_FILE,
+    'data/2026-07.jsonl',
+  ]
+  const files = relativePaths.map(relativePath => {
+    const bytes = readFileSync(join(snapshot, ...relativePath.split('/')))
+    return {
+      path: relativePath,
+      size: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    }
+  })
+  writeFileSync(join(snapshot, 'manifest.json'), JSON.stringify({
+    version: 1,
+    source: 'baby-diary',
+    snapshotTimestamp: '2026-07-13T10:20:30.000Z',
+    files,
+  }, null, 2))
+}
+
+const CRC32C_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ ((value & 1) === 1 ? 0x82f63b78 : 0)
+    }
+    table[index] = value >>> 0
+  }
+  return table
+})()
+
+function crc32c(bytes: Uint8Array): number {
+  let value = 0xffffffff
+  for (const byte of bytes) value = (value >>> 8) ^ CRC32C_TABLE[(value ^ byte) & 0xff]
+  return (~value) >>> 0
+}
+
+function encodeVarint(value: number): Buffer {
+  const bytes: number[] = []
+  do {
+    let byte = value & 0x7f
+    value = Math.floor(value / 128)
+    if (value > 0) byte |= 0x80
+    bytes.push(byte)
+  } while (value > 0)
+  return Buffer.from(bytes)
+}
+
+function makeLevelDbPhysicalRecord(payload: Buffer, type = 0x01): Buffer {
+  const typeBytes = Buffer.from([type])
+  const record = Buffer.alloc(7 + payload.length)
+  record.writeUInt16LE(payload.length, 4)
+  record[6] = type
+  payload.copy(record, 7)
+  const checksum = crc32c(Buffer.concat([typeBytes, payload]))
+  record.writeUInt32LE((((checksum >>> 15) | (checksum << 17)) + 0xa282ead8) >>> 0, 0)
+  return record
+}
+
+function makeLevelDbManifest(options: {
+  logNumber?: number
+  previousLogNumber?: number
+  tableNumbers?: number[]
+}): Buffer {
+  const edit: Buffer[] = []
+  if (options.logNumber !== undefined) {
+    edit.push(Buffer.from([0x02]), encodeVarint(options.logNumber))
+  }
+  if (options.previousLogNumber !== undefined) {
+    edit.push(Buffer.from([0x09]), encodeVarint(options.previousLogNumber))
+  }
+  for (const tableNumber of options.tableNumbers ?? []) {
+    edit.push(
+      Buffer.from([0x07]),
+      encodeVarint(0),
+      encodeVarint(tableNumber),
+      encodeVarint(1),
+      Buffer.from([0x00, 0x00]),
+    )
+  }
+  return makeLevelDbPhysicalRecord(Buffer.concat(edit))
+}
+
+function makeChromiumIndexedDbAuthKey(apiKey: string, appName: string): Buffer {
+  const authKey = `firebase:authUser:${apiKey}:${appName}`
+  const utf16Be = Buffer.from(authKey, 'utf16le').swap16()
+  // Chromium IndexedDB backing-store key: one-byte id lengths, database 2,
+  // object store 1, data index 1, IDB string key, UTF-16 code-unit length.
+  return Buffer.concat([
+    Buffer.from([0x00, 0x02, 0x01, 0x01, 0x01]),
+    encodeVarint(authKey.length),
+    utf16Be,
+  ])
+}
+
+function makeChromiumIndexedDbAuthLog(
+  apiKey: string,
+  appName: string,
+  options: {
+    sequenceLow?: number
+    sequenceHigh?: number
+    operation?: 'put' | 'delete'
+  } = {},
+): Buffer {
+  const indexedDbKey = makeChromiumIndexedDbAuthKey(apiKey, appName)
+  const operation = options.operation ?? 'put'
+  const batch = Buffer.concat([
+    Buffer.alloc(8),
+    Buffer.from([0x01, 0x00, 0x00, 0x00]),
+    Buffer.from([operation === 'put' ? 0x01 : 0x00]),
+    encodeVarint(indexedDbKey.length),
+    indexedDbKey,
+    ...(operation === 'put' ? [Buffer.from([0x01, 0x00])] : []),
+  ])
+  batch.writeUInt32LE(options.sequenceLow ?? 0, 0)
+  batch.writeUInt32LE(options.sequenceHigh ?? 0, 4)
+  return makeLevelDbPhysicalRecord(batch)
+}
+
+function makeLevelDbBlock(entries: Array<{ key: Buffer; value: Buffer }>): Buffer {
+  const encoded: Buffer[] = []
+  const restartOffsets: number[] = []
+  let offset = 0
+  for (const entry of entries) {
+    restartOffsets.push(offset)
+    const item = Buffer.concat([
+      encodeVarint(0),
+      encodeVarint(entry.key.length),
+      encodeVarint(entry.value.length),
+      entry.key,
+      entry.value,
+    ])
+    encoded.push(item)
+    offset += item.length
+  }
+  if (restartOffsets.length === 0) restartOffsets.push(0)
+  const restartArray = Buffer.alloc(restartOffsets.length * 4 + 4)
+  restartOffsets.forEach((value, index) => restartArray.writeUInt32LE(value, index * 4))
+  restartArray.writeUInt32LE(restartOffsets.length, restartOffsets.length * 4)
+  return Buffer.concat([...encoded, restartArray])
+}
+
+function appendLevelDbTableBlock(parts: Buffer[], block: Buffer): { offset: number; size: number } {
+  const offset = parts.reduce((total, part) => total + part.length, 0)
+  const compression = Buffer.from([0])
+  const trailer = Buffer.alloc(5)
+  trailer[0] = compression[0]
+  const checksum = crc32c(Buffer.concat([block, compression]))
+  trailer.writeUInt32LE((((checksum >>> 15) | (checksum << 17)) + 0xa282ead8) >>> 0, 1)
+  parts.push(block, trailer)
+  return { offset, size: block.length }
+}
+
+function makeLevelDbAuthTable(options: {
+  apiKey: string
+  appName: string
+  sequenceLow: number
+  sequenceHigh?: number
+  operation: 'put' | 'delete'
+}): Buffer {
+  const userKey = makeChromiumIndexedDbAuthKey(options.apiKey, options.appName)
+  const sequenceHigh = options.sequenceHigh ?? 0
+  const trailerLow = ((options.sequenceLow << 8) | (options.operation === 'put' ? 1 : 0)) >>> 0
+  const trailerHigh = ((sequenceHigh << 8) | (options.sequenceLow >>> 24)) >>> 0
+  const internalTrailer = Buffer.alloc(8)
+  internalTrailer.writeUInt32LE(trailerLow, 0)
+  internalTrailer.writeUInt32LE(trailerHigh, 4)
+  const dataBlock = makeLevelDbBlock([{
+    key: Buffer.concat([userKey, internalTrailer]),
+    value: Buffer.alloc(0),
+  }])
+  const parts: Buffer[] = []
+  const dataHandle = appendLevelDbTableBlock(parts, dataBlock)
+  const metaHandle = appendLevelDbTableBlock(parts, makeLevelDbBlock([]))
+  const dataHandleBytes = Buffer.concat([
+    encodeVarint(dataHandle.offset),
+    encodeVarint(dataHandle.size),
+  ])
+  const indexHandle = appendLevelDbTableBlock(parts, makeLevelDbBlock([{
+    key: Buffer.from([0xff]),
+    value: dataHandleBytes,
+  }]))
+  const footer = Buffer.alloc(48)
+  const handles = Buffer.concat([
+    encodeVarint(metaHandle.offset),
+    encodeVarint(metaHandle.size),
+    encodeVarint(indexHandle.offset),
+    encodeVarint(indexHandle.size),
+  ])
+  handles.copy(footer)
+  Buffer.from([0x57, 0xfb, 0x80, 0x8b, 0x24, 0x75, 0x47, 0xdb]).copy(footer, 40)
+  parts.push(footer)
+  return Buffer.concat(parts)
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -79,6 +307,486 @@ describe('main-owned Firebase persistence registry', () => {
     expect(sha256Hex('abc')).toBe(
       'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
     )
+  })
+
+  it('inherits the released v0.3.8 namespace from captured Auth key encoding when settings is absent', () => {
+    const root = makeRoot('released-browser-evidence')
+    const levelDb = writeV038AuthLevelDb(root)
+    const protectedFiles = ['CURRENT', 'MANIFEST-000001', '000004.log', '000005.ldb']
+    const before = protectedFiles.map(name => readFileSync(join(levelDb, name)))
+    const originalApiKey = DEFAULT_FIREBASE_CONFIG.apiKey
+    DEFAULT_FIREBASE_CONFIG.apiKey = V038_AUTH_LEVELDB_FIXTURE.placeholderKey
+    try {
+      const snapshot = detectPreexistingFirebaseProfile(root)
+      const registry = FirebasePersistenceRegistry.open(root, snapshot)
+
+      expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+      protectedFiles.forEach((name, index) => {
+        expect(readFileSync(join(levelDb, name))).toEqual(before[index])
+      })
+    } finally {
+      DEFAULT_FIREBASE_CONFIG.apiKey = originalApiKey
+    }
+  })
+
+  it('does not treat an arbitrary cache string as released browser persistence evidence', () => {
+    const root = makeRoot('cache-false-positive')
+    const token = `firebase:authUser:${DEFAULT_FIREBASE_CONFIG.apiKey}:${LEGACY_FIREBASE_APP_NAME}`
+    mkdirSync(join(root, 'Cache'), { recursive: true })
+    writeFileSync(join(root, 'Cache', 'entry.bin'), token)
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('ignores an orphan WAL containing the released key when CURRENT/MANIFEST does not own it', () => {
+    const root = makeRoot('orphan-auth-log')
+    const releasedLog = makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    )
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+    writeFileSync(join(levelDb, '000006.log'), releasedLog)
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('scans both current and previous live WALs during a LevelDB log rotation', () => {
+    const root = makeRoot('rotating-live-auth-log')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    ))
+    writeFileSync(
+      join(levelDb, 'MANIFEST-000001'),
+      makeLevelDbManifest({ logNumber: 6, previousLogNumber: 4 }),
+    )
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('does not resurrect a retired WAL after the rotation manifest clears prev_log_number', () => {
+    const root = makeRoot('retired-auth-log')
+    const levelDb = writeV038AuthLevelDb(root)
+    writeFileSync(
+      join(levelDb, 'MANIFEST-000001'),
+      makeLevelDbManifest({ logNumber: 6, previousLogNumber: 0 }),
+    )
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it.each([
+    ['CURRENT', (levelDb: string) => writeFileSync(join(levelDb, 'CURRENT'), 'MANIFEST-../escape\n')],
+    ['MANIFEST', (levelDb: string) => {
+      const manifestPath = join(levelDb, 'MANIFEST-000001')
+      const corrupt = Buffer.from(readFileSync(manifestPath))
+      corrupt[0] ^= 0xff
+      writeFileSync(manifestPath, corrupt)
+    }],
+  ])('fails closed on malformed %s metadata', (_label, corruptMetadata) => {
+    const root = makeRoot(`malformed-${_label.toLowerCase()}`)
+    const levelDb = writeV038AuthLevelDb(root)
+    corruptMetadata(levelDb)
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/CURRENT|manifest|checksum|invalid/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('validates the captured v0.3.8 Snappy table block even when it has no Auth claim', () => {
+    const root = makeRoot('snappy-table-validation')
+    const table = Buffer.from(V038_AUTH_LEVELDB_FIXTURE.table, 'base64')
+    // Captured table 000005 has one data block at offset 0, size 974, followed by
+    // LevelDB compression type 1 (raw Snappy). Detection must decode this block.
+    expect(table[974]).toBe(1)
+    writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('rejects a checksum-invalid live WAL without leaking its key or value', () => {
+    const root = makeRoot('invalid-live-log-crc')
+    const secretValue = 'private.parent@example.test uid-private eyJhbGciOiJub25lIn0.token'
+    const live = Buffer.concat([
+      makeChromiumIndexedDbAuthLog(DEFAULT_FIREBASE_CONFIG.apiKey, LEGACY_FIREBASE_APP_NAME),
+      Buffer.from(secretValue),
+    ])
+    live[0] ^= 0xff
+    writeV038AuthLevelDb(root, live)
+
+    let message = ''
+    try {
+      detectPreexistingFirebaseProfile(root)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toMatch(/checksum|physical record|invalid/i)
+    expect(message).not.toContain(DEFAULT_FIREBASE_CONFIG.apiKey)
+    expect(message).not.toContain('private.parent@example.test')
+    expect(message).not.toContain('uid-private')
+    expect(message).not.toContain('eyJhbGciOiJub25lIn0')
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('detects a same-inode same-size live WAL rewrite during its stable read', () => {
+    const root = makeRoot('live-log-same-inode-rewrite')
+    const levelDb = writeV038AuthLevelDb(root)
+    const logPath = join(levelDb, '000004.log')
+    const changed = Buffer.from(readFileSync(logPath))
+    changed[changed.length - 1] ^= 0x01
+    let attacked = false
+
+    expect(() => detectPreexistingFirebaseProfile(root, {
+      afterFirstFileRead: target => {
+        if (!attacked && target === logPath) {
+          attacked = true
+          writeFileSync(logPath, changed)
+        }
+      },
+    })).toThrow(/changed while reading|identity changed/i)
+    expect(attacked).toBe(true)
+    expect(readFileSync(logPath)).toEqual(changed)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('detects an identical-byte atomic live WAL path swap', () => {
+    const root = makeRoot('live-log-atomic-swap')
+    const levelDb = writeV038AuthLevelDb(root)
+    const logPath = join(levelDb, '000004.log')
+    const displaced = join(levelDb, '000004.displaced.log')
+    const original = readFileSync(logPath)
+    let attacked = false
+
+    expect(() => detectPreexistingFirebaseProfile(root, {
+      afterFirstFileRead: target => {
+        if (!attacked && target === logPath) {
+          attacked = true
+          renameSync(logPath, displaced)
+          writeFileSync(logPath, original)
+        }
+      },
+    })).toThrow(/changed while reading|identity changed|directory identity/i)
+    expect(attacked).toBe(true)
+    expect(readFileSync(displaced)).toEqual(original)
+    expect(readFileSync(logPath)).toEqual(original)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects a live WAL above the per-file read budget without reading or publishing it', () => {
+    const root = makeRoot('oversized-live-log')
+    const levelDb = writeV038AuthLevelDb(root)
+    const logPath = join(levelDb, '000004.log')
+    truncateSync(logPath, 64 * 1024 * 1024 + 1)
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/size|budget/i)
+    expect(lstatSync(logPath).size).toBe(64 * 1024 * 1024 + 1)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects an overpopulated LevelDB directory before scanning attacker-controlled files', () => {
+    const root = makeRoot('too-many-leveldb-entries')
+    const levelDb = writeV038AuthLevelDb(root)
+    for (let index = 0; index < 509; index += 1) {
+      writeFileSync(join(levelDb, `attacker-${String(index).padStart(4, '0')}`), '')
+    }
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/too many entries/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects a manifest with more live files than the bounded scanner permits', () => {
+    const root = makeRoot('too-many-live-files')
+    const levelDb = writeV038AuthLevelDb(root)
+    writeFileSync(
+      join(levelDb, 'MANIFEST-000001'),
+      makeLevelDbManifest({ tableNumbers: Array.from({ length: 129 }, (_, index) => index + 1) }),
+    )
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/too many live files/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects a linked Chromium IndexedDB directory before publishing a registry', () => {
+    const root = makeRoot('indexeddb-link')
+    const outside = makeRoot('indexeddb-link-outside')
+    writeV038AuthLevelDb(outside)
+    try {
+      symlinkSync(join(outside, 'IndexedDB'), join(root, 'IndexedDB'), 'junction')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') return
+      throw error
+    }
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/link|reparse|identity|path/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('selects an evidenced FNV namespace only when the public namespace is absent', () => {
+    const root = makeRoot('fnv-browser-evidence')
+    writeSettingsEvidence(root, customConfig)
+    const fnvAppName = getUnreleasedFNVFirebaseAppName(customConfig)
+    writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(customConfig.apiKey, fnvAppName))
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(customConfig)).toEqual({
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity: canonicalFirebaseConfig(customConfig),
+      appName: fnvAppName,
+    })
+  })
+
+  it('prefers the public v0.3.8 namespace when both public and FNV keys are evidenced', () => {
+    const root = makeRoot('public-and-fnv-evidence')
+    writeSettingsEvidence(root, customConfig)
+    const log = Buffer.concat([
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, getUnreleasedFNVFirebaseAppName(customConfig)),
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, LEGACY_FIREBASE_APP_NAME),
+    ])
+    writeV038AuthLevelDb(root, log)
+
+    const registry = FirebasePersistenceRegistry.open(
+      root,
+      detectPreexistingFirebaseProfile(root),
+    )
+
+    expect(registry.claim(customConfig).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('treats an SST value as absent when a newer live WAL tombstone deletes it', () => {
+    const root = makeRoot('sst-value-wal-delete')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2, operation: 'delete' },
+    ))
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbAuthTable({
+      apiKey: DEFAULT_FIREBASE_CONFIG.apiKey,
+      appName: LEGACY_FIREBASE_APP_NAME,
+      sequenceLow: 1,
+      operation: 'put',
+    }))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('treats a WAL value as absent when a newer live SST tombstone deletes it', () => {
+    const root = makeRoot('wal-value-sst-delete')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 1, operation: 'put' },
+    ))
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbAuthTable({
+      apiKey: DEFAULT_FIREBASE_CONFIG.apiKey,
+      appName: LEGACY_FIREBASE_APP_NAME,
+      sequenceLow: 2,
+      operation: 'delete',
+    }))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('restores active evidence when a newer put recreates a deleted Auth key', () => {
+    const root = makeRoot('delete-then-recreate')
+    writeV038AuthLevelDb(root, Buffer.concat([
+      makeChromiumIndexedDbAuthLog(
+        DEFAULT_FIREBASE_CONFIG.apiKey,
+        LEGACY_FIREBASE_APP_NAME,
+        { sequenceLow: 1, operation: 'delete' },
+      ),
+      makeChromiumIndexedDbAuthLog(
+        DEFAULT_FIREBASE_CONFIG.apiKey,
+        LEGACY_FIREBASE_APP_NAME,
+        { sequenceLow: 2, operation: 'put' },
+      ),
+    ]))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('fails closed when live SST and WAL disagree at the same LevelDB sequence', () => {
+    const root = makeRoot('same-sequence-conflict')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2, operation: 'delete' },
+    ))
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbAuthTable({
+      apiKey: DEFAULT_FIREBASE_CONFIG.apiKey,
+      appName: LEGACY_FIREBASE_APP_NAME,
+      sequenceLow: 2,
+      operation: 'put',
+    }))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/sequence|conflict|ambiguous/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('selects active FNV evidence when the public key has a newer tombstone', () => {
+    const root = makeRoot('deleted-public-active-fnv')
+    writeSettingsEvidence(root, customConfig)
+    const fnvAppName = getUnreleasedFNVFirebaseAppName(customConfig)
+    writeV038AuthLevelDb(root, Buffer.concat([
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, LEGACY_FIREBASE_APP_NAME, {
+        sequenceLow: 1,
+      }),
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, fnvAppName, {
+        sequenceLow: 2,
+      }),
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, LEGACY_FIREBASE_APP_NAME, {
+        sequenceLow: 3,
+        operation: 'delete',
+      }),
+    ]))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(customConfig)).toMatchObject({ version: 2, appName: fnvAppName })
+  })
+
+  it('keeps public evidence when a newer tombstone removes only the FNV key', () => {
+    const root = makeRoot('active-public-deleted-fnv')
+    writeSettingsEvidence(root, customConfig)
+    const fnvAppName = getUnreleasedFNVFirebaseAppName(customConfig)
+    writeV038AuthLevelDb(root, Buffer.concat([
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, LEGACY_FIREBASE_APP_NAME, {
+        sequenceLow: 2,
+      }),
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, fnvAppName, {
+        sequenceLow: 1,
+      }),
+      makeChromiumIndexedDbAuthLog(customConfig.apiKey, fnvAppName, {
+        sequenceLow: 3,
+        operation: 'delete',
+      }),
+    ]))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(customConfig).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('rejects a WAL base sequence outside LevelDB\'s 56-bit sequence domain', () => {
+    const root = makeRoot('wal-sequence-overflow')
+    writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceHigh: 0x01000000 },
+    ))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/sequence/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('accepts only the explicit FNV registry claim variant and exact derived app name', () => {
+    const appName = getUnreleasedFNVFirebaseAppName(customConfig)
+    expect(parseFirebasePersistenceClaim({
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity: canonicalFirebaseConfig(customConfig),
+      appName,
+    }, customConfig)).toEqual({
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity: canonicalFirebaseConfig(customConfig),
+      appName,
+    })
+    expect(() => parseFirebasePersistenceClaim({
+      version: 1,
+      configIdentity: canonicalFirebaseConfig(customConfig),
+      appName,
+    }, customConfig)).toThrow(/claim|invalid/i)
+    expect(() => parseFirebasePersistenceClaim({
+      version: 2,
+      ownership: 'main-registry-fnv-evidence',
+      configIdentity: canonicalFirebaseConfig(customConfig),
+      appName: 'baby-diary-0000000000000000',
+    }, customConfig)).toThrow(/claim|invalid/i)
+  })
+
+  it('snapshots corrupt settings without publishing until validated recovery completes', () => {
+    const root = makeRoot('corrupt-recovery-gate')
+    writeFileSync(join(root, 'settings.json'), '{broken-settings')
+
+    const snapshot = detectPreexistingFirebaseProfile(root)
+
+    expect(snapshot.kind).toBe('settings-invalid')
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+    expect(() => FirebasePersistenceRegistry.open(root, snapshot)).toThrow(/recovery/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('keeps the registry absent through every Windows restart-required recovery phase', () => {
+    const root = makeRoot('windows-recovery-publication-gate')
+    writeVerifiedRecoveryBackup(root)
+    writeFileSync(join(root, 'settings.json'), '{ broken settings')
+    writeFileSync(join(root, BABY_INFO_JOURNAL_FILE), '{"version":1,"type":"mutation"')
+    const snapshot = detectPreexistingFirebaseProfile(root, { platform: 'win32' })
+    expect(snapshot.kind).toBe('settings-invalid')
+
+    const startLikeMain = (startupId: string): FirebasePersistenceRegistry => {
+      const settingsStore = new SettingsStore(root, { platform: 'win32', startupId })
+      return FirebasePersistenceRegistry.openAfterSettingsRecovery(
+        root,
+        snapshot,
+        settingsStore.get(),
+        { platform: 'win32' },
+      )
+    }
+
+    for (const startupId of ['registry-boot-0', 'registry-boot-1', 'registry-boot-2']) {
+      expect(() => startLikeMain(startupId)).toThrow(expect.objectContaining({
+        restartRequired: true,
+      }))
+      expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+    }
+
+    const registry = startLikeMain('registry-boot-3')
+    expect(registry.claim(customConfig).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(true)
+    const document = JSON.parse(readFileSync(
+      join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE),
+      'utf8',
+    ))
+    expect(document.eligibilityEvidence.kind).toBe('settings-recovered')
   })
 
   it('claims the exact shared default when released settings stored firebase:null', () => {
@@ -116,7 +824,9 @@ describe('main-owned Firebase persistence registry', () => {
       upgradeOpaque: { keep: true },
     }))
 
-    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/firebase value is invalid/i)
+    const snapshot = detectPreexistingFirebaseProfile(root)
+    expect(snapshot.kind).toBe('settings-invalid')
+    expect(() => FirebasePersistenceRegistry.open(root, snapshot)).toThrow(/recovery/i)
     expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
@@ -351,7 +1061,9 @@ describe('main-owned Firebase persistence registry', () => {
     const root = makeRoot('settings-corrupt')
     writeFileSync(join(root, 'settings.json'), '{not-json')
 
-    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/settings evidence is invalid/i)
+    const snapshot = detectPreexistingFirebaseProfile(root)
+    expect(snapshot.kind).toBe('settings-invalid')
+    expect(() => FirebasePersistenceRegistry.open(root, snapshot)).toThrow(/recovery/i)
     expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
     expect(readFileSync(join(root, 'settings.json'), 'utf8')).toBe('{not-json')
   })
