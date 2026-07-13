@@ -102,8 +102,8 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
     date: fmt(birthPlusMonths(birth, 6)),
     nameKo: '하프 버스데이',
     nameJa: 'ハーフバースデー',
-    descKo: '생후 6개월 기념 — 표정이 풍부해진 아기의 성장을 기록해요',
-    descJa: '生後6ヶ月のお祝い。成長の記録にぴったりの日です',
+    descKo: '생후 6개월을 축하하고 사진이나 메모로 기념하는 날이에요',
+    descJa: '生後6か月を祝い、写真やメモで記念する日です',
     culture: 'both',
   })
 

@@ -424,7 +424,7 @@ export function formatEventValue(e: DiaryEvent): string {
     }
     case 'formula': {
       const d = e.data as { ml: number }
-      return `${d.ml}ml`
+      return `${d.ml}mL`
     }
     case 'diary': {
       const d = e.data as { title?: string; text: string }

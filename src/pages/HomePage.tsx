@@ -412,7 +412,7 @@ function StatCards() {
       value: (
         <>
           {formulaMl}
-          <span className="stat-card-unit" style={{ fontSize: 16, marginLeft: 3 }}>ml</span>
+          <span className="stat-card-unit" style={{ fontSize: 16, marginLeft: 3 }}>mL</span>
         </>
       ),
       delta: yFormulaMl > 0 ? <DeltaTag current={formulaMl} prev={yFormulaMl} /> : null,
@@ -1055,7 +1055,7 @@ function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopove
           {/* P18: Floor at 10 so stepper never produces 0-ml formula entry */}
           <button type="button" className="stepper-btn" onClick={() => setMl(v => Math.max(10, v - 10))}>−</button>
           <div className="stepper-value">{ml}</div>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', paddingRight: 6 }}>ml</span>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', paddingRight: 6 }}>mL</span>
           <button type="button" className="stepper-btn" onClick={() => setMl(v => v + 10)}>+</button>
         </div>
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -1066,7 +1066,7 @@ function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopove
               className={`filter-chip${ml === v ? ' active' : ''}`}
               onClick={() => setMl(v)}
             >
-              {v}ml
+              {v}mL
             </button>
           ))}
         </div>
@@ -1520,7 +1520,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const handleFormulaConfirm = async (ml: number) => {
     setPopover(null)
-    const label = `${t('quickBtn.formula')} ${ml}ml`
+    const label = `${t('quickBtn.formula')} ${ml}mL`
     if (ageDays === null) {
       await quickRecord(() => addFormula(ml), label)
       return

@@ -26,7 +26,7 @@ interface DayIndicators {
   diaperCount: number
   feedingCount: number
   formulaMl: number
-  hasHighTemp: boolean
+  hasTempRecord: boolean
   hasDiaryOrMessage: boolean
   sleepCount: number
   sleepMinutes: number
@@ -43,13 +43,13 @@ function useDayIndicators(events: DiaryEvent[], date: Date): DayIndicators {
     const formulaMl = dayEvents
       .filter(e => e.type === 'formula')
       .reduce((s, e) => s + ((e.data as FormulaData).ml ?? 0), 0)
-    const hasHighTemp = dayEvents.some(e => e.type === 'temp' && (e.data as { celsius: number }).celsius >= 37.5)
+    const hasTempRecord = dayEvents.some(e => e.type === 'temp')
     const hasDiaryOrMessage = dayEvents.some(e => e.type === 'diary' || e.type === 'message')
     const sleepEvts = dayEvents.filter(e => e.type === 'sleep')
     const sleepCount = sleepEvts.length
     const sleepMinutes = sleepEvts.reduce((s, e) => s + ((e.data as SleepData).minutes ?? 0), 0)
     const growthCount = dayEvents.filter(e => e.type === 'growth').length
-    return { diaperCount, feedingCount, formulaMl, hasHighTemp, hasDiaryOrMessage, sleepCount, sleepMinutes, growthCount }
+    return { diaperCount, feedingCount, formulaMl, hasTempRecord, hasDiaryOrMessage, sleepCount, sleepMinutes, growthCount }
   }, [events, date])
 }
 
@@ -143,14 +143,14 @@ interface MonthDayCellProps {
 
 function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, milestones, guidanceItems, birthdate }: MonthDayCellProps) {
   const indicators = useDayIndicators(allEvents, day)
-  const { i18n: i18nInstance } = useTranslation()
+  const { t, i18n: i18nInstance } = useTranslation()
   const isCurrentMonth = isSameMonth(day, displayMonth)
   const isTodayDay = isToday(day)
   const isSelected = isSameDay(day, selectedDate)
   const dayNum = getDay(day) // 0=Sun, 6=Sat
   const lang = i18nInstance.language
 
-  const hasContent = indicators.diaperCount > 0 || indicators.feedingCount > 0 || indicators.hasHighTemp || indicators.hasDiaryOrMessage || indicators.sleepCount > 0 || indicators.growthCount > 0
+  const hasContent = indicators.diaperCount > 0 || indicators.feedingCount > 0 || indicators.hasTempRecord || indicators.hasDiaryOrMessage || indicators.sleepCount > 0 || indicators.growthCount > 0
 
   const dayStr = format(day, 'yyyy-MM-dd')
   const dayMilestones = milestones.filter(m => m.date === dayStr)
@@ -187,11 +187,11 @@ function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, mi
               )}
               {indicators.feedingCount > 0 && (
                 <span className="cal-indicator cal-indicator-peach">
-                  {indicators.formulaMl > 0 ? `${indicators.formulaMl}ml` : indicators.feedingCount}
+                  {indicators.formulaMl > 0 ? `${indicators.formulaMl}mL` : indicators.feedingCount}
                 </span>
               )}
-              {indicators.hasHighTemp && (
-                <span className="cal-indicator cal-indicator-red">↑</span>
+              {indicators.hasTempRecord && (
+                <span className="cal-indicator cal-indicator-temp" title={t('history.tempIndicator')}>°C</span>
               )}
               {indicators.hasDiaryOrMessage && (
                 <span className="cal-indicator cal-indicator-rose">●</span>
@@ -294,7 +294,7 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
           const breastCount = indicators.filter(e => e.type === 'breast').length
           const formulaCount = indicators.filter(e => e.type === 'formula').length
           const formulaMl = indicators.filter(e => e.type === 'formula').reduce((s, e) => s + ((e.data as FormulaData).ml ?? 0), 0)
-          const hasHighTemp = indicators.some(e => e.type === 'temp' && (e.data as { celsius: number }).celsius >= 37.5)
+          const hasTempRecord = indicators.some(e => e.type === 'temp')
           const sleepEvts = indicators.filter(e => e.type === 'sleep')
           const sleepCount = sleepEvts.length
           const sleepMinutes = sleepEvts.reduce((s, e) => s + ((e.data as SleepData).minutes ?? 0), 0)
@@ -343,11 +343,11 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
                   <span className="cal-chip cal-chip-peach">
                     {breastCount > 0 && `${t('event.breast')} ${breastCount}`}
                     {breastCount > 0 && formulaCount > 0 && ' · '}
-                    {formulaCount > 0 && (formulaMl > 0 ? `${t('event.formula')} ${formulaMl}ml` : `${t('event.formula')} ${formulaCount}`)}
+                    {formulaCount > 0 && (formulaMl > 0 ? `${t('event.formula')} ${formulaMl}mL` : `${t('event.formula')} ${formulaCount}`)}
                   </span>
                 )}
-                {hasHighTemp && (
-                  <span className="cal-chip cal-chip-red">{t('history.tempHighIndicator')}</span>
+                {hasTempRecord && (
+                  <span className="cal-chip cal-chip-temp">{t('history.tempIndicator')}</span>
                 )}
                 {sleepCount > 0 && (
                   <span className="cal-chip cal-chip-sleep">

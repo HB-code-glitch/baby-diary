@@ -2929,6 +2929,7 @@ details[open] > summary .evidence-source-chevron {
 .cal-indicator-peach { background: var(--peach-100); color: var(--peach-600); }
 .cal-indicator-red   { background: var(--blush);     color: var(--blush-text); font-size: 10px; }
 .cal-indicator-rose  { background: var(--rose-100);  color: var(--rose-400);   font-size: 8px; }
+.cal-indicator-temp  { background: var(--sky);       color: var(--sky-text); }
 
 /* Week view */
 .cal-week-rows {
@@ -2999,6 +3000,7 @@ details[open] > summary .evidence-source-chevron {
 .cal-chip-red     { background: var(--blush);        color: var(--blush-text); }
 .cal-chip-sleep   { background: var(--lavender-100); color: var(--lavender-600); }
 .cal-chip-growth  { background: var(--indigo-100);   color: var(--indigo-600); }
+.cal-chip-temp    { background: var(--sky);          color: var(--sky-text); }
 
 .cal-week-times { font-size: 11px; color: var(--text-muted); white-space: nowrap; text-align: right; }
 
