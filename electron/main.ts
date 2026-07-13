@@ -6,6 +6,7 @@ import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
 import { DiaryEvent, AppSettings, ExportFormat, SavePdfResult } from '../shared/types'
 import { attachUpdaterWindow, setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
+import { registerEvidenceExternalLinkIPC } from './evidenceExternalLink'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 
@@ -68,6 +69,8 @@ function createWindow(): void {
 }
 
 function setupIPC(): void {
+  registerEvidenceExternalLinkIPC(ipcMain, url => shell.openExternal(url))
+
   // P20: Use cached getAll() instead of loadAll() on every IPC call.
   // loadAll() clears the index and re-scans disk — O(N) I/O per reconcile.
   // getAll() returns the in-memory index (O(1)) which is always up-to-date after append().

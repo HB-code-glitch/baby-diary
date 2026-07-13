@@ -39,6 +39,35 @@
     "lessSummary": "요약 접기",
     "dailyTip": "오늘 도움말"
   },
+  "ageGuidance": {
+    "title": "지금 필요한 것",
+    "evidenceCenter": "시기별 근거 센터",
+    "description": "현재 월령에서 우선순위가 높은 내용부터 보여드려요.",
+    "more": "그 밖의 안내 {{count}}개 보기",
+    "less": "안내 접기",
+    "missingTitle": "생일을 설정하면 지금 필요한 안내를 보여드려요",
+    "missingBody": "나이에 맞지 않는 일반 안내는 표시하지 않고, 저장된 생일로 월령을 계산해요.",
+    "missingAction": "생일 설정하기",
+    "urgent": "긴급할 때 확인",
+    "checkpoint": "현재 발달 체크포인트",
+    "officialEvidence": "공식 근거 {{count}}개",
+    "reviewedOn": "검토일",
+    "openOfficial": "공식 페이지 열기",
+    "openFailed": "공식 페이지를 열지 못했어요.",
+    "actionTitle": "확인할 것",
+    "urgency": { "urgent": "긴급", "important": "중요", "routine": "일상" },
+    "categories": {
+      "urgent-care": "진료·긴급",
+      "feeding": "수유·식사",
+      "safe-sleep": "안전한 수면",
+      "food-safety": "식품 안전",
+      "activity-sleep": "활동·수면",
+      "development": "발달",
+      "oral-health": "구강 관리",
+      "checkup-vaccination": "검진·예방접종",
+      "general": "생활 전반"
+    }
+  },
   "stat": {
     "formulaLabel": "분유 총량",
     "peeLabel": "소변",

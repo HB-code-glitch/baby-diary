@@ -571,17 +571,17 @@ async function main() {
       await page.keyboard.press('Enter')
     }
 
-    // FeedingTipPopup should appear with next-feed window text (ko: /다음 수유는 보통/)
+    // FeedingTipPopup should reinforce responsive hunger cues, not a fixed interval.
     try {
       await page.waitForSelector('.feeding-tip-popup, [class*="feeding-tip"]', { timeout: 6000 })
-      // Assert popup contains next-feed window text
+      // Assert popup contains responsive-feeding cue text.
       const tipText = await page.$eval(
         '.feeding-tip-popup, [class*="feeding-tip"]',
         el => el.textContent ?? ''
       )
       assert(
-        /다음 수유는 보통|授乳の目安/.test(tipText),
-        `breastfeed tip popup contains next-feed window text (got: "${tipText.slice(0, 80)}")`
+        /배고픔 신호|空腹のサイン/.test(tipText),
+        `breastfeed tip popup contains responsive hunger-cue text (got: "${tipText.slice(0, 80)}")`
       )
       await shot(page, 'breastfeed-tip')
 
@@ -616,31 +616,50 @@ async function main() {
     await shot(page, 'breastfeed-countdown')
 
     // ---------------------------------------------------------------------------
-    // 3e. Settings — 모유수유 간격 가이드 accordion expanded
+    // 3e. Settings — current-stage evidence center (no live external navigation)
     // ---------------------------------------------------------------------------
-    console.log('  → settings breastfeeding guide accordion')
+    console.log('  → settings current-stage evidence center')
 
     await page.click('[data-tour="nav-settings"]')
     await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
 
-    // Locate the BreastfeedingGuideCard button (contains 모유수유 간격 or 授乳間隔)
-    const bfGuideBtn = await page.locator('button[aria-expanded]').filter({ hasText: /모유수유 간격|授乳間隔/ }).first()
-    const bfGuideBtnVisible = await bfGuideBtn.isVisible().catch(() => false)
-    assert(bfGuideBtnVisible, 'breastfeeding guide accordion button found')
-    if (bfGuideBtnVisible) {
-      const isExpanded = await bfGuideBtn.getAttribute('aria-expanded')
-      if (isExpanded !== 'true') {
-        await bfGuideBtn.click()
-        await page.waitForTimeout(400)
-      }
-      const isExpandedAfterClick = await bfGuideBtn.getAttribute('aria-expanded')
-      assert(isExpandedAfterClick === 'true', 'breastfeeding guide accordion expanded')
-    }
-    await shot(page, 'bf-guide')
+    const evidenceCenter = page.locator('[data-tour="age-guidance"]')
+    assert(await evidenceCenter.isVisible(), 'Korean current-stage evidence center is visible')
+    assert(/시기별 근거 센터/.test(await evidenceCenter.textContent()), 'Korean evidence-center title is localized')
+    assert(await evidenceCenter.locator('[data-development-checkpoint]').count() === 1, 'current development checkpoint is selected')
+    const settingsSourceSummary = evidenceCenter.locator('[data-development-checkpoint] .evidence-source-list > summary')
+    await settingsSourceSummary.click()
+    assert(await settingsSourceSummary.getAttribute('aria-expanded') === 'true', 'Settings official-source disclosure expands without navigation')
+    const sourceIds = await evidenceCenter.locator('button[data-source-id]').evaluateAll(buttons =>
+      buttons.map(button => button.getAttribute('data-source-id')).filter(Boolean)
+    )
+    assert(sourceIds.length > 0, 'evidence center exposes exact official source IDs')
+    assert(sourceIds.every(id => !id.includes('://')), 'renderer source payloads are IDs, not URLs')
+    await shot(page, 'evidence-center')
 
     // Navigate back to home for subsequent steps
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="quick-row"]', { timeout: 5000 })
+    assert(
+      await page.locator('[data-tour="age-guidance"] [data-guidance-priority]').count() === 3,
+      'Home initially shows exactly three current-stage priorities',
+    )
+    const guidanceMore = page.locator('[data-tour="age-guidance"] [data-guidance-more]')
+    assert(await guidanceMore.getAttribute('aria-expanded') === 'false', 'Home extra guidance is initially collapsed')
+    await guidanceMore.click()
+    assert(await guidanceMore.getAttribute('aria-expanded') === 'true', 'Home extra guidance expands in place')
+    assert(await page.locator('[data-tour="age-guidance"] [data-guidance-secondary]').isVisible(), 'Home expanded guidance is visible')
+    await guidanceMore.click()
+    assert(await guidanceMore.getAttribute('aria-expanded') === 'false', 'Home extra guidance collapses in place')
+
+    const firstPriority = page.locator('[data-tour="age-guidance"] [data-guidance-priority]').first()
+    const prioritySummary = firstPriority.locator(':scope > summary')
+    await prioritySummary.click()
+    assert(await prioritySummary.getAttribute('aria-expanded') === 'true', 'Home priority details expose accessible expanded state')
+    const sourceSummary = firstPriority.locator('.evidence-source-list > summary').first()
+    await sourceSummary.click()
+    assert(await sourceSummary.getAttribute('aria-expanded') === 'true', 'Home official-source disclosure expands without navigation')
+    assert(await firstPriority.locator('button[data-source-id]').count() > 0, 'Expanded Home source disclosure retains exact source IDs')
 
     // ---------------------------------------------------------------------------
     // 4. 기록 (History) — calendar views
@@ -902,9 +921,16 @@ async function main() {
       await page.waitForTimeout(600)
     }
 
+    const jaEvidenceCenter = page.locator('[data-tour="age-guidance"]')
+    assert(/年齢別エビデンスセンター/.test(await jaEvidenceCenter.textContent()), 'Japanese evidence-center title is localized')
+
     // Go to home and screenshot Japanese UI
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="hero"]', { timeout: 5000 })
+    assert(
+      /今必要なこと/.test(await page.locator('[data-tour="age-guidance"]').textContent()),
+      'Japanese Home current-stage guidance is localized',
+    )
     await waitForQuickRecordAnimations(page)
     await shot(page, 'home-ja')
 

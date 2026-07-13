@@ -39,6 +39,35 @@
     "lessSummary": "まとめを閉じる",
     "dailyTip": "今日のヒント"
   },
+  "ageGuidance": {
+    "title": "今必要なこと",
+    "evidenceCenter": "年齢別エビデンスセンター",
+    "description": "今の月齢で優先度が高いものから表示します。",
+    "more": "そのほか{{count}}件を見る",
+    "less": "たたむ",
+    "missingTitle": "誕生日を設定すると、今必要な案内を表示できます",
+    "missingBody": "年齢に合わない一般案内は表示せず、保存された誕生日から月齢を計算します。",
+    "missingAction": "誕生日を設定",
+    "urgent": "緊急時の案内",
+    "checkpoint": "現在の発達チェックポイント",
+    "officialEvidence": "公式根拠 {{count}}件",
+    "reviewedOn": "確認日",
+    "openOfficial": "公式ページを開く",
+    "openFailed": "公式ページを開けませんでした。",
+    "actionTitle": "確認すること",
+    "urgency": { "urgent": "緊急", "important": "重要", "routine": "日常" },
+    "categories": {
+      "urgent-care": "受診・緊急",
+      "feeding": "授乳・食事",
+      "safe-sleep": "安全な睡眠",
+      "food-safety": "食品安全",
+      "activity-sleep": "活動・睡眠",
+      "development": "発達",
+      "oral-health": "口腔ケア",
+      "checkup-vaccination": "健診・予防接種",
+      "general": "生活全般"
+    }
+  },
   "stat": {
     "formulaLabel": "ミルク合計",
     "peeLabel": "おしっこ",

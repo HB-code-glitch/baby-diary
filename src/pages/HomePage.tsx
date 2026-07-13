@@ -19,6 +19,7 @@ import {
 } from '../lib/guidance'
 import { FeedingTipPopup } from '../components/FeedingTipPopup'
 import { FeverModal } from '../components/FeverModal'
+import { AgeGuidancePanel } from '../components/AgeGuidancePanel'
 import { useSyncStatus } from '../sync/useSync'
 import {
   getVisibleHomeMetrics,
@@ -1739,15 +1740,22 @@ export function HomePage({ onNavigate }: HomePageProps) {
           </div>
         </div>
 
-        {/* RIGHT: insights rail */}
-        <InsightsPanel
-          lastFeeding={lastFeeding}
-          lastBreastSide={lastBreastSide}
-          todayPeeCount={peeCount}
-          todayPoopCount={poopCount}
-          dataInfo={dataInfo}
-          todaySleepMinutes={todaySleepMin}
-        />
+        {/* RIGHT: current-stage guidance + today's concise insights */}
+        <aside className="home-insight-stack" aria-label={t('ageGuidance.title')}>
+          <AgeGuidancePanel
+            birthdate={birthdate}
+            variant="home"
+            onRequestBirthdate={onNavigate ? () => onNavigate('settings') : undefined}
+          />
+          <InsightsPanel
+            lastFeeding={lastFeeding}
+            lastBreastSide={lastBreastSide}
+            todayPeeCount={peeCount}
+            todayPoopCount={poopCount}
+            dataInfo={dataInfo}
+            todaySleepMinutes={todaySleepMin}
+          />
+        </aside>
       </div>
 
       {/* Floating nursing timer pill */}

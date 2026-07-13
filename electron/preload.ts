@@ -1,7 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult } from '../shared/types'
+import type { HealthEvidenceSourceId } from '../shared/healthEvidence'
+
+// Sandboxed preload scripts cannot require local runtime modules. Keep this
+// channel literal in sync with electron/evidenceExternalLink.ts; the contract
+// test drives the exposed API through the registered main handler.
+const EVIDENCE_SOURCE_OPEN_CHANNEL = 'evidence:openSource' as const
 
 const babyDiaryAPI = {
+  openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> =>
+    ipcRenderer.invoke(EVIDENCE_SOURCE_OPEN_CHANNEL, sourceId),
+
   listEvents: (): Promise<DiaryEvent[]> =>
     ipcRenderer.invoke('events:list'),
 

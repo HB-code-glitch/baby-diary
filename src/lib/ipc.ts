@@ -1,8 +1,11 @@
 import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult } from '../../shared/types'
+import type { HealthEvidenceSourceId } from '../../shared/healthEvidence'
+import { getEvidenceSourceById } from '../../shared/healthEvidence'
 
 declare global {
   interface Window {
     babyDiary: {
+      openEvidenceSource: (sourceId: HealthEvidenceSourceId) => Promise<void>
       listEvents: () => Promise<DiaryEvent[]>
       appendEvent: (event: DiaryEvent) => Promise<'ok' | 'duplicate' | 'error'>
       getSettings: () => Promise<AppSettings>
@@ -66,6 +69,12 @@ function mockMerge(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
 }
 
 const mockBabyDiary: Window['babyDiary'] = {
+  openEvidenceSource: async (sourceId: HealthEvidenceSourceId): Promise<void> => {
+    const source = getEvidenceSourceById(sourceId)
+    if (!source) throw new Error('Unknown health evidence source')
+    window.open(source.url, '_blank', 'noopener,noreferrer')
+  },
+
   listEvents: async () => {
     // Return max-rev per id (same logic as real JSONL layer)
     const all = mockGetEvents()
@@ -193,6 +202,8 @@ function getApi(): Window['babyDiary'] {
 }
 
 export const ipc = {
+  openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> =>
+    getApi().openEvidenceSource(sourceId),
   listEvents:       (): Promise<DiaryEvent[]>    => getApi().listEvents(),
   appendEvent:      (event: DiaryEvent)          => getApi().appendEvent(event),
   getSettings:      (): Promise<AppSettings>     => getApi().getSettings(),

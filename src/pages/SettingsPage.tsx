@@ -23,6 +23,7 @@ import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
 import { updateFamilyBabyInfo, updateMemberEntry, useSyncStatus } from '../sync/useSync'
 import { getSyncDisclosurePresentation } from '../lib/progressiveDisclosure'
 import { getDataDisclosurePresentation } from '../lib/settingsPresentation'
+import { AgeGuidancePanel } from '../components/AgeGuidancePanel'
 
 // Re-export for any consumers that already import from this path
 export type { FormSnapshot }
@@ -524,11 +525,8 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
             </div>
           </DisclosureSection>
 
-          {/* Care guidance reference card */}
-          <GuidanceReferenceCard lang={i18nInstance.language as 'ko' | 'ja'} />
-
-          {/* Breastfeeding interval guide */}
-          <BreastfeedingGuideCard lang={i18nInstance.language as 'ko' | 'ja'} />
+          {/* Current-stage evidence center — unknown residence keeps both KR/JP official links. */}
+          <AgeGuidancePanel birthdate={birthdate} variant="settings" />
 
           {/* Sync section */}
           <div data-tour="settings-sync">
