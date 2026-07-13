@@ -26,6 +26,7 @@ const requiredSourceIds = [
   'nichd-safe-sleep',
   'niaid-peanut-allergy',
   'aap-safe-sleep-2022',
+  'aap-fever-baby',
   'nice-fever-ng143',
   'nice-newborn-red-flags-ng194',
   'kdca-infant-nutrition',
@@ -48,7 +49,6 @@ const retiredCommercialHosts = [
   'kidshealth.org',
   'mamanoko.jp',
   'seattlechildrens.org',
-  'healthychildren.org',
   'nemours.org',
 ]
 
@@ -102,6 +102,13 @@ describe('HEALTH_EVIDENCE_SOURCES', () => {
     expect(getEvidenceSourceById('jp-fdma-119')?.url).toBe(
       'https://www.fdma.go.jp/mission/enrichment/kyukyumusen_kinkyutuhou/119.html'
     )
+  })
+
+  it('uses the exact AAP parent fever source for the 38.3°C infant threshold', () => {
+    expect(getEvidenceSourceById('aap-fever-baby')?.url).toBe(
+      'https://www.healthychildren.org/English/health-issues/conditions/fever/Pages/Fever-and-Your-Baby.aspx'
+    )
+    expect(OFFICIAL_EVIDENCE_HOSTS).toContain('www.healthychildren.org')
   })
 
   it('returns localized immutable display records in caller order', () => {

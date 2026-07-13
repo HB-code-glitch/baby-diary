@@ -5,6 +5,7 @@
 import {
   HEALTH_EVIDENCE_SOURCES,
   getEvidenceSources,
+  type HealthContentLocale,
   type HealthEvidenceSourceId,
 } from './healthEvidence'
 
@@ -70,9 +71,9 @@ const markerDefinitions: readonly GuidanceMarkerDefinition[] = [
     startDay: 0,
     titleKo: '즉시 도움을 요청할 위험 신호',
     titleJa: '直ちに助けを求める危険サイン',
-    bodyKo: '체온과 무관하게 즉시 응급 도움을 요청해요: 피부가 창백·얼룩·청색, 숨쉬기 힘듦 또는 끙끙거림, 깨우기 어렵거나 반응이 매우 떨어짐, 눌러도 사라지지 않는 발진, 경련, 목 경직 또는 대천문 팽창, 심한 탈수, 초록색 담즙성 또는 분출성 구토.',
-    bodyJa: '体温に関係なく直ちに救急へ連絡してください: 青白い・まだら・青い皮膚, 呼吸困難またはうなり呼吸, 起こしにくい・反応が非常に弱い, 押しても消えない発疹, けいれん, 首のこわばりまたは大泉門の膨らみ, 重い脱水, 緑色の胆汁性または噴水状の嘔吐。',
-    sourceIds: ['nice-fever-ng143', 'nice-newborn-red-flags-ng194'],
+    bodyKo: '체온과 무관하게 즉시 응급 도움을 요청해요: 피부가 창백·얼룩·청색, 숨쉬기 힘듦 또는 끙끙거림, 깨우기 어렵거나 반응이 매우 떨어짐, 눌러도 사라지지 않는 발진, 경련, 목 경직, 심한 탈수, 초록색 담즙성 구토.',
+    bodyJa: '体温に関係なく直ちに救急へ連絡してください: 青白い・まだら・青い皮膚, 呼吸困難またはうなり呼吸, 起こしにくい・反応が非常に弱い, 押しても消えない発疹, けいれん, 首のこわばり, 重い脱水, 緑色の胆汁性嘔吐。',
+    sourceIds: ['nice-fever-ng143'],
     evidenceLevel: 'guideline-consensus',
   },
   {
@@ -89,14 +90,22 @@ const markerDefinitions: readonly GuidanceMarkerDefinition[] = [
   },
 ]
 
+export function getGuidanceSourceLabel(
+  marker: Pick<GuidanceMarker, 'sourceIds'>,
+  locale: HealthContentLocale
+): string {
+  return getEvidenceSources(marker.sourceIds, locale)
+    .map(source => source.organization)
+    .join(' · ')
+}
+
 export const GUIDANCE_MARKERS: GuidanceMarker[] = markerDefinitions.map(marker => {
   const sourceIds = Object.freeze([...marker.sourceIds])
   return {
     ...marker,
     sourceIds,
-    sourceLabel: getEvidenceSources(sourceIds, 'ko')
-      .map(source => source.organization)
-      .join(' · '),
+    // Compatibility only. Call getGuidanceSourceLabel for locale-aware display.
+    sourceLabel: getGuidanceSourceLabel({ sourceIds }, 'ko'),
   }
 })
 
@@ -186,7 +195,7 @@ export const FEVER_CARE: { steps: FeverCareStep[]; sourceLabel: string } = {
     },
     {
       ko: '상태가 나빠지거나 보호자가 걱정되면 더 일찍 의료진과 상의하고, 발열이 5일 이상이면 평가받아요.',
-      ja: '悪化する、または保護者が心配なら早めに医療者へ相談し、発熱が5日以上続く場合は評価を受けます。',
+      ja: '悪化する、または保護者が心配なら早めに医療者へ相談し、発熱が5日以上続く場合は診察を受けてください。',
     },
   ],
 }

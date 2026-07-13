@@ -21,6 +21,7 @@ export const OFFICIAL_EVIDENCE_HOSTS = Object.freeze([
   'safetosleep.nichd.nih.gov',
   'www.niaid.nih.gov',
   'publications.aap.org',
+  'www.healthychildren.org',
   'www.nice.org.uk',
   'health.kdca.go.kr',
   'nip.kdca.go.kr',
@@ -155,6 +156,13 @@ const sourceDefinitions = [
     organization: { ko: '미국소아과학회(AAP)', ja: '米国小児科学会（AAP）' },
     title: { ko: '수면 관련 영아 사망 예방 권고(2022)', ja: '睡眠関連乳児死亡の予防勧告（2022）' },
     url: 'https://publications.aap.org/pediatrics/article/150/1/e2022057990/188304/Sleep-Related-Infant-Deaths-Updated-2022',
+    reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
+  },
+  {
+    id: 'aap-fever-baby',
+    organization: { ko: '미국소아과학회(AAP)', ja: '米国小児科学会（AAP）' },
+    title: { ko: '아기의 발열: 소아청소년과에 연락할 때', ja: '赤ちゃんの発熱：小児科へ連絡する目安' },
+    url: 'https://www.healthychildren.org/English/health-issues/conditions/fever/Pages/Fever-and-Your-Baby.aspx',
     reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
   },
   {

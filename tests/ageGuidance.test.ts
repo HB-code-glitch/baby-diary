@@ -207,7 +207,7 @@ describe('AGE_GUIDANCE_ITEMS', () => {
       '앱은',
       'アプリは',
       '添い寝',
-      '評価を受けてください',
+      '評価を受け',
       '達成点',
       'cdcresponsivefeeding',
     ]) {
@@ -247,6 +247,7 @@ describe('AGE_GUIDANCE_ITEMS', () => {
     expect(young.urgency).toBe('urgent')
     expect(young.actionsKo.join(' ')).toContain('38°C 이상')
     expect(young.actionsJa.join(' ')).toContain('38°C以上')
+    expect(young.summaryJa).toContain('診察を受けてください')
   })
 
   it('shows the 3–5 month fever thresholds without mixing them into older stages', () => {
@@ -255,7 +256,7 @@ describe('AGE_GUIDANCE_ITEMS', () => {
     expect(fever.actionsKo.join(' ')).toContain('39.0°C 이상')
     expect(fever.actionsJa.join(' ')).toContain('38.3°C以上')
     expect(fever.actionsJa.join(' ')).toContain('39.0°C以上')
-    expect(fever.sourceIds).toContain('nice-fever-ng143')
+    expect(fever.sourceIds).toEqual(['aap-fever-baby', 'nice-fever-ng143'])
   })
 
   it('separates common red flags from young-infant-only signs', () => {
@@ -264,11 +265,20 @@ describe('AGE_GUIDANCE_ITEMS', () => {
     expect(preschoolText).toContain('초록색 담즙성 구토')
     expect(preschoolText).not.toContain('대천문')
     expect(preschoolText).not.toContain('분출성')
+    expect(preschool.sourceIds).toEqual(['nice-fever-ng143'])
 
     const infantOnly = AGE_GUIDANCE_ITEMS.find(item => item.id === 'young-infant-specific-urgent-care')!
     expect(infantOnly.actionsKo.join(' ')).toContain('대천문')
     expect(infantOnly.actionsJa.join(' ')).toContain('大泉門')
     expect(infantOnly.sourceIds).toContain('nice-newborn-red-flags-ng194')
+  })
+
+  it('shows concrete 12- and 15-month observations in the stage card', () => {
+    const item = AGE_GUIDANCE_ITEMS.find(candidate => candidate.id === 'twelve-seventeen-development')!
+    expect(item.actionsKo.join(' ')).toContain('손을 흔들')
+    expect(item.actionsKo.join(' ')).toContain('가리키')
+    expect(item.actionsJa.join(' ')).toContain('手を振る')
+    expect(item.actionsJa.join(' ')).toContain('指さす')
   })
 
   it('maps Korean and Japanese 119 guidance to each country authority', () => {
@@ -405,12 +415,16 @@ describe('age guidance selectors', () => {
       ['2028-01-15', 'two-years', ['two-years-development', 'two-years-activity-sleep', 'two-years-family-food-oral'], ['development', 'activity-sleep', 'oral-health']],
       ['2029-01-15', 'three-to-four-years', ['three-four-development', 'three-four-activity-sleep', 'three-four-injury-prevention'], ['development', 'activity-sleep', 'general']],
       ['2031-01-15', 'five-years', ['five-years-development', 'five-years-safety', 'five-years-nutrition-oral'], ['development', 'general', 'oral-health']],
-      ['2032-01-15', 'older-child-fallback', ['older-child-general-care', 'older-child-emergency', 'older-child-local-guidance'], ['general', 'urgent-care', 'checkup-vaccination']],
+      ['2032-01-15', 'older-child-fallback', ['older-child-general-care-kr', 'older-child-emergency-kr', 'older-child-local-guidance-kr'], ['general', 'urgent-care', 'checkup-vaccination']],
     ] as const
 
     for (const [asOf, stageId, ids, categories] of examples) {
       const birthdate = '2026-01-15'
-      const priorities = getPriorityAgeGuidanceForDate(birthdate, asOf)
+      const priorities = getPriorityAgeGuidanceForDate(
+        birthdate,
+        asOf,
+        stageId === 'older-child-fallback' ? 'KR' : undefined
+      )
       expect(priorities.map(item => item.id), stageId).toEqual(ids)
       expect(priorities.map(item => item.category), stageId).toEqual(categories)
       expect(priorities.every(item => item.stageId === stageId)).toBe(true)
@@ -425,7 +439,7 @@ describe('age guidance selectors', () => {
     const items = getAgeGuidanceForDate('2020-07-13', '2026-07-13')
     expect(items.length).toBeGreaterThan(0)
     expect(items.every(item => item.stageId === 'older-child-fallback')).toBe(true)
-    expect(items.some(item => item.id === 'older-child-fallback-local-care-kr')).toBe(true)
+    expect(items.some(item => item.id === 'older-child-local-guidance-kr')).toBe(true)
     expect(items.some(item => item.category === 'urgent-care')).toBe(true)
     expect(items.some(item => item.category === 'feeding')).toBe(false)
     expect(items.some(item => item.category === 'safe-sleep')).toBe(false)
@@ -442,6 +456,38 @@ describe('age guidance selectors', () => {
     expect(kr.some(item => item.country === 'JP')).toBe(false)
     expect(jp.some(item => item.country === 'JP')).toBe(true)
     expect(jp.some(item => item.country === 'KR')).toBe(false)
+  })
+
+  it('keeps the 72+ fallback fully country-scoped without opposite-country content or sources', () => {
+    const birthdate = '2020-01-15'
+    const asOf = '2026-01-15'
+    const unknown = getAgeGuidanceForDate(birthdate, asOf)
+    const unknownPriority = getPriorityAgeGuidanceForDate(birthdate, asOf)
+    const kr = getAgeGuidanceForDate(birthdate, asOf, 'KR')
+    const jp = getAgeGuidanceForDate(birthdate, asOf, 'JP')
+
+    expect(new Set(unknown.map(item => item.country))).toEqual(new Set(['KR', 'JP']))
+    expect(new Set(unknownPriority.map(item => item.country))).toEqual(new Set(['KR', 'JP']))
+    expect(Math.max(
+      unknownPriority.filter(item => item.country === 'KR').length,
+      unknownPriority.filter(item => item.country === 'JP').length
+    )).toBeLessThanOrEqual(2)
+    expect(kr.map(item => item.id)).toEqual([
+      'older-child-general-care-kr',
+      'older-child-emergency-kr',
+      'older-child-local-guidance-kr',
+    ])
+    expect(jp.map(item => item.id)).toEqual([
+      'older-child-general-care-jp',
+      'older-child-emergency-jp',
+      'older-child-local-guidance-jp',
+    ])
+    expect(kr.every(item => item.country === 'KR')).toBe(true)
+    expect(jp.every(item => item.country === 'JP')).toBe(true)
+    expect(kr.flatMap(item => item.sourceIds).some(id => /^(jp-|cfa-|mhlw-)/.test(id))).toBe(false)
+    expect(jp.flatMap(item => item.sourceIds).some(id => /^(kr-|kdca-)/.test(id))).toBe(false)
+    expect(JSON.stringify(kr)).not.toMatch(/일본|日本/)
+    expect(JSON.stringify(jp)).not.toMatch(/한국|韓国/)
   })
 
   it('localizes content without inferring country or losing source order', () => {

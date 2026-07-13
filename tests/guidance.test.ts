@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { HEALTH_EVIDENCE_SOURCES } from '../src/lib/healthEvidence'
 import {
   GUIDANCE_DISCLAIMER,
+  FEVER_CARE,
   GUIDANCE_ITEMS,
   GUIDANCE_MARKERS,
   GUIDANCE_SOURCES,
@@ -9,6 +10,7 @@ import {
   getCurrentFormulaGuidance,
   getGuidanceForAge,
   getGuidanceForDay,
+  getGuidanceSourceLabel,
 } from '../src/lib/guidance'
 
 describe('legacy guidance compatibility', () => {
@@ -71,17 +73,24 @@ describe('legacy guidance compatibility', () => {
     expect(fever.quoteJa).not.toContain('直腸')
     expect(fever.bodyKo).not.toContain('앱은')
     expect(fever.bodyJa).not.toContain('アプリは')
+    expect(JSON.stringify([GUIDANCE_MARKERS, FEVER_CARE])).not.toContain('評価を受け')
   })
 
   it('derives legacy source labels from typed registry source IDs', () => {
     const marker = GUIDANCE_MARKERS.find(item => item.id === 'fever_red_flags')!
-    expect(marker.sourceIds).toEqual(['nice-fever-ng143', 'nice-newborn-red-flags-ng194'])
+    expect(marker.sourceIds).toEqual(['nice-fever-ng143'])
+    expect(marker.bodyKo).not.toContain('대천문')
+    expect(marker.bodyKo).not.toContain('분출성')
+    expect(marker.bodyJa).not.toContain('大泉門')
+    expect(marker.bodyJa).not.toContain('噴水状')
     const organizations = marker.sourceIds.map(id =>
       HEALTH_EVIDENCE_SOURCES.find(source => source.id === id)!.organization.ko
     )
     for (const organization of organizations) {
       expect(marker.sourceLabel).toContain(organization)
     }
+    expect(getGuidanceSourceLabel(marker, 'ko')).toContain('영국 국립보건임상연구원')
+    expect(getGuidanceSourceLabel(marker, 'ja')).toContain('英国国立医療技術評価機構')
   })
 })
 

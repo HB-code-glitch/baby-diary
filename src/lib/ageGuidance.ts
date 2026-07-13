@@ -306,7 +306,7 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   {
     id: 'young-infant-fever', stageId: 'young-infant', category: 'urgent-care', priority: 3, urgency: 'urgent',
     titleKo: '3개월 미만 38°C 이상은 즉시 연락', titleJa: '3か月未満で38°C以上は直ちに連絡',
-    summaryKo: '겉보기에 괜찮아도 지금 의료기관에 연락해 진료받아요.', summaryJa: '元気そうに見えても、今すぐ医療機関へ連絡し診察を受けます。',
+    summaryKo: '겉보기에 괜찮아도 지금 의료기관에 연락해 진료받아요.', summaryJa: '元気そうに見えても、今すぐ医療機関へ連絡し診察を受けてください。',
     actionsKo: ['생후 3개월 미만에서 기록 체온이 38°C 이상이면 측정 부위를 단정하지 말고 즉시 의료기관에 연락해요.', '호흡곤란·청색 피부·심한 처짐·경련이 있으면 즉시 지역 응급 도움을 요청해요.'],
     actionsJa: ['生後3か月未満で記録した体温が38°C以上なら測定部位を決めつけず、直ちに医療機関へ連絡してください。', '呼吸困難・青い皮膚・強いぐったり・けいれんがあれば直ちに地域の救急へ連絡してください。'],
     sourceIds: ['nice-fever-ng143'],
@@ -365,7 +365,7 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     summaryKo: '생후 3~6개월은 낮은 발열도 전신 상태와 함께 신중히 확인해요.', summaryJa: '生後3〜6か月は低めの発熱でも全身状態とともに慎重に確認します。',
     actionsKo: ['기록 체온이 38.3°C 이상이면 의료진에게 연락해 상담하고, 39.0°C 이상이면 더 신속히 진료받아요.', '호흡곤란·청색 피부·깨워도 반응이 없거나 경련이 있으면 체온과 관계없이 즉시 지역 응급 도움을 요청해요.'],
     actionsJa: ['記録した体温が38.3°C以上なら医療者へ連絡して相談し、39.0°C以上ならより速やかに診察を受けてください。', '呼吸困難・青い皮膚・起こしても反応がない・けいれんがある時は体温にかかわらず直ちに地域の救急へ連絡してください。'],
-    sourceIds: ['nice-fever-ng143'],
+    sourceIds: ['aap-fever-baby', 'nice-fever-ng143'],
   },
   {
     id: 'six-eight-responsive-meals', stageId: 'six-to-eight-months', category: 'feeding', priority: 1, urgency: 'important',
@@ -467,8 +467,8 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     id: 'twelve-seventeen-development', stageId: 'twelve-to-seventeen-months', category: 'development', priority: 4, urgency: 'routine',
     titleKo: '12·15개월 체크포인트 관찰', titleJa: '12・15か月の目安を観察',
     summaryKo: '현재 완료 개월의 체크포인트만 보여 주고 걱정은 일찍 상의해요.', summaryJa: '完了月齢に合う目安だけを示し、心配は早めに相談します。',
-    actionsKo: ['기술을 잃었거나 보호자가 걱정하면 다음 검진을 기다리지 않아요.'],
-    actionsJa: ['できていたことを失った、または保護者が心配なら次の健診を待ちません。'],
+    actionsKo: ['12개월에는 간단한 놀이를 함께하고 손을 흔들거나 의미 있는 호칭을 쓰며 붙잡고 일어서는지 관찰해요.', '15개월에는 보호자에게 물건을 보여 주고 도움을 요청할 때 가리키며, 몇 걸음을 걷거나 한두 낱말을 시도하는지 관찰해요.'],
+    actionsJa: ['12か月では簡単な遊びを一緒にし、手を振る、意味のある呼び名を使う、つかまり立ちをする様子を見守ります。', '15か月では保護者に物を見せる、助けを求めて指さす、数歩歩く、1〜2語を試す様子を見守ります。'],
     sourceIds: ['cdc-developmental-milestones'],
   },
   {
@@ -576,28 +576,52 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
   },
   {
-    id: 'older-child-general-care', stageId: 'older-child-fallback', category: 'general', priority: 1, urgency: 'routine',
-    titleKo: '현재 연령의 건강 계획을 확인해요', titleJa: '現在の年齢に合う健康計画を確認',
-    summaryKo: '영아 지침을 연장하지 않고 현재 연령·건강 상태에 맞는 검진과 의료진 안내를 우선해요.', summaryJa: '乳児向け情報を延長せず、現在の年齢・健康状態に合う健診と医療者の案内を優先します。',
-    actionsKo: ['성장·발달·건강 걱정이나 하던 기술의 손실이 있으면 현재 연령을 진료하는 의료진과 상의해요.'],
-    actionsJa: ['成長・発達・健康の心配や、できていたことの喪失があれば、現在の年齢を診る医療者へ相談してください。'],
-    sourceIds: ['kdca-infant-checkups', 'cfa-infant-checkups'],
+    id: 'older-child-general-care-kr', stageId: 'older-child-fallback', category: 'general', priority: 1, urgency: 'routine',
+    titleKo: '한국의 현재 연령 건강 계획을 확인해요', titleJa: '韓国の現在の年齢に合う健康計画を確認',
+    summaryKo: '영아 지침을 연장하지 않고 한국의 현재 연령·건강 상태에 맞는 검진과 의료진 안내를 우선해요.', summaryJa: '乳児向け情報を延長せず、韓国の現在の年齢・健康状態に合う健診と医療者の案内を優先します。',
+    actionsKo: ['성장·발달·건강 걱정이나 하던 기술의 손실이 있으면 한국에서 현재 연령을 진료하는 의료진과 상의해요.'],
+    actionsJa: ['成長・発達・健康の心配や、できていたことの喪失があれば、韓国で現在の年齢を診る医療者へ相談してください。'],
+    sourceIds: ['kdca-infant-checkups', 'kdca-vaccination'], country: 'KR', linkPurpose: 'checkup-vaccination',
   },
   {
-    id: 'older-child-emergency', stageId: 'older-child-fallback', category: 'urgent-care', priority: 2, urgency: 'urgent',
-    titleKo: '생명을 위협하는 위험 신호는 즉시 도움을 요청해요', titleJa: '命に関わる危険サインは直ちに救急へ',
+    id: 'older-child-emergency-kr', stageId: 'older-child-fallback', category: 'urgent-care', priority: 2, urgency: 'urgent',
+    titleKo: '한국에서 생명을 위협하는 위험 신호는 즉시 119', titleJa: '韓国で命に関わる危険サインは直ちに119へ',
     summaryKo: '호흡곤란·청색 피부·반응 없음·경련·눌러도 사라지지 않는 발진은 기다리지 않아요.', summaryJa: '呼吸困難、青い皮膚、反応がない、けいれん、押しても消えない発疹は待ちません。',
-    actionsKo: ['한국에서는 119, 일본에서는 119로 즉시 신고하고 지역 응급 안내를 따라요.'],
-    actionsJa: ['韓国では119、日本では119へ直ちに通報し、地域の救急案内に従ってください。'],
-    sourceIds: ['kr-nfa-119', 'jp-fdma-119'],
+    actionsKo: ['한국에서는 119로 즉시 신고하고 소방청 상담원의 안내를 따라요.'],
+    actionsJa: ['韓国では119へ直ちに通報し、消防庁指令員の案内に従ってください。'],
+    sourceIds: ['kr-nfa-119'], country: 'KR', linkPurpose: 'emergency',
   },
   {
-    id: 'older-child-local-guidance', stageId: 'older-child-fallback', category: 'checkup-vaccination', priority: 3, urgency: 'routine',
-    titleKo: '지역의 공식 검진·예방접종을 확인해요', titleJa: '地域の公式健診・予防接種を確認',
-    summaryKo: '일정과 대상은 국가·지역·이력에 따라 달라질 수 있어 공식 안내를 확인해요.', summaryJa: '日程と対象は国・地域・接種歴で異なるため、公式案内を確認します。',
-    actionsKo: ['한국은 질병관리청, 일본은 어린이가정청·후생노동성의 최신 안내와 의료진의 계획을 확인해요.'],
-    actionsJa: ['韓国は疾病管理庁、日本はこども家庭庁・厚生労働省の最新案内と医療者の計画を確認してください。'],
-    sourceIds: ['kdca-infant-checkups', 'kdca-vaccination', 'cfa-infant-checkups', 'mhlw-vaccination'],
+    id: 'older-child-local-guidance-kr', stageId: 'older-child-fallback', category: 'checkup-vaccination', priority: 3, urgency: 'routine',
+    titleKo: '한국의 공식 검진·예방접종을 확인해요', titleJa: '韓国の公式健診・予防接種を確認',
+    summaryKo: '일정과 대상은 지역·이력에 따라 달라질 수 있어 질병관리청의 공식 안내를 확인해요.', summaryJa: '日程と対象は地域・接種歴で異なるため、韓国疾病管理庁の公式案内を確認します。',
+    actionsKo: ['질병관리청의 최신 안내와 한국 의료진의 계획을 확인해요.'],
+    actionsJa: ['韓国疾病管理庁の最新案内と医療者の計画を確認してください。'],
+    sourceIds: ['kdca-infant-checkups', 'kdca-vaccination'], country: 'KR', linkPurpose: 'checkup-vaccination',
+  },
+  {
+    id: 'older-child-general-care-jp', stageId: 'older-child-fallback', category: 'general', priority: 1, urgency: 'routine',
+    titleKo: '일본의 현재 연령 건강 계획을 확인해요', titleJa: '日本の現在の年齢に合う健康計画を確認',
+    summaryKo: '영아 지침을 연장하지 않고 일본의 현재 연령·건강 상태에 맞는 검진과 의료진 안내를 우선해요.', summaryJa: '乳児向け情報を延長せず、日本の現在の年齢・健康状態に合う健診と医療者の案内を優先します。',
+    actionsKo: ['성장·발달·건강 걱정이나 하던 기술의 손실이 있으면 일본에서 현재 연령을 진료하는 의료진과 상의해요.'],
+    actionsJa: ['成長・発達・健康の心配や、できていたことの喪失があれば、日本で現在の年齢を診る医療者へ相談してください。'],
+    sourceIds: ['cfa-infant-checkups', 'mhlw-vaccination'], country: 'JP', linkPurpose: 'checkup-vaccination',
+  },
+  {
+    id: 'older-child-emergency-jp', stageId: 'older-child-fallback', category: 'urgent-care', priority: 2, urgency: 'urgent',
+    titleKo: '일본에서 생명을 위협하는 위험 신호는 즉시 119', titleJa: '日本で命に関わる危険サインは直ちに119へ',
+    summaryKo: '호흡곤란·청색 피부·반응 없음·경련·눌러도 사라지지 않는 발진은 기다리지 않아요.', summaryJa: '呼吸困難、青い皮膚、反応がない、けいれん、押しても消えない発疹は待ちません。',
+    actionsKo: ['일본에서는 119로 즉시 신고하고 총무성 소방청 상담원의 안내를 따라요.'],
+    actionsJa: ['日本では119へ直ちに通報し、総務省消防庁指令員の案内に従ってください。'],
+    sourceIds: ['jp-fdma-119'], country: 'JP', linkPurpose: 'emergency',
+  },
+  {
+    id: 'older-child-local-guidance-jp', stageId: 'older-child-fallback', category: 'checkup-vaccination', priority: 3, urgency: 'routine',
+    titleKo: '일본의 공식 검진·예방접종을 확인해요', titleJa: '日本の公式健診・予防接種を確認',
+    summaryKo: '일정과 대상은 지자체·이력에 따라 달라질 수 있어 어린이가정청·후생노동성의 공식 안내를 확인해요.', summaryJa: '日程と対象は自治体・接種歴で異なるため、こども家庭庁・厚生労働省の公式案内を確認します。',
+    actionsKo: ['어린이가정청·후생노동성의 최신 안내와 일본 의료진의 계획을 확인해요.'],
+    actionsJa: ['こども家庭庁・厚生労働省の最新案内と日本の医療者の計画を確認してください。'],
+    sourceIds: ['cfa-infant-checkups', 'mhlw-vaccination'], country: 'JP', linkPurpose: 'checkup-vaccination',
   },
   {
     id: 'six-eight-safe-sleep', stageId: 'six-to-eight-months', category: 'safe-sleep', priority: 6, urgency: 'important',
@@ -673,7 +697,7 @@ const sharedUrgentDefinitions: readonly AgeGuidanceItem[] = commonUrgentStageIds
   summaryJa: '呼吸困難、青い皮膚、強いぐったり、けいれん、押しても消えない発疹はすぐ助けを求めます。',
   actionsKo: ['깨워도 반응이 없거나 초록색 담즙성 구토가 있으면 즉시 지역 응급 도움을 요청해요.'],
   actionsJa: ['起こしても反応がない、または緑色の胆汁性嘔吐がある時は直ちに地域の救急へ連絡してください。'],
-  sourceIds: ['nice-fever-ng143', 'nice-newborn-red-flags-ng194'],
+  sourceIds: ['nice-fever-ng143'],
 }))
 
 const infantSpecificUrgentDefinitions: readonly AgeGuidanceItem[] = [
@@ -687,7 +711,11 @@ const infantSpecificUrgentDefinitions: readonly AgeGuidanceItem[] = [
   },
 ]
 
-const localCareDefinitions: readonly AgeGuidanceItem[] = AGE_STAGES.flatMap(stage => {
+const countrySpecificGeneratedStages = AGE_STAGES.filter(
+  stage => stage.id !== 'older-child-fallback'
+)
+
+const localCareDefinitions: readonly AgeGuidanceItem[] = countrySpecificGeneratedStages.flatMap(stage => {
   const priority = 7
   return [
     {
@@ -709,7 +737,7 @@ const localCareDefinitions: readonly AgeGuidanceItem[] = AGE_STAGES.flatMap(stag
   ]
 })
 
-const countryEmergencyDefinitions: readonly AgeGuidanceItem[] = AGE_STAGES.flatMap(stage => [
+const countryEmergencyDefinitions: readonly AgeGuidanceItem[] = countrySpecificGeneratedStages.flatMap(stage => [
   {
     id: `${stage.id}-emergency-kr`, stageId: stage.id, category: 'urgent-care' as const, priority: 10, urgency: 'urgent' as const,
     titleKo: '한국 응급 신고 119', titleJa: '韓国の救急通報は119',
