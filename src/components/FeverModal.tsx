@@ -1,6 +1,11 @@
 import React, { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { GUIDANCE_MARKERS, FEVER_CARE, FeverLevel } from '../lib/guidance'
+import {
+  GUIDANCE_MARKERS,
+  FEVER_CARE,
+  getGuidanceSourceLabel,
+  FeverLevel,
+} from '../lib/guidance'
 
 interface FeverModalProps {
   celsius: number
@@ -39,7 +44,7 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
   const emergencyBody = lang === 'ja' ? emergencyMarker.bodyJa : emergencyMarker.bodyKo
   const antipyreticBody = lang === 'ja' ? antipyreticMarker.bodyJa : antipyreticMarker.bodyKo
 
-  const feverSource = `${redFlagsMarker.sourceLabel} · ${FEVER_CARE.sourceLabel}`
+  const feverSource = `${getGuidanceSourceLabel(redFlagsMarker, lang === 'ja' ? 'ja' : 'ko')} · ${FEVER_CARE.sourceLabel}`
 
   return (
     <>
