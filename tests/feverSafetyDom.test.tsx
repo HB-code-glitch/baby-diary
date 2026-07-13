@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import i18n from '../src/i18n'
 import { FeverModal } from '../src/components/FeverModal'
+import { FEVER_RED_FLAGS } from '../src/lib/guidance'
 import * as homeModule from '../src/pages/HomePage'
 
 const anchor = {
@@ -118,5 +119,24 @@ describe('temperature safety DOM behavior', () => {
     opener.remove()
 
     root = createRoot(container)
+  })
+
+  it('keeps an unknown-age selected newborn-only risk visible in the modal', async () => {
+    const poorFeeding = FEVER_RED_FLAGS.find(flag => flag.id === 'poor_feeding')!
+
+    await act(async () => {
+      root.render(
+        <FeverModal
+          celsius={36.8}
+          level="emergency"
+          ageDays={null}
+          lang="ko"
+          symptomIds={['poor_feeding']}
+          onConfirm={() => undefined}
+        />,
+      )
+    })
+
+    expect(container.textContent).toContain(poorFeeding.ko)
   })
 })

@@ -97,17 +97,23 @@ describe('evaluateFever safety routing', () => {
     expect(evaluateFever({ ...base, celsius: 42 })).toBe('warning')
   })
 
-  it('routes unknown age at either 38°C+ or below 35.5°C to immediate contact', () => {
+  it('routes unknown age at either 38°C+ or below 36.0°C to immediate contact', () => {
     expect(evaluateFever({ celsius: 38, birthdate: null })).toBe('emergency')
-    expect(evaluateFever({ celsius: 35.4, birthdate: null })).toBe('emergency')
+    expect(evaluateFever({ celsius: 35.9, birthdate: null })).toBe('emergency')
+    expect(evaluateFever({ celsius: 36, birthdate: null })).toBeNull()
   })
 
-  it('routes newborn low temperature below 35.5°C to urgent care', () => {
+  it('routes newborn low temperature below 36.0°C to urgent care', () => {
     expect(evaluateFever({
-      celsius: 35.4,
+      celsius: 35.9,
       birthdate: '2026-07-01',
       measuredAt: '2026-07-13T12:00:00+09:00',
     })).toBe('emergency')
+    expect(evaluateFever({
+      celsius: 36,
+      birthdate: '2026-07-01',
+      measuredAt: '2026-07-13T12:00:00+09:00',
+    })).toBeNull()
   })
 
   it('routes structured red flags independently of temperature', () => {

@@ -256,7 +256,7 @@ export function evaluateFever({
   if (hasUrgentRedFlag) return 'emergency'
   if (!Number.isFinite(celsius)) return null
 
-  if ((isNewborn || age == null) && celsius < 35.5) return 'emergency'
+  if ((isNewborn || age == null) && celsius < 36) return 'emergency'
   if (celsius < 38) return null
   if (age == null) return 'emergency'
   if (age.ageDays < 90) return 'emergency'

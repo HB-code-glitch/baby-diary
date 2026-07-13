@@ -1379,6 +1379,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
     level: Exclude<FeverLevel, null | 'caution'>
     ageDays: number | null
     completedMonths: number | null
+    symptomIds: readonly FeverRedFlagId[]
     returnFocusTo: HTMLElement | null
   } | null>(null)
   const quickRecordRef = useRef<HTMLDivElement>(null)
@@ -1479,6 +1480,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           level,
           ageDays: ageContext?.ageDays ?? null,
           completedMonths: ageContext?.completedMonths ?? null,
+          symptomIds: [...symptomIds],
           returnFocusTo,
         }),
         persist: async () => { await addTemp(celsius) },
@@ -1860,6 +1862,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           level={feverModal.level}
           ageDays={feverModal.ageDays}
           completedMonths={feverModal.completedMonths}
+          symptomIds={feverModal.symptomIds}
           lang={lang}
           returnFocusTo={feverModal.returnFocusTo}
           onConfirm={() => setFeverModal(null)}

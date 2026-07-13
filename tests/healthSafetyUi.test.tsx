@@ -28,6 +28,8 @@ describe('Korean/Japanese health copy parity', () => {
     }
     expect(ko.popover.riskIntro).toContain('하나라도')
     expect(ja.popover.riskIntro).toContain('いずれか一つでも')
+    expect(ko.feverModal.unknownAgeNote).toMatch(/36(?:\.0)?°C.*38(?:\.0)?°C|38(?:\.0)?°C.*36(?:\.0)?°C/)
+    expect(ja.feverModal.unknownAgeNote).toMatch(/36(?:\.0)?°C.*38(?:\.0)?°C|38(?:\.0)?°C.*36(?:\.0)?°C/)
 
     const exposedCopy = JSON.stringify({
       ko: { home: ko.home, popover: ko.popover, feedingTip: ko.feedingTip, feverModal: ko.feverModal },
@@ -104,6 +106,14 @@ describe('FeedingTipPopup safety copy', () => {
 })
 
 describe('FeverModal safety and accessibility', () => {
+  it('forwards selected risk ids from Home state into the modal without persisting them', () => {
+    const source = readFileSync('src/pages/HomePage.tsx', 'utf8')
+
+    expect(source).toMatch(/symptomIds:\s*\[\.\.\.symptomIds\]/)
+    expect(source).toMatch(/symptomIds=\{feverModal\.symptomIds\}/)
+    expect(source).toContain('persist: async () => { await addTemp(celsius) }')
+  })
+
   it('shows urgent action, 119, measurement-site caution, and structured red flags', async () => {
     await i18n.changeLanguage('ko')
     const html = renderToStaticMarkup(
@@ -142,6 +152,25 @@ describe('FeverModal safety and accessibility', () => {
     expect(html).toContain('測定部位')
     expect(html).toContain('いずれか一つでも')
     expect(html).not.toMatch(/24時間|3日|ぬるま湯/)
+  })
+
+  it('keeps the six-month 39.4°C state as neutral clinician-contact guidance', async () => {
+    await i18n.changeLanguage('ko')
+    const html = renderToStaticMarkup(
+      <FeverModal
+        celsius={39.4}
+        level="warning"
+        ageDays={194}
+        completedMonths={6}
+        lang="ko"
+        onConfirm={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('그 숫자만으로 중증을 뜻하지는 않지만')
+    expect(html).toContain('오늘 의료진에게 연락')
+    expect(html).not.toContain('지금 바로 병원에 가야 해요')
+    expect(html).not.toContain('고열이에요 — 지금 의료진에게 연락하세요')
   })
 
   it('moves initial focus, restores previous focus, and resolves keyboard trapping', () => {

@@ -5,6 +5,7 @@ import {
   FEVER_DURATION_GUIDANCE,
   FEVER_RED_FLAGS,
   FeverLevel,
+  FeverRedFlagId,
 } from '../lib/guidance'
 
 export interface FeverModalProps {
@@ -12,6 +13,7 @@ export interface FeverModalProps {
   level: Exclude<FeverLevel, null | 'caution'>
   ageDays: number | null
   completedMonths?: number | null
+  symptomIds?: readonly FeverRedFlagId[]
   lang: string
   returnFocusTo?: HTMLElement | null
   onConfirm: () => void
@@ -65,6 +67,7 @@ export function FeverModal({
   level,
   ageDays,
   completedMonths = null,
+  symptomIds = [],
   lang,
   returnFocusTo = null,
   onConfirm,
@@ -100,7 +103,11 @@ export function FeverModal({
 
   const isRed = level === 'emergency' || level === 'danger'
   const isNewborn = ageDays != null && ageDays >= 0 && ageDays < 28
-  const visibleRedFlags = FEVER_RED_FLAGS.filter(flag => !flag.newbornOnly || isNewborn)
+  const visibleRedFlags = FEVER_RED_FLAGS.filter(flag =>
+    !flag.newbornOnly
+    || isNewborn
+    || (ageDays === null && symptomIds.includes(flag.id))
+  )
   const language = lang === 'ja' ? 'ja' : 'ko'
   const isOlderHighTemperature = level === 'warning' && completedMonths != null && completedMonths >= 6
 
