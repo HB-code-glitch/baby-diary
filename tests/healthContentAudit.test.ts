@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { getEvidenceSourceById } from '../shared/healthEvidence'
+import { getEvidenceUrlById } from '../electron/healthEvidenceUrlRegistry'
 import { getMilestones } from '../src/lib/milestones'
 
 const ROOT = process.cwd()
@@ -197,7 +198,8 @@ describe('whole-app health content audit guards', () => {
 
   it('registers the exact official WHO child growth standards source', () => {
     const source = getEvidenceSourceById('who-child-growth-standards')
-    expect(source?.url).toBe('https://www.who.int/tools/child-growth-standards')
+    expect(source).not.toHaveProperty('url')
+    expect(getEvidenceUrlById('who-child-growth-standards')).toBe('https://www.who.int/tools/child-growth-standards')
     expect(source?.reviewedOn).toBe('2026-07-13')
   })
 
@@ -303,8 +305,10 @@ describe('whole-app health content audit guards', () => {
       }
       for (const [, id, url] of links) {
         const registrySource = getEvidenceSourceById(id)
+        const registryUrl = getEvidenceUrlById(id)
         expect(registrySource, `unknown audit source ID: ${id}`).not.toBeNull()
-        expect(url, `audit URL drift for ${id}`).toBe(registrySource?.url)
+        expect(registryUrl, `missing main-process audit URL: ${id}`).not.toBeNull()
+        expect(url, `audit URL drift for ${id}`).toBe(registryUrl)
         referencedIds.add(id)
       }
     }

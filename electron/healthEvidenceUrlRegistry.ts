@@ -20,6 +20,7 @@ const evidenceUrlDefinitions = {
   'who-infant-feeding': 'https://www.who.int/news-room/fact-sheets/detail/infant-and-young-child-feeding',
   'who-complementary-feeding': 'https://www.who.int/publications/i/item/9789240081864',
   'who-under-five-activity': 'https://www.who.int/publications/i/item/9789241550536',
+  'who-child-growth-standards': 'https://www.who.int/tools/child-growth-standards',
   'cdc-breastfeeding-frequency': 'https://www.cdc.gov/infant-toddler-nutrition/breastfeeding/how-much-and-how-often.html',
   'cdc-formula-feeding': 'https://www.cdc.gov/infant-toddler-nutrition/formula-feeding/how-much-and-how-often.html',
   'cdc-hunger-fullness-cues': 'https://www.cdc.gov/infant-toddler-nutrition/mealtime/signs-your-child-is-hungry-or-full.html',

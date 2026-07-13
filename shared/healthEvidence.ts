@@ -37,7 +37,6 @@ const sourceDefinitions = [
     id: 'who-child-growth-standards',
     organization: { ko: '세계보건기구(WHO)', ja: '世界保健機関（WHO）' },
     title: { ko: 'WHO 아동 성장 기준', ja: 'WHO乳幼児成長基準' },
-    url: 'https://www.who.int/tools/child-growth-standards',
     reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
   },
   {
