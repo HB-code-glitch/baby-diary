@@ -292,6 +292,7 @@
     "saving": "保存中…",
     "emptyTitle": "まだ日記がありません",
     "emptySub": "大切な今日を記録してみましょう",
+    "loadMore": "さらに表示（{{count}}件）",
     "toastSaved": "日記を保存しました。",
     "toastEdited": "日記を編集しました。",
     "toastDeleted": "日記を削除しました。"
@@ -309,6 +310,7 @@
     "saving": "保存中…",
     "emptyTitle": "まだ手紙がありません",
     "emptySub": "今日の気持ちを{{babyName}}に残してみましょう",
+    "loadMore": "さらに表示（{{count}}件）",
     "toastSaved": "メッセージを保存しました。",
     "toastEdited": "メッセージを編集しました。",
     "toastDeleted": "削除しました。"
@@ -390,6 +392,8 @@
     "errorWeakPassword": "パスワードは6文字以上にしてください。",
     "familyConnect": "家族の連携",
     "familyConnectDesc": "最初に家族を作り、相手は招待コードで参加します。",
+    "familyName": "{{name}}の家族",
+    "defaultFamilyName": "わが家",
     "createFamily": "家族を作る",
     "createFamilyDesc": "はじめての方",
     "joinFamily": "招待コードで参加",

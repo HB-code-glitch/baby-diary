@@ -304,12 +304,15 @@ function NoFamilyView() {
     setBusy(true)
     setError(null)
     try {
+      const trimmedName = name.trim()
       // F2: createFamily now returns { familyId, inviteCode }
       const { familyId } = await createFamily(
         {
           babyName:      settings?.baby?.name ?? '',
           babyBirthdate: settings?.baby?.birthdate ?? '',
-          familyName:    `${name}の家族`,
+          familyName:    trimmedName
+            ? t('sync.familyName', { name: trimmedName })
+            : t('sync.defaultFamilyName'),
         },
         { uid, name, role }
       )

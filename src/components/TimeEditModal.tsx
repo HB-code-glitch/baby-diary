@@ -1,69 +1,14 @@
-import React, { useEffect, useId, useRef, useState } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { format, parseISO } from 'date-fns'
 import { IconX } from './icons'
 import { useTranslation } from 'react-i18next'
+import { acquireModalIsolation, registerModalBoundary } from '../lib/modalIsolation'
 
 interface TimeEditModalProps {
   currentAt: string
   onConfirm: (newAt: string) => Promise<void> | void
   onClose: () => void
-}
-
-const FOCUSABLE_SELECTOR = [
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  'a[href]',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',')
-
-interface BackgroundInertLease {
-  references: number
-  previousInert: string | null
-  previousAriaHidden: string | null
-}
-
-const backgroundInertLeases = new Map<HTMLElement, BackgroundInertLease>()
-
-function restoreAttribute(element: HTMLElement, name: string, value: string | null) {
-  if (value === null) element.removeAttribute(name)
-  else element.setAttribute(name, value)
-}
-
-function acquireBackgroundInert(): () => void {
-  if (typeof document === 'undefined') return () => undefined
-  const background = document.querySelector<HTMLElement>('.app-shell')
-    ?? document.getElementById('root')
-  if (!background) return () => undefined
-
-  const activeLease = backgroundInertLeases.get(background)
-  if (activeLease) {
-    activeLease.references += 1
-  } else {
-    backgroundInertLeases.set(background, {
-      references: 1,
-      previousInert: background.getAttribute('inert'),
-      previousAriaHidden: background.getAttribute('aria-hidden'),
-    })
-    background.setAttribute('inert', '')
-    background.setAttribute('aria-hidden', 'true')
-  }
-
-  let released = false
-  return () => {
-    if (released) return
-    released = true
-    const lease = backgroundInertLeases.get(background)
-    if (!lease) return
-    lease.references -= 1
-    if (lease.references > 0) return
-
-    backgroundInertLeases.delete(background)
-    restoreAttribute(background, 'inert', lease.previousInert)
-    restoreAttribute(background, 'aria-hidden', lease.previousAriaHidden)
-  }
 }
 
 export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalProps) {
@@ -73,6 +18,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
   const inputId = useId()
   const dialogRef = useRef<HTMLFormElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const onCloseRef = useRef(onClose)
   const restoreFocusRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -82,21 +28,42 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
   const mountedRef = useRef(true)
   const refocusAfterSubmitRef = useRef(false)
   const [submitting, setSubmitting] = useState(false)
+  const [portalRoot] = useState<HTMLElement | null>(() => {
+    if (typeof document === 'undefined') return null
+    const root = document.createElement('div')
+    root.dataset.modalPortal = 'time'
+    return root
+  })
   const [value, setValue] = useState(
     format(parseISO(currentAt), "yyyy-MM-dd'T'HH:mm"),
   )
+  onCloseRef.current = onClose
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current
+    if (!portalRoot || !dialog) return
     mountedRef.current = true
-    const releaseBackgroundInert = acquireBackgroundInert()
-    inputRef.current?.focus()
+    document.body.appendChild(portalRoot)
+    const releaseIsolation = acquireModalIsolation(portalRoot)
+    const unregisterBoundary = registerModalBoundary({
+      portalRoot,
+      dialog,
+      preferredFocus: () => inputRef.current,
+      isBusy: () => submittingRef.current,
+      onEscape: () => onCloseRef.current(),
+    })
+    inputRef.current?.focus({ preventScroll: true })
     return () => {
       mountedRef.current = false
-      releaseBackgroundInert()
+      releaseIsolation()
+      unregisterBoundary()
+      portalRoot.remove()
       const trigger = restoreFocusRef.current
-      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus()
+      if (trigger?.isConnected && !trigger.closest('[inert]')) {
+        trigger.focus({ preventScroll: true })
+      }
     }
-  }, [])
+  }, [portalRoot])
 
   useEffect(() => {
     if (!submitting && refocusAfterSubmitRef.current) {
@@ -129,12 +96,6 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
   }
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLFormElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      close()
-      return
-    }
-
     if (
       event.key === 'Enter'
       && event.target instanceof HTMLInputElement
@@ -142,26 +103,6 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     ) {
       event.preventDefault()
       void handleConfirm()
-      return
-    }
-
-    if (event.key !== 'Tab') return
-    const focusable = Array.from(
-      dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [],
-    )
-    if (focusable.length === 0) {
-      event.preventDefault()
-      dialogRef.current?.focus()
-      return
-    }
-    const first = focusable[0]
-    const last = focusable[focusable.length - 1]
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first.focus()
     }
   }
 
@@ -239,5 +180,5 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     </div>
   )
 
-  return typeof document === 'undefined' ? overlay : createPortal(overlay, document.body)
+  return portalRoot ? createPortal(overlay, portalRoot) : overlay
 }

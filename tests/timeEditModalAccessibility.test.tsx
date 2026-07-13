@@ -154,49 +154,48 @@ describe('TimeEditModal accessibility and async safety', () => {
     const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
     const backdrop = document.body.querySelector<HTMLElement>('[data-time-edit-modal]')!
 
-    expect(backdrop.parentElement).toBe(document.body)
-    expect(appShell.hasAttribute('inert')).toBe(true)
-    expect(appShell.getAttribute('aria-hidden')).toBe('true')
+    expect(backdrop.closest('[data-modal-portal="time"]')?.parentElement).toBe(document.body)
+    expect(appShell.closest('[inert]')).not.toBeNull()
+    expect(appShell.closest('[aria-hidden="true"]')).not.toBeNull()
 
     await act(async () => keyDown(backdrop.querySelector<HTMLElement>('[role="dialog"]')!, 'Escape'))
 
     expect(document.body.querySelector('[data-time-edit-modal]')).toBeNull()
-    expect(appShell.hasAttribute('inert')).toBe(false)
-    expect(appShell.hasAttribute('aria-hidden')).toBe(false)
+    expect(appShell.closest('[inert]')).toBeNull()
+    expect(appShell.closest('[aria-hidden="true"]')).toBeNull()
     expect(document.activeElement).toBe(trigger)
   })
 
   it('restores pre-existing inert and aria-hidden values exactly', async () => {
     await act(async () => root.render(<Harness onConfirm={vi.fn()} />))
-    const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
-    appShell.setAttribute('inert', 'pre-existing')
-    appShell.setAttribute('aria-hidden', 'false')
+    container.setAttribute('inert', 'pre-existing')
+    container.setAttribute('aria-hidden', 'false')
     const trigger = container.querySelector<HTMLButtonElement>('[data-modal-trigger]')!
 
     await act(async () => trigger.click())
-    expect(appShell.getAttribute('inert')).toBe('')
-    expect(appShell.getAttribute('aria-hidden')).toBe('true')
+    expect(container.getAttribute('inert')).toBe('')
+    expect(container.getAttribute('aria-hidden')).toBe('true')
 
     const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
     await act(async () => keyDown(dialog, 'Escape'))
-    expect(appShell.getAttribute('inert')).toBe('pre-existing')
-    expect(appShell.getAttribute('aria-hidden')).toBe('false')
+    expect(container.getAttribute('inert')).toBe('pre-existing')
+    expect(container.getAttribute('aria-hidden')).toBe('false')
   })
 
   it('keeps the app shell inert until the final concurrent modal unmounts', async () => {
     await act(async () => root.render(<ModalCountHarness count={2} />))
     const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
     expect(document.body.querySelectorAll('[data-time-edit-modal]')).toHaveLength(2)
-    expect(appShell.hasAttribute('inert')).toBe(true)
+    expect(appShell.closest('[inert]')).not.toBeNull()
 
     await act(async () => root.render(<ModalCountHarness count={1} />))
     expect(document.body.querySelectorAll('[data-time-edit-modal]')).toHaveLength(1)
-    expect(appShell.hasAttribute('inert')).toBe(true)
-    expect(appShell.getAttribute('aria-hidden')).toBe('true')
+    expect(appShell.closest('[inert]')).not.toBeNull()
+    expect(appShell.closest('[aria-hidden="true"]')).not.toBeNull()
 
     await act(async () => root.render(<ModalCountHarness count={0} />))
     expect(document.body.querySelectorAll('[data-time-edit-modal]')).toHaveLength(0)
-    expect(appShell.hasAttribute('inert')).toBe(false)
-    expect(appShell.hasAttribute('aria-hidden')).toBe(false)
+    expect(appShell.closest('[inert]')).toBeNull()
+    expect(appShell.closest('[aria-hidden="true"]')).toBeNull()
   })
 })

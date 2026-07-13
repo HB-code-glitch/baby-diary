@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { MODAL_LAYER_BASE } from '../src/lib/modalIsolation'
 
 const css = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8')
 
@@ -96,10 +97,9 @@ it('keeps the time editor fixed across the full viewport', () => {
   expect(css).toMatch(/\.time-edit-backdrop\s*\{[^}]*position:\s*fixed[^}]*inset:\s*0/s)
 })
 
-it('keeps the visible alert above the time-edit backdrop', () => {
-  const backdropZ = Number(css.match(/\.time-edit-backdrop\s*\{[^}]*z-index:\s*(\d+)/s)?.[1])
+it('keeps every modal portal above the visible toast', () => {
   const toastZ = Number(css.match(/\.toast-container\s*\{[^}]*z-index:\s*(\d+)/s)?.[1])
-  expect(toastZ).toBeGreaterThan(backdropZ)
+  expect(MODAL_LAYER_BASE).toBeGreaterThan(toastZ)
 })
 
 it('keeps the high-contrast today text override after weekend color rules', () => {

@@ -1879,7 +1879,6 @@ details[open] > summary .evidence-source-chevron {
 .time-edit-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 1000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2059,6 +2058,156 @@ details[open] > summary .evidence-source-chevron {
 .stagger-mount {
   animation: mountIn var(--dur-spring) var(--ease-out-smooth) both;
   animation-delay: calc(var(--i, 0) * 42ms);
+}
+
+.stagger-mount.bounded-stagger {
+  animation-delay: var(--stagger-delay, 0ms);
+}
+
+.record-icon-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--stone-400);
+  cursor: pointer;
+}
+
+.record-icon-button:hover {
+  background: var(--stone-100);
+  color: var(--stone-600);
+}
+
+.progressive-list-footer {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 2px;
+}
+
+.progressive-load-more {
+  min-height: 40px;
+  padding-inline: 18px;
+}
+
+@keyframes editorModalAppear {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.editor-modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.editor-modal-dialog {
+  width: min(560px, 100%);
+  max-height: min(88vh, 720px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--glass-inset-light), 0 18px 54px rgba(22, 21, 19, 0.24);
+  animation: editorModalAppear 220ms var(--ease-out-smooth) both;
+}
+
+.editor-modal-dialog--message {
+  width: min(520px, 100%);
+  border-top: 3px solid var(--rose-200);
+}
+
+.editor-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.editor-modal-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.editor-modal-description {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.editor-modal-error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--rose-500) 38%, var(--border));
+  border-radius: 10px;
+  background: var(--rose-100);
+  color: var(--rose-500);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.editor-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.editor-modal-control {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.editor-modal-close {
+  width: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 40px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.editor-modal-close:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+.editor-modal-control:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+[data-theme="dark"] .editor-modal-dialog {
+  box-shadow: var(--glass-inset-dark), 0 18px 54px rgba(0, 0, 0, 0.52);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editor-modal-dialog { animation: none; }
 }
 
 .quick-record-slot.stagger-mount {
