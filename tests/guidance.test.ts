@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { HEALTH_EVIDENCE_SOURCES, getEvidenceSources } from '../src/lib/healthEvidence'
 import {
   FEEDING_BANDS,
   FEVER_CARE,
@@ -6,6 +8,7 @@ import {
   FEVER_RED_FLAGS,
   GUIDANCE_ITEMS,
   GUIDANCE_MARKERS,
+  GUIDANCE_SOURCES,
   evaluateFever,
   getCalendarGuidance,
   getCurrentFormulaGuidance,
@@ -15,21 +18,21 @@ import {
 } from '../src/lib/guidance'
 
 describe('legacy health guidance exposure guard', () => {
-  it('keeps only the minimum fever compatibility markers with Task 1 source-id seams', () => {
-    expect(GUIDANCE_MARKERS.map(marker => marker.id).sort()).toEqual([
-      'antipyretic_age_limits',
-      'fever_red_flags',
-      'fever_under_3mo_emergency',
-    ])
+  it('fully retires legacy marker cards from Settings', () => {
+    expect(GUIDANCE_MARKERS).toEqual([])
+  })
 
-    for (const marker of GUIDANCE_MARKERS) {
-      expect(marker.sourceIds.length).toBeGreaterThan(0)
-      expect(marker.sourceIds.every(id => id.startsWith('nice-'))).toBe(true)
-      expect(marker.sourceLabel).toContain('NICE')
-      expect(marker.titleKo).toBeTruthy()
-      expect(marker.titleJa).toBeTruthy()
-      expect(marker.bodyKo).toBeTruthy()
-      expect(marker.bodyJa).toBeTruthy()
+  it('uses the shared registry type and actual official source view without a pending seam', () => {
+    const source = readFileSync('src/lib/guidance.ts', 'utf8')
+
+    expect(source).toContain('HealthEvidenceSourceId')
+    expect(source).not.toMatch(/PendingHealthEvidenceSourceId|TODO\(Task 1 integration\)/)
+    expect(GUIDANCE_SOURCES).toHaveLength(HEALTH_EVIDENCE_SOURCES.length)
+    for (const item of GUIDANCE_SOURCES) {
+      const official = HEALTH_EVIDENCE_SOURCES.find(sourceItem => sourceItem.id === item.id)
+      expect(official).toBeDefined()
+      expect(item.url).toBe(official?.url)
+      expect(item.reviewedOn).toBe(official?.reviewedOn)
     }
   })
 
@@ -161,7 +164,9 @@ describe('fever guidance content safety', () => {
   it('keeps home care neutral, source-linked, and excludes tepid sponging', () => {
     const serialized = JSON.stringify(FEVER_CARE)
     expect(FEVER_CARE.sourceIds).toEqual(['nice-fever-ng143'])
-    expect(FEVER_CARE.sourceLabel).toBe('NICE NG143')
+    expect('sourceLabel' in FEVER_CARE).toBe(false)
+    expect(getEvidenceSources(FEVER_CARE.sourceIds, 'ko')[0].organization).toBeTruthy()
+    expect(getEvidenceSources(FEVER_CARE.sourceIds, 'ja')[0].organization).toBeTruthy()
     expect(serialized).not.toMatch(/미온|ぬるま湯|spong|NHS/i)
     expect(serialized).toMatch(/수분|水分/)
     expect(serialized).toMatch(/벗기|脱がせ/)

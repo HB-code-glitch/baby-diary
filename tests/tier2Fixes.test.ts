@@ -211,20 +211,11 @@ describe('P35: hatsu-sekku postpone inclusive boundary', () => {
 })
 
 // ---------------------------------------------------------------------------
-// P32 — Fever guidance text: "12주" updated to "90일" / "12週" to "90日"
+// P32 replacement — legacy fever marker cards are no longer exposed.
 // ---------------------------------------------------------------------------
-describe('P32: fever_under_3mo_emergency text uses 90 not 12', () => {
-  it('Korean body contains "90일" not "12주"', () => {
-    const marker = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')
-    expect(marker).toBeDefined()
-    expect(marker!.bodyKo).toContain('90일')
-    expect(marker!.bodyKo).not.toContain('12주')
-  })
-
-  it('Japanese body contains "90日" not "12週"', () => {
-    const marker = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')
-    expect(marker!.bodyJa).toContain('90日')
-    expect(marker!.bodyJa).not.toContain('12週')
+describe('P32 replacement: legacy fever marker cards are retired', () => {
+  it('does not expose old marker prose through Settings', () => {
+    expect(GUIDANCE_MARKERS).toEqual([])
   })
 })
 

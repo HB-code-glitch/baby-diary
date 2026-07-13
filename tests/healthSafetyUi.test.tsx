@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import i18n from '../src/i18n'
 import { FeedingTipPopup } from '../src/components/FeedingTipPopup'
+import { getEvidenceSources } from '../src/lib/healthEvidence'
+import { FEVER_CARE } from '../src/lib/guidance'
 import {
   FeverModal,
   focusDialogAndCreateRestore,
@@ -106,6 +108,21 @@ describe('FeedingTipPopup safety copy', () => {
 })
 
 describe('FeverModal safety and accessibility', () => {
+  it('derives its footer label from registry source ids for the active locale', async () => {
+    await i18n.changeLanguage('ko')
+    const koHtml = renderToStaticMarkup(
+      <FeverModal celsius={38} level="emergency" ageDays={20} lang="ko" onConfirm={() => undefined} />,
+    )
+    expect(koHtml).toContain(getEvidenceSources(FEVER_CARE.sourceIds, 'ko')[0].organization)
+    expect(koHtml).not.toContain('NICE NG143')
+
+    await i18n.changeLanguage('ja')
+    const jaHtml = renderToStaticMarkup(
+      <FeverModal celsius={38} level="emergency" ageDays={20} lang="ja" onConfirm={() => undefined} />,
+    )
+    expect(jaHtml).toContain(getEvidenceSources(FEVER_CARE.sourceIds, 'ja')[0].organization)
+  })
+
   it('forwards selected risk ids from Home state into the modal without persisting them', () => {
     const source = readFileSync('src/pages/HomePage.tsx', 'utf8')
 

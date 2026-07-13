@@ -4,6 +4,7 @@ import {
   FEVER_CARE,
   FEVER_DURATION_GUIDANCE,
   FEVER_RED_FLAGS,
+  getGuidanceSourceLabel,
   FeverLevel,
   FeverRedFlagId,
 } from '../lib/guidance'
@@ -225,7 +226,7 @@ export function FeverModal({
         </div>
 
         <div className="fever-modal-footer">
-          <span className="fever-modal-source">{FEVER_CARE.sourceLabel}</span>
+          <span className="fever-modal-source">{getGuidanceSourceLabel(FEVER_CARE, language)}</span>
           <p className="fever-modal-disclaimer">{t('feverModal.disclaimer')}</p>
         </div>
 
