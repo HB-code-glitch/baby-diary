@@ -127,6 +127,103 @@ function copyRestoreStaging(source: string, destination: string): void {
   }
 }
 
+interface SyntheticMaximumJournal {
+  size: number
+  sha256: string
+  readInto(target: Buffer, offset: number, length: number, position: number): number
+}
+
+function syntheticMaximumJournal(prefix: Buffer): SyntheticMaximumJournal {
+  const size = 128 * 1024 * 1024
+  if (prefix.byteLength === 0 || prefix.at(-1) !== 0x0a) {
+    throw new Error('synthetic journal prefix must be a non-empty terminated journal')
+  }
+  const importJson = Buffer.from('{"version":1,"type":"import","sourceId":"maximum-stream"}', 'utf8')
+  const makeImportLine = (lineSize: number): Buffer => Buffer.concat([
+    importJson,
+    Buffer.alloc(lineSize - importJson.byteLength - 1, 0x20),
+    Buffer.from('\n'),
+  ], lineSize)
+  const fullLine = makeImportLine(64 * 1024)
+  const tailBytes = size - prefix.byteLength
+  let fullLineCount = Math.floor(tailBytes / fullLine.byteLength)
+  let finalLineSize = tailBytes - (fullLineCount * fullLine.byteLength)
+  if (finalLineSize > 0 && finalLineSize < importJson.byteLength + 1) {
+    fullLineCount -= 1
+    finalLineSize += fullLine.byteLength
+  }
+  const finalLine = finalLineSize > 0 ? makeImportLine(finalLineSize) : Buffer.alloc(0)
+  const fullLineRegionBytes = fullLineCount * fullLine.byteLength
+  const hash = createHash('sha256').update(prefix)
+  for (let index = 0; index < fullLineCount; index += 1) hash.update(fullLine)
+  if (finalLine.byteLength > 0) hash.update(finalLine)
+
+  return {
+    size,
+    sha256: hash.digest('hex'),
+    readInto(target, offset, length, position) {
+      let sourcePosition = position
+      let targetOffset = offset
+      let remaining = length
+      while (remaining > 0) {
+        if (sourcePosition < prefix.byteLength) {
+          const count = Math.min(remaining, prefix.byteLength - sourcePosition)
+          prefix.copy(target, targetOffset, sourcePosition, sourcePosition + count)
+          sourcePosition += count
+          targetOffset += count
+          remaining -= count
+          continue
+        }
+
+        const tailPosition = sourcePosition - prefix.byteLength
+        if (tailPosition < fullLineRegionBytes) {
+          const lineOffset = tailPosition % fullLine.byteLength
+          const count = Math.min(remaining, fullLine.byteLength - lineOffset)
+          fullLine.copy(target, targetOffset, lineOffset, lineOffset + count)
+          sourcePosition += count
+          targetOffset += count
+          remaining -= count
+          continue
+        }
+
+        const finalOffset = tailPosition - fullLineRegionBytes
+        const count = Math.min(remaining, finalLine.byteLength - finalOffset)
+        if (count <= 0) throw new Error('synthetic journal read exceeded EOF')
+        finalLine.copy(target, targetOffset, finalOffset, finalOffset + count)
+        sourcePosition += count
+        targetOffset += count
+        remaining -= count
+      }
+      return length
+    },
+  }
+}
+
+function guardBufferAllocations(
+  maximum: number,
+  action: () => void,
+): number[] {
+  const sizes: number[] = []
+  const originalAlloc = Buffer.alloc
+  const spy = vi.spyOn(Buffer, 'alloc').mockImplementation(((
+    size: number,
+    fill?: string | number | Uint8Array,
+    encoding?: BufferEncoding,
+  ): Buffer => {
+    sizes.push(size)
+    if (size > maximum) throw new Error(`oversized Buffer.alloc: ${size}`)
+    if (fill === undefined) return originalAlloc(size)
+    if (encoding === undefined) return originalAlloc(size, fill)
+    return originalAlloc(size, fill as string, encoding)
+  }) as typeof Buffer.alloc)
+  try {
+    action()
+  } finally {
+    spy.mockRestore()
+  }
+  return sizes
+}
+
 function simulatedPosixOps(): DurableFileOps {
   const realOpen = fs.openSync.bind(fs)
   const directoryFds = new Set<number>()
@@ -222,6 +319,69 @@ function cleanRestoreAndAdvanceSettings(
     forensicArchive: completed.forensicArchive,
     liveSettings: fs.readFileSync(path.join(root, 'settings.json')),
     liveJournal: fs.readFileSync(path.join(root, BABY_INFO_JOURNAL_FILE)),
+  }
+}
+
+function prepareMaximumCompletedRestore(
+  root: string,
+  index: number,
+  bootPrefix: string,
+  advanceSettings: boolean,
+): {
+  fixture: SyntheticMaximumJournal
+  intentPath: string
+  expectedProfileName: string
+  expectedJournalScans: number
+} {
+  const completed = reachPrimaryVerifiedWindowsRestore(root, index, bootPrefix)
+  let expectedProfileName = JSON.parse(fs.readFileSync(path.join(root, 'settings.json'), 'utf8')).profile.name
+  if (advanceSettings) {
+    const opened = new SettingsStore(root, {
+      platform: 'win32',
+      startupId: `${bootPrefix}-boot-3`,
+    })
+    const settings = opened.get()
+    settings.profile.name = 'Same-size settings-only advancement'
+    opened.save(settings)
+    expectedProfileName = settings.profile.name
+  }
+
+  const snapshotPath = path.join(root, 'backups', '2026-07-13_10-20-30')
+  const snapshotJournalPath = path.join(snapshotPath, BABY_INFO_JOURNAL_FILE)
+  const liveJournalPath = path.join(root, BABY_INFO_JOURNAL_FILE)
+  const prefix = fs.readFileSync(snapshotJournalPath)
+  expect(fs.readFileSync(liveJournalPath)).toEqual(prefix)
+  const fixture = syntheticMaximumJournal(prefix)
+  fs.truncateSync(snapshotJournalPath, fixture.size)
+  fs.truncateSync(liveJournalPath, fixture.size)
+  const stagingPath = path.join(root, RESTORE_STAGING_DIR)
+  if (fs.existsSync(stagingPath)) {
+    fs.truncateSync(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), fixture.size)
+  }
+
+  const manifestPath = path.join(snapshotPath, MANIFEST_FILE)
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  const journalEntry = manifest.files.find((entry: { path: string }) => entry.path === BABY_INFO_JOURNAL_FILE)
+  journalEntry.size = fixture.size
+  journalEntry.sha256 = fixture.sha256
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+  const transaction = JSON.parse(completed.staleIntent.toString('utf8'))
+  transaction.journal = { size: fixture.size, sha256: fixture.sha256 }
+  const intentPath = path.join(root, RESTORE_INTENT_FILE)
+  fs.writeFileSync(intentPath, JSON.stringify(transaction, null, 2), 'utf8')
+  if (fs.existsSync(stagingPath)) {
+    fs.writeFileSync(
+      path.join(stagingPath, 'restore-transaction.json'),
+      JSON.stringify(transaction, null, 2),
+      'utf8',
+    )
+  }
+  return {
+    fixture,
+    intentPath,
+    expectedProfileName,
+    expectedJournalScans: fs.existsSync(stagingPath) ? 3 : 2,
   }
 }
 
@@ -1014,6 +1174,58 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.readFileSync(journalPath)).toEqual(tornJournal)
   })
 
+  it.each([
+    ['exact restored pair', false, 150],
+    ['same-size settings-only advancement', true, 151],
+  ])('streams a maximum-size verified backup and %s without a whole-journal allocation', (
+    label,
+    advanceSettings,
+    index,
+  ) => {
+    const bootPrefix = `maximum-${label.replaceAll(' ', '-')}`
+    const prepared = prepareMaximumCompletedRestore(tmpDir, index, bootPrefix, advanceSettings)
+    const readRequests: Array<{ position: number; length: number }> = []
+    const streamingFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        if (position === null) throw new Error('maximum journal reads must be positional')
+        if (fs.fstatSync(fd).size !== prepared.fixture.size) {
+          return fs.readSync(fd, buffer, offset, length, position)
+        }
+        readRequests.push({ position, length })
+        const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+        return prepared.fixture.readInto(target, offset, length, position)
+      },
+    }
+
+    const rssBefore = process.memoryUsage().rss
+    const startedAt = Date.now()
+    let allocations: number[] = []
+    expect(() => {
+      allocations = guardBufferAllocations(64 * 1024, () => {
+        recoverSettingsAndJournalPair(tmpDir, {
+          platform: 'win32',
+          startupId: `${bootPrefix}-boot-4`,
+          durableFs: streamingFs,
+        })
+      })
+    }).not.toThrow()
+    const elapsedMs = Date.now() - startedAt
+    const rssGrowthDiagnostic = Math.max(0, process.memoryUsage().rss - rssBefore)
+
+    expect(Math.max(...allocations), `RSS growth diagnostic only: ${rssGrowthDiagnostic}`)
+      .toBeLessThanOrEqual(64 * 1024)
+    expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
+    expect(readRequests.reduce((total, request) => total + request.length, 0))
+      .toBe(prepared.fixture.size * prepared.expectedJournalScans)
+    expect(readRequests.filter(request => request.position + request.length === prepared.fixture.size))
+      .toHaveLength(prepared.expectedJournalScans)
+    expect(elapsedMs).toBeLessThan(10_000)
+    expect(fs.existsSync(prepared.intentPath)).toBe(false)
+    expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).profile.name)
+      .toBe(prepared.expectedProfileName)
+  })
+
   it('streams a valid 128 MiB advancement end-to-end, bounds invalid reads, and rejects one byte over', () => {
     const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 148, 'lineage-boundary')
     new SettingsStore(tmpDir, { platform: 'win32', startupId: 'lineage-boundary-boot-3' })
@@ -1048,6 +1260,9 @@ describe('verified settings/journal pair recovery', () => {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         if (position === null) throw new Error('live advancement reads must be positional')
+        if (fs.fstatSync(fd).size !== maximumJournalBytes) {
+          return fs.readSync(fd, buffer, offset, length, position)
+        }
         readRequests.push({ position, length })
         const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
         let sourcePosition = position
@@ -1095,11 +1310,13 @@ describe('verified settings/journal pair recovery', () => {
     const elapsedMs = Date.now() - startedAt
     const rssGrowth = Math.max(0, process.memoryUsage().rss - rssBefore)
     expect(readRequests.length).toBeGreaterThan(0)
-    expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
+    expect(
+      Math.max(...readRequests.map(request => request.length)),
+      `RSS growth diagnostic only: ${rssGrowth}`,
+    ).toBeLessThanOrEqual(64 * 1024)
     expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(maximumJournalBytes)
     expect(readRequests.at(-1)!.position + readRequests.at(-1)!.length).toBe(maximumJournalBytes)
     expect(elapsedMs).toBeLessThan(10_000)
-    expect(rssGrowth).toBeLessThan(96 * 1024 * 1024)
     expect(fs.existsSync(intentPath)).toBe(false)
 
     fs.writeFileSync(intentPath, completed.staleIntent)
@@ -1108,6 +1325,9 @@ describe('verified settings/journal pair recovery', () => {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         if (position === null) throw new Error('live advancement reads must be positional')
+        if (fs.fstatSync(fd).size !== maximumJournalBytes) {
+          return fs.readSync(fd, buffer, offset, length, position)
+        }
         invalidReadRequests.push({ position, length })
         return fs.readSync(fd, buffer, offset, length, position)
       },

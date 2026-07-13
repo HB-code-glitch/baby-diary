@@ -123,6 +123,24 @@ export interface RecoveryOptions extends BackupReadOptions {
   startupId?: string
 }
 
+type RecoveryReadOps = DurableFileOps & {
+  readSync?(
+    fd: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): number
+}
+
+type PositionalReadSync = (
+  fd: number,
+  buffer: Uint8Array,
+  offset: number,
+  length: number,
+  position: number,
+) => number
+
 const DEFAULT_DURABLE_OPS = fs as unknown as DurableFileOps
 
 function resourceLimits(overrides: Partial<BackupResourceLimits> | undefined): BackupResourceLimits {
@@ -437,6 +455,13 @@ function assertOpenFileUnchanged(source: OpenRegularFile): void {
   }
 }
 
+function positionalReadSync(options: BackupReadOptions): PositionalReadSync {
+  const recoveryOps = (options as RecoveryOptions).durableFs as RecoveryReadOps | undefined
+  return recoveryOps?.readSync
+    ? recoveryOps.readSync.bind(recoveryOps)
+    : fs.readSync.bind(fs)
+}
+
 /**
  * Opens one allowlisted regular file without following links where supported,
  * validates path/handle identity, and returns the only Buffer used downstream.
@@ -472,12 +497,13 @@ function hashRegularFileOnce(
   const source = openRegularFileOnce(root, relativePath, options)
   const hash = createHash('sha256')
   const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+  const readSync = positionalReadSync(options)
   try {
     let offset = 0
     while (offset < source.opened.size) {
       const requested = Math.min(chunk.byteLength, source.opened.size - offset)
-      const count = fs.readSync(source.fd, chunk, 0, requested, offset)
-      if (!Number.isInteger(count) || count <= 0) {
+      const count = readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0 || count > requested) {
         throw new Error(`backup file changed during read: ${relativePath}`)
       }
       hash.update(chunk.subarray(0, count))
@@ -485,6 +511,62 @@ function hashRegularFileOnce(
     }
     assertOpenFileUnchanged(source)
     return { size: source.opened.size, sha256: hash.digest('hex') }
+  } finally {
+    fs.closeSync(source.fd)
+  }
+}
+
+interface StreamedJournalResult {
+  descriptor: DigestDescriptor
+  journal: BabyInfoJournal
+}
+
+function streamJournalOnce(
+  root: string,
+  options: BackupReadOptions,
+  replayOptions: {
+    allowTornFinal: boolean
+    requiredPrefix?: DigestDescriptor
+  },
+): StreamedJournalResult {
+  const source = openRegularFileOnce(root, BABY_INFO_JOURNAL_FILE, options)
+  try {
+    const requiredPrefix = replayOptions.requiredPrefix
+    if (requiredPrefix && source.opened.size < requiredPrefix.size) {
+      throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+    }
+
+    const fullHash = createHash('sha256')
+    const prefixHash = requiredPrefix ? createHash('sha256') : undefined
+    const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+    const readSync = positionalReadSync(options)
+    const replay = BabyInfoJournal.createChunkReplay({ allowTornFinal: replayOptions.allowTornFinal })
+    let offset = 0
+    while (offset < source.opened.size) {
+      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
+      const count = readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0 || count > requested) {
+        throw new Error(`backup file changed during read: ${BABY_INFO_JOURNAL_FILE}`)
+      }
+      const bytes = chunk.subarray(0, count)
+      fullHash.update(bytes)
+      if (requiredPrefix && offset < requiredPrefix.size) {
+        const prefixCount = Math.min(count, requiredPrefix.size - offset)
+        prefixHash!.update(bytes.subarray(0, prefixCount))
+      }
+      replay.push(bytes)
+      offset += count
+    }
+
+    const journal = replay.finish()
+    assertOpenFileUnchanged(source)
+    if (requiredPrefix && prefixHash!.digest('hex') !== requiredPrefix.sha256) {
+      throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+    }
+    return {
+      descriptor: { size: source.opened.size, sha256: fullHash.digest('hex') },
+      journal,
+    }
   } finally {
     fs.closeSync(source.fd)
   }
@@ -499,6 +581,7 @@ function streamRegularFileToStaging(
   const source = openRegularFileOnce(sourceRoot, relativePath, options)
   const hash = createHash('sha256')
   const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+  const readSync = positionalReadSync(options)
   let destinationFd: number | undefined
   let destinationCreated = false
   let completed = false
@@ -508,8 +591,8 @@ function streamRegularFileToStaging(
     let offset = 0
     while (offset < source.opened.size) {
       const requested = Math.min(chunk.byteLength, source.opened.size - offset)
-      const count = fs.readSync(source.fd, chunk, 0, requested, offset)
-      if (!Number.isInteger(count) || count <= 0) {
+      const count = readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0 || count > requested) {
         throw new Error(`backup file changed during read: ${relativePath}`)
       }
       const bytes = chunk.subarray(0, count)
@@ -698,6 +781,86 @@ export function verifyBackupSnapshot(
     settingsBytes!,
     journalBytes!,
   )
+}
+
+interface VerifiedSnapshotIdentity {
+  snapshotId: string
+  snapshotTimestamp: string
+  settingsDescriptor: DigestDescriptor
+  journalDescriptor: DigestDescriptor
+}
+
+/**
+ * Revalidates a complete snapshot for a completed restore without retaining
+ * the journal or auxiliary files. Public backup selection still returns its
+ * immutable buffers; this path needs only independently verified identity.
+ */
+function verifyBackupSnapshotIdentity(
+  snapshotDir: string,
+  options: RecoveryOptions,
+): VerifiedSnapshotIdentity {
+  const now = options.now ?? new Date()
+  const limits = resourceLimits(options.limits)
+  assertSnapshotDirectory(snapshotDir)
+  const manifestPath = path.join(snapshotDir, BACKUP_MANIFEST_FILE)
+  if (!fs.existsSync(manifestPath)) {
+    const entries = boundedDirectoryEntries(snapshotDir, 2, 'legacy backup entry')
+    if (entries.length !== 1
+      || entries[0].name !== SETTINGS_FILE
+      || !entries[0].isFile()
+      || entries[0].isSymbolicLink()) {
+      throw new Error('legacy backup must contain only settings.json')
+    }
+    const settingsBytes = readRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
+    const settings = parseSettingsBytes(settingsBytes)
+    if (!isLegacySettings(settings)) throw new Error('journal-aware backup is missing its manifest')
+    return {
+      snapshotId: path.basename(snapshotDir),
+      snapshotTimestamp: parseLegacySnapshotTimestamp(path.basename(snapshotDir), now),
+      settingsDescriptor: descriptor(settingsBytes),
+      journalDescriptor: { size: 0, sha256: sha256(new Uint8Array(0)) },
+    }
+  }
+
+  const manifestBytes = readRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
+  const manifest = parseManifest(manifestBytes, now, limits)
+  const actualPaths = actualSnapshotPaths(snapshotDir, limits)
+  if (actualPaths.length !== manifest.files.length
+    || actualPaths.some((relativePath, index) => relativePath !== manifest.files[index].path)) {
+    throw new Error('backup manifest does not enumerate the complete staged set')
+  }
+
+  let settingsBytes: Buffer | undefined
+  let journalResult: StreamedJournalResult | undefined
+  for (const entry of manifest.files) {
+    if (entry.path === SETTINGS_FILE) {
+      settingsBytes = readRegularFileOnce(snapshotDir, entry.path, options)
+      if (!sameDescriptor(descriptor(settingsBytes), entry)) {
+        throw new Error(`backup checksum mismatch: ${entry.path}`)
+      }
+      continue
+    }
+    if (entry.path === BABY_INFO_JOURNAL_FILE) {
+      journalResult = streamJournalOnce(snapshotDir, options, { allowTornFinal: false })
+      if (!sameDescriptor(journalResult.descriptor, entry)) {
+        throw new Error(`backup checksum mismatch: ${entry.path}`)
+      }
+      continue
+    }
+    const actual = hashRegularFileOnce(snapshotDir, entry.path, options)
+    if (!sameDescriptor(actual, entry)) {
+      throw new Error(`backup checksum mismatch: ${entry.path}`)
+    }
+  }
+
+  const settings = parseSettingsBytes(settingsBytes!)
+  validateProjection(settings, journalResult!.journal)
+  return {
+    snapshotId: path.basename(snapshotDir),
+    snapshotTimestamp: manifest.snapshotTimestamp,
+    settingsDescriptor: descriptor(settingsBytes!),
+    journalDescriptor: journalResult!.descriptor,
+  }
 }
 
 function syncDirectory(
@@ -1002,11 +1165,11 @@ function transactionMatchesVerifiedBackup(
   for (const root of roots) {
     for (const candidate of listSnapshotCandidates(root, limits, budget)) {
       try {
-        const pair = verifyBackupSnapshot(candidate, options)
-        if (pair.snapshotId === transaction.snapshotId
-          && pair.snapshotTimestamp === transaction.snapshotTimestamp
-          && sameDescriptor(descriptor(pair.settingsBytes), transaction.settings)
-          && sameDescriptor(descriptor(pair.journalBytes), transaction.journal)) {
+        const identity = verifyBackupSnapshotIdentity(candidate, options)
+        if (identity.snapshotId === transaction.snapshotId
+          && identity.snapshotTimestamp === transaction.snapshotTimestamp
+          && sameDescriptor(identity.settingsDescriptor, transaction.settings)
+          && sameDescriptor(identity.journalDescriptor, transaction.journal)) {
           return true
         }
       } catch { /* only an independently verified exact identity can match */ }
@@ -1015,85 +1178,51 @@ function transactionMatchesVerifiedBackup(
   return false
 }
 
-function regularFileSizeOnce(
-  root: string,
-  relativePath: string,
-  options: BackupReadOptions,
-): number {
-  const source = openRegularFileOnce(root, relativePath, options)
-  try {
-    assertOpenFileUnchanged(source)
-    return source.opened.size
-  } finally {
-    fs.closeSync(source.fd)
+function verifyStreamedPair(
+  directory: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+  allowTornFinal: boolean,
+): {
+  settingsDescriptor: DigestDescriptor
+  journalDescriptor: DigestDescriptor
+} {
+  assertSnapshotDirectory(directory)
+  const settingsBytes = readRegularFileOnce(directory, SETTINGS_FILE, options)
+  const settings = parseSettingsBytes(settingsBytes)
+  const journalResult = streamJournalOnce(directory, options, {
+    allowTornFinal,
+    requiredPrefix: transaction.journal,
+  })
+  validateProjection(settings, journalResult.journal)
+  return {
+    settingsDescriptor: descriptor(settingsBytes),
+    journalDescriptor: journalResult.descriptor,
   }
 }
 
-type RecoveryReadOps = DurableFileOps & {
-  readSync?(
-    fd: number,
-    buffer: Uint8Array,
-    offset: number,
-    length: number,
-    position: number | null,
-  ): number
-}
-
-function verifyLiveAdvancementPair(
-  userDataPath: string,
+function verifyCompletedRestoreStaging(
+  stagingPath: string,
   transaction: RestoreTransactionFile,
   options: RecoveryOptions,
 ): void {
-  const settings = parseSettingsBytes(readRegularFileOnce(userDataPath, SETTINGS_FILE, options))
-  const source = openRegularFileOnce(userDataPath, BABY_INFO_JOURNAL_FILE, options)
-  try {
-    if (source.opened.size < transaction.journal.size) {
-      throw new Error('primary-verified live journal does not retain the restored transaction lineage')
-    }
-
-    const prefixHash = createHash('sha256')
-    let prefixVerified = false
-    const verifyPrefix = (): void => {
-      if (prefixVerified) return
-      prefixVerified = true
-      if (prefixHash.digest('hex') !== transaction.journal.sha256) {
-        throw new Error('primary-verified live journal does not retain the restored transaction lineage')
-      }
-    }
-    if (transaction.journal.size === 0) verifyPrefix()
-
-    const recoveryOps = options.durableFs as RecoveryReadOps | undefined
-    const readSync = recoveryOps?.readSync
-      ? recoveryOps.readSync.bind(recoveryOps)
-      : fs.readSync.bind(fs)
-    const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
-    const replay = BabyInfoJournal.createChunkReplay({ allowTornFinal: true })
-    let offset = 0
-    while (offset < source.opened.size) {
-      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
-      const count = readSync(source.fd, chunk, 0, requested, offset)
-      if (!Number.isInteger(count) || count <= 0) {
-        throw new Error(`backup file changed during read: ${BABY_INFO_JOURNAL_FILE}`)
-      }
-      const bytes = chunk.subarray(0, count)
-      if (!prefixVerified) {
-        const prefixCount = Math.min(count, transaction.journal.size - offset)
-        if (prefixCount > 0) prefixHash.update(bytes.subarray(0, prefixCount))
-        if (offset + prefixCount === transaction.journal.size) verifyPrefix()
-      }
-      replay.push(bytes)
-      offset += count
-    }
-
-    const journal = replay.finish()
-    if (!prefixVerified) {
-      throw new Error('primary-verified live journal does not retain the restored transaction lineage')
-    }
-    assertOpenFileUnchanged(source)
-    validateProjection(settings, journal)
-  } finally {
-    fs.closeSync(source.fd)
+  const pair = verifyStreamedPair(stagingPath, transaction, options, false)
+  if (!sameDescriptor(pair.settingsDescriptor, transaction.settings)
+    || !sameDescriptor(pair.journalDescriptor, transaction.journal)) {
+    throw new Error('primary-verified staging pair checksum mismatch')
   }
+}
+
+function classifyCompletedRestoreLivePair(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+): 'exact-restored' | 'valid-advancement' {
+  const pair = verifyStreamedPair(userDataPath, transaction, options, true)
+  return sameDescriptor(pair.settingsDescriptor, transaction.settings)
+    && sameDescriptor(pair.journalDescriptor, transaction.journal)
+    ? 'exact-restored'
+    : 'valid-advancement'
 }
 
 function verifyCompletedRestoreLiveState(
@@ -1114,30 +1243,13 @@ function verifyCompletedRestoreLiveState(
 
   verifyForensicEvidence(userDataPath, transaction, options)
   onForensicVerified?.()
-  let liveJournalSize: number
   try {
-    liveJournalSize = regularFileSizeOnce(userDataPath, BABY_INFO_JOURNAL_FILE, options)
+    return classifyCompletedRestoreLivePair(userDataPath, transaction, options)
   } catch (error) {
     throw new Error(
       `primary-verified live settings/journal pair is neither exact nor a valid advancement: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-
-  if (liveJournalSize === transaction.journal.size) {
-    try {
-      verifyPairDirectory(userDataPath, transaction, options)
-      return 'exact-restored'
-    } catch { /* a strict descendant with the same journal size is checked below */ }
-  }
-
-  try {
-    verifyLiveAdvancementPair(userDataPath, transaction, options)
-  } catch (error) {
-    throw new Error(
-      `primary-verified live settings/journal pair is neither exact nor a valid advancement: ${error instanceof Error ? error.message : String(error)}`,
-    )
-  }
-  return 'valid-advancement'
 }
 
 function stagingIsExactlyOnePublicationAhead(
@@ -1209,10 +1321,9 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       return true
     }
     let transaction = intentTransaction
-    let pair = verifyPairDirectory(stagingPath, intentTransaction, { platform })
-
     const metadataPath = path.join(stagingPath, RESTORE_STAGE_METADATA_FILE)
-    if (fs.existsSync(metadataPath)) {
+    const metadataExists = fs.existsSync(metadataPath)
+    if (metadataExists) {
       const stageMetadata = normalizeTransaction(
         readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform }),
       )
@@ -1226,22 +1337,30 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       } else {
         throw new Error('restore intent and staging transaction controls diverge')
       }
-      pair = verifyPairDirectory(stagingPath, transaction, { platform })
-    } else {
-      // A surviving exact outer intent is the only authority allowed to
-      // reconstruct missing stage metadata.
-      writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
     }
 
     if (transaction.phase === 'primary-verified') {
       primaryWriteStarted = true
       completedRestoreWasPublished = true
+      verifyCompletedRestoreStaging(stagingPath, transaction, options)
+      if (!metadataExists) {
+        // A surviving exact outer intent is the only authority allowed to
+        // reconstruct missing stage metadata.
+        writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+      }
       verifyCompletedRestoreLiveState(userDataPath, transaction, options, () => {
         forensicConfirmed = true
       })
       removeIntentDurably(userDataPath, platform, ops)
       removeStagingDurably(userDataPath, platform, ops)
       return true
+    }
+
+    const pair = verifyPairDirectory(stagingPath, transaction, { platform })
+    if (!metadataExists) {
+      // A surviving exact outer intent is the only authority allowed to
+      // reconstruct missing stage metadata.
+      writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
     }
 
     if (transaction.phase === 'allocated') {
