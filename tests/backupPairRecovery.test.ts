@@ -1085,6 +1085,172 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
   })
 
+  it.each([
+    ['same-inode rewrite', 'rewrite'],
+    ['same-inode short write', 'short-write'],
+    ['atomic path swap', 'swap'],
+  ] as const)(
+    'keeps POSIX primaries untouched when the forensic journal suffers a %s immediately before publication',
+    (_label, mutationKind) => {
+      writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(253)])
+      const original = writeCorruptLivePair(tmpDir)
+      const settingsPath = path.join(tmpDir, 'settings.json')
+      const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+      const base = simulatedPosixOps()
+      const targets = new Map<number, string>()
+      const primaryRenames: string[] = []
+      let mutated = false
+      let swapBlockedByLease = false
+      let leaseHeldAtPublication = false
+      let forensicJournal = ''
+      let forensicBefore: fs.Stats | undefined
+      const durableFs: DurableFileOps = {
+        ...base,
+        openSync(target, flags, mode) {
+          const fd = base.openSync(target, flags, mode)
+          targets.set(fd, path.resolve(String(target)))
+          return fd
+        },
+        fsyncSync(fd) {
+          base.fsyncSync(fd)
+          const target = targets.get(fd) ?? ''
+          if (!mutated
+            && path.dirname(target) === path.resolve(tmpDir)
+            && path.basename(target).startsWith('settings.json.tmp-')) {
+            const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+            const archive = path.join(forensicRoot, fs.readdirSync(forensicRoot)[0])
+            forensicJournal = path.join(archive, BABY_INFO_JOURNAL_FILE)
+            forensicBefore = fs.statSync(forensicJournal)
+            leaseHeldAtPublication = Array.from(targets.entries()).some(([openFd, openedPath]) => {
+              if (openedPath !== path.resolve(forensicJournal) || openFd === fd) return false
+              const opened = fs.fstatSync(openFd)
+              return opened.dev === forensicBefore!.dev && opened.ino === forensicBefore!.ino
+            })
+            const bytes = fs.readFileSync(forensicJournal)
+            if (mutationKind === 'swap') {
+              const replacement = path.join(tmpDir, '.forensic-precommit-journal-swap')
+              const changed = Buffer.from(bytes)
+              changed[0] = changed[0] === 0x58 ? 0x59 : 0x58
+              fs.writeFileSync(replacement, changed)
+              try {
+                fs.renameSync(replacement, forensicJournal)
+              } catch (error) {
+                if (process.platform !== 'win32'
+                  || !['EBUSY', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+                  throw error
+                }
+                swapBlockedByLease = true
+                throw new Error('atomic forensic path swap was blocked by the held lease')
+              }
+            } else if (mutationKind === 'short-write') {
+              const journalFd = fs.openSync(forensicJournal, 'r+')
+              try {
+                expect(fs.writeSync(journalFd, Buffer.from('X'), 0, 1, 0)).toBe(1)
+                fs.fsyncSync(journalFd)
+              } finally {
+                fs.closeSync(journalFd)
+              }
+            } else {
+              const changed = Buffer.from(bytes)
+              changed[0] = changed[0] === 0x58 ? 0x59 : 0x58
+              fs.writeFileSync(forensicJournal, changed)
+            }
+            mutated = true
+          }
+        },
+        renameSync(source, destination) {
+          const resolved = path.resolve(String(destination))
+          if (resolved === path.resolve(settingsPath) || resolved === path.resolve(journalPath)) {
+            primaryRenames.push(resolved)
+          }
+          base.renameSync(source, destination)
+        },
+        closeSync(fd) {
+          targets.delete(fd)
+          base.closeSync(fd)
+        },
+      }
+
+      const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+        platform: 'linux',
+        durableFs,
+        startupId: `forensic-precommit-${mutationKind}`,
+      }))
+
+      expect.soft(mutated || swapBlockedByLease).toBe(true)
+      expect.soft(leaseHeldAtPublication).toBe(true)
+      expect.soft(error.message).toMatch(/forensic|preserv|changed|checksum|identity/i)
+      expect.soft(error).toMatchObject({
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        originalsPreserved: swapBlockedByLease,
+        primaryUntouched: true,
+      })
+      expect.soft(primaryRenames).toEqual([])
+      expect.soft(fs.readFileSync(settingsPath)).toEqual(original.settings)
+      expect.soft(fs.readFileSync(journalPath)).toEqual(original.journal)
+      expect(fs.existsSync(forensicJournal)).toBe(true)
+      expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
+      expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+      const forensicAfter = fs.statSync(forensicJournal)
+      if (mutationKind === 'swap' && !swapBlockedByLease) {
+        expect(forensicAfter.ino).not.toBe(forensicBefore!.ino)
+      } else {
+        expect(forensicAfter.ino).toBe(forensicBefore!.ino)
+      }
+      expect(targets.size).toBe(0)
+    },
+  )
+
+  it('resumes from held forensic evidence after the first POSIX primary rename loses its response', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(254)])
+    const original = writeCorruptLivePair(tmpDir)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const posixOps = simulatedPosixOps()
+    let responseLost = false
+    const uncertainOps: DurableFileOps = {
+      ...posixOps,
+      renameSync(source, destination) {
+        posixOps.renameSync(source, destination)
+        if (!responseLost && path.resolve(String(destination)) === path.resolve(settingsPath)) {
+          responseLost = true
+          throw new Error('simulated response loss after first primary rename')
+        }
+      },
+    }
+
+    const first = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs: uncertainOps,
+      startupId: 'partial-primary-response-loss',
+    }))
+    expect(responseLost).toBe(true)
+    expect(first.message).toMatch(/response loss after first primary rename/i)
+    expect(first).toMatchObject({ originalsPreserved: true, primaryUntouched: false })
+    expect(fs.readFileSync(settingsPath)).toEqual(
+      fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
+    )
+    expect(fs.readFileSync(journalPath)).toEqual(original.journal)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    const forensicArchive = path.join(forensicRoot, fs.readdirSync(forensicRoot)[0])
+    expect(fs.readFileSync(path.join(forensicArchive, 'settings.json'))).toEqual(original.settings)
+    expect(fs.readFileSync(path.join(forensicArchive, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs: posixOps,
+      startupId: 'partial-primary-retry',
+    })).not.toThrow()
+    expect(fs.readFileSync(settingsPath)).toEqual(
+      fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
+    )
+    expect(fs.readFileSync(journalPath)).toEqual(snapshot.journal)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+  })
+
   it('never preserves an A-settings/B-journal mixture when both live files change at the open seam', () => {
     writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(228)])
     const settingsPath = path.join(tmpDir, 'settings.json')

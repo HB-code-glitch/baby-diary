@@ -586,6 +586,19 @@ function assertHeldRegularFilesStable(
   for (const item of evidence) assertOpenFileUnchanged(item.source)
 }
 
+function assertHeldRegularFileDescriptorsStable(
+  evidence: readonly ExpectedOpenRegularFile[],
+  options: BackupReadOptions,
+): void {
+  for (const item of evidence) assertOpenRegularFileContent(item, options)
+  for (const item of evidence) {
+    const after = item.source.ops.fstatSync(item.source.fd)
+    if (!sameFileIdentity(item.source.opened, after)) {
+      throw new Error(`held file descriptor changed: ${item.source.relativePath}`)
+    }
+  }
+}
+
 /**
  * Opens one allowlisted regular file without following links where supported,
  * validates path/handle identity, and returns the only Buffer used downstream.
@@ -2531,7 +2544,7 @@ function holdCompletedRestoreLiveState(
   }
 
   let backup: HeldEvidence<VerifiedSnapshotIdentity> | undefined
-  let forensic: HeldEvidence<void> | undefined
+  let forensic: HeldEvidence<ForensicArchiveAuthority> | undefined
   let live: HeldEvidence<{
     settingsDescriptor: DigestDescriptor
     journalDescriptor: DigestDescriptor
@@ -2621,7 +2634,100 @@ function windowsRestartError(message: string): SettingsRecoveryError {
   return new SettingsRecoveryError(message, [], false, true, true)
 }
 
-function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): boolean {
+interface HeldPreparedRestoreEvidence {
+  hasForensicEvidence: boolean
+  assertPrecommitStable(): void
+  assertRecoveryStable(): void
+  releaseLiveSourcesForPublication(): void
+  originalsArePreserved(): boolean
+  close(): void
+}
+
+function holdPreparedRestoreEvidence(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+  existingForensicLease?: HeldForensicEvidenceLease,
+): HeldPreparedRestoreEvidence {
+  let stagedBackup: HeldEvidence<{
+    settingsDescriptor: DigestDescriptor
+    journalDescriptor: DigestDescriptor
+  }> | undefined
+  let forensic = existingForensicLease
+  const ownsForensic = !existingForensicLease
+  try {
+    stagedBackup = holdVerifiedStreamedPair(
+      path.join(userDataPath, RESTORE_STAGING_DIR),
+      transaction,
+      options,
+      false,
+    )
+    if (!sameDescriptor(stagedBackup.value.settingsDescriptor, transaction.settings)
+      || !sameDescriptor(stagedBackup.value.journalDescriptor, transaction.journal)) {
+      throw new Error('held staged backup does not match restore transaction')
+    }
+    if (transaction.forensicArchiveId) {
+      forensic ??= holdForensicEvidenceLease(userDataPath, transaction, options)
+      if (forensic.authority.archiveId !== transaction.forensicArchiveId
+        || (transaction.forensicManifest
+          && !sameDescriptor(forensic.authority.manifest, transaction.forensicManifest))) {
+        throw new Error('held forensic preservation authority does not match restore transaction')
+      }
+    } else if (forensic) {
+      throw new Error('legacy restore cannot adopt unrelated forensic preservation authority')
+    }
+
+    let closed = false
+    const assertPrecommitStable = () => {
+      if (closed) throw new Error('prepared restore evidence is already closed')
+      stagedBackup!.assertStable()
+      forensic?.assertPrecommitStable()
+      stagedBackup!.assertStable()
+    }
+    const assertRecoveryStable = () => {
+      if (closed) throw new Error('prepared restore evidence is already closed')
+      stagedBackup!.assertStable()
+      forensic?.assertArchiveStable()
+      forensic?.assertSourceDescriptorsStable()
+      stagedBackup!.assertStable()
+    }
+    assertPrecommitStable()
+    return {
+      hasForensicEvidence: Boolean(forensic),
+      assertPrecommitStable,
+      assertRecoveryStable,
+      releaseLiveSourcesForPublication() {
+        if (closed) throw new Error('prepared restore evidence is already closed')
+        forensic?.releaseSourceDescriptorsForPublication()
+      },
+      originalsArePreserved() {
+        if (!forensic || closed) return false
+        try {
+          forensic.assertArchiveStable()
+          return true
+        } catch {
+          return false
+        }
+      },
+      close() {
+        if (closed) return
+        closed = true
+        if (ownsForensic) forensic?.close()
+        stagedBackup!.close()
+      },
+    }
+  } catch (error) {
+    if (ownsForensic) forensic?.close()
+    stagedBackup?.close()
+    throw error
+  }
+}
+
+function resumeRestoreIntent(
+  userDataPath: string,
+  options: RecoveryOptions,
+  existingForensicLease?: HeldForensicEvidenceLease,
+): boolean {
   const platform = options.platform ?? process.platform
   const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
   const intentPath = path.join(userDataPath, RESTORE_INTENT_FILE)
@@ -2629,7 +2735,8 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
   const stagingPath = path.join(userDataPath, RESTORE_STAGING_DIR)
   let primaryWriteStarted = false
   let completedRestoreWasPublished = false
-  let forensicConfirmed = platform !== 'win32'
+  let forensicConfirmed = false
+  let precommitEvidence: HeldPreparedRestoreEvidence | undefined
   try {
     const readOptions: BackupReadOptions = { ...options, platform, durableFs: ops }
     let expectedIntentBytes = readRegularFileOnce(userDataPath, RESTORE_INTENT_FILE, readOptions)
@@ -2768,10 +2875,60 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       writeIntentDurably(transaction)
     }
 
-    // Every retry rewrites both members from the same already-verified buffers.
-    primaryWriteStarted = true
-    writeDurably(path.join(userDataPath, SETTINGS_FILE), pair.settingsBytes, platform, ops)
-    writeDurably(path.join(userDataPath, BABY_INFO_JOURNAL_FILE), pair.journalBytes, platform, ops)
+    // Keep the selected backup, the durable forensic archive, and the exact
+    // pre-restore live sources held as one authority until pair publication
+    // and every rollback/follow-up decision has completed.
+    forensicConfirmed = false
+    precommitEvidence = holdPreparedRestoreEvidence(
+      userDataPath,
+      transaction,
+      options,
+      existingForensicLease,
+    )
+    forensicConfirmed = precommitEvidence.originalsArePreserved()
+    const primaryTargets = new Set([
+      path.resolve(userDataPath, SETTINGS_FILE),
+      path.resolve(userDataPath, BABY_INFO_JOURNAL_FILE),
+    ])
+    let primaryPublications = 0
+    const guardedPrimaryOps: DurableFileOps = {
+      ...ops,
+      renameSync(source, destination) {
+        if (primaryTargets.has(path.resolve(String(destination)))) {
+          if (primaryPublications === 0) {
+            precommitEvidence!.assertPrecommitStable()
+            // Windows does not permit replacing a path while its old inode is
+            // open. The durable forensic archive remains held; release only
+            // the just-revalidated live source handles at the commit seam.
+            precommitEvidence!.releaseLiveSourcesForPublication()
+            precommitEvidence!.assertRecoveryStable()
+          } else {
+            precommitEvidence!.assertRecoveryStable()
+          }
+          forensicConfirmed = precommitEvidence!.originalsArePreserved()
+          // From this point a delegated rename may commit and then lose its
+          // response, so reporting the primary as untouched would be unsafe.
+          primaryWriteStarted = true
+          ops.renameSync(source, destination)
+          primaryPublications += 1
+          return
+        }
+        ops.renameSync(source, destination)
+      },
+    }
+    writeDurably(
+      path.join(userDataPath, SETTINGS_FILE),
+      pair.settingsBytes,
+      platform,
+      guardedPrimaryOps,
+    )
+    writeDurably(
+      path.join(userDataPath, BABY_INFO_JOURNAL_FILE),
+      pair.journalBytes,
+      platform,
+      guardedPrimaryOps,
+    )
+    precommitEvidence.assertRecoveryStable()
     const publicationLive = holdVerifiedStreamedPair(userDataPath, transaction, options, false)
     try {
       if (!sameDescriptor(publicationLive.value.settingsDescriptor, transaction.settings)
@@ -2810,6 +2967,16 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     }
   } catch (error) {
     if (error instanceof SettingsRecoveryError) throw error
+    if (precommitEvidence) {
+      forensicConfirmed = precommitEvidence.originalsArePreserved()
+    } else if (existingForensicLease) {
+      try {
+        existingForensicLease.assertArchiveStable()
+        forensicConfirmed = true
+      } catch {
+        forensicConfirmed = false
+      }
+    }
     const message = `Unable to resume the settings/journal restore transaction: ${error instanceof Error ? error.message : String(error)}`
     if (completedRestoreWasPublished) {
       throw new SettingsRestoreFollowUpError(message, forensicConfirmed)
@@ -2821,6 +2988,8 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       platform === 'win32' && !primaryWriteStarted,
       !primaryWriteStarted,
     )
+  } finally {
+    precommitEvidence?.close()
   }
 }
 
@@ -2938,11 +3107,30 @@ interface ForensicManifest {
   files: BackupManifestEntry[]
 }
 
-interface ForensicEvidence {
+interface ForensicIdentity {
   archiveId: string
   manifest: DigestDescriptor
   /** True only when the archive directory entry was confirmed across the platform boundary. */
   preserved: boolean
+}
+
+interface ForensicArchiveAuthority {
+  archiveId: string
+  manifest: DigestDescriptor
+  entries: ReadonlyMap<string, DigestDescriptor>
+}
+
+interface HeldForensicEvidenceLease {
+  authority: ForensicArchiveAuthority
+  assertPrecommitStable(): void
+  assertArchiveStable(): void
+  assertSourceDescriptorsStable(): void
+  releaseSourceDescriptorsForPublication(): void
+  close(): void
+}
+
+interface ForensicEvidence extends ForensicIdentity {
+  lease: HeldForensicEvidenceLease
 }
 
 interface HeldOriginalEvidence extends ExpectedOpenRegularFile {
@@ -3095,7 +3283,7 @@ function tryReuseForensicEvidence(
   archiveId: string,
   originals: readonly HeldOriginalEvidence[],
   options: BackupReadOptions,
-): ForensicEvidence | undefined {
+): ForensicIdentity | undefined {
   try {
     const archiveDir = path.join(forensicsRoot, archiveId)
     const archiveIdentity = bindDirectChildDirectory(
@@ -3199,6 +3387,7 @@ function preserveOriginals(
   const now = options.now ?? new Date()
   const archivedAt = now.toISOString()
   const sourceFiles: OpenRegularFile[] = []
+  let sourceOwnershipTransferred = false
   try {
     for (const relativePath of [SETTINGS_FILE, BABY_INFO_JOURNAL_FILE]) {
       if (fs.existsSync(path.join(userDataPath, relativePath))) {
@@ -3210,6 +3399,37 @@ function preserveOriginals(
     }
     for (const source of sourceFiles) assertOpenFileUnchanged(source)
     const { evidenceDigest, originals } = hashForensicSourceSet(sourceFiles, options)
+    const sourceRootIdentity = bindDirectChildDirectory(
+      path.resolve(userDataPath),
+      fs.realpathSync.native(path.dirname(path.resolve(userDataPath))),
+      'forensic original source root',
+    )
+    const sourceNames = new Set(originals.map(original => original.relativePath))
+    const absentSourceNames = [SETTINGS_FILE, BABY_INFO_JOURNAL_FILE]
+      .filter(relativePath => !sourceNames.has(relativePath))
+    const finalizeIdentity = (identity: ForensicIdentity): ForensicEvidence => {
+      const archive = holdForensicEvidence(userDataPath, {
+        forensicArchiveId: identity.archiveId,
+        forensicManifest: identity.manifest,
+      }, options)
+      const sources = originalSourceLease(
+        originals,
+        options,
+        () => {
+          assertBoundDirectory(sourceRootIdentity)
+          for (const relativePath of absentSourceNames) {
+            if (fs.existsSync(path.join(userDataPath, relativePath))) {
+              throw new Error(`absent live ${relativePath} appeared before primary publication`)
+            }
+          }
+          assertBoundDirectory(sourceRootIdentity)
+        },
+        () => closeOpenRegularFiles(sourceFiles),
+      )
+      const lease = composeForensicEvidenceLease(archive, sources)
+      sourceOwnershipTransferred = true
+      return { ...identity, lease }
+    }
 
     const forensicsRoot = path.join(userDataPath, RECOVERY_FORENSICS_DIR)
   let forensicsRootCreated = false
@@ -3246,7 +3466,7 @@ function preserveOriginals(
     )
     if (reused) {
       assertHeldRegularFilesStable(originals, options)
-      return reused
+      return finalizeIdentity(reused)
     }
   }
   assertBoundDirectory(rootIdentity)
@@ -3359,21 +3579,21 @@ function preserveOriginals(
   assertExactForensicSet()
   assertForensicDirectories()
     assertHeldRegularFilesStable(originals, options)
-    return {
+    return finalizeIdentity({
       archiveId,
       manifest: descriptor(forensicManifestBytes),
       preserved: platform !== 'win32',
-    }
+    })
   } finally {
-    closeOpenRegularFiles(sourceFiles)
+    if (!sourceOwnershipTransferred) closeOpenRegularFiles(sourceFiles)
   }
 }
 
 function holdForensicEvidence(
   userDataPath: string,
-  transaction: RestoreTransactionFile,
+  transaction: Pick<RestoreTransactionFile, 'forensicArchiveId' | 'forensicManifest'>,
   options: BackupReadOptions,
-): HeldEvidence<void> {
+): HeldEvidence<ForensicArchiveAuthority> {
   if (!transaction.forensicArchiveId
     || transaction.forensicArchiveId.length > 255
     || transaction.forensicArchiveId === '.'
@@ -3505,7 +3725,11 @@ function holdForensicEvidence(
 
     let closed = false
     return {
-      value: undefined,
+      value: {
+        archiveId: transaction.forensicArchiveId,
+        manifest: manifestDescriptor,
+        entries: new Map(entries),
+      },
       assertStable() {
         if (closed) throw new Error('forensic evidence is already closed')
         assertHeldRegularFilesStable(expectedEvidence, options)
@@ -3533,9 +3757,163 @@ function verifyForensicEvidence(
 ): void {
   const held = holdForensicEvidence(userDataPath, transaction, options)
   try {
-    return held.value
+    held.assertStable()
   } finally {
     held.close()
+  }
+}
+
+interface HeldOriginalSourceLease {
+  assertPrecommitStable(): void
+  assertDescriptorsStable(): void
+  release(): void
+  close(): void
+}
+
+function originalSourceLease(
+  evidence: readonly ExpectedOpenRegularFile[],
+  options: BackupReadOptions,
+  assertPathSetStable: () => void,
+  close: () => void,
+): HeldOriginalSourceLease {
+  let closed = false
+  return {
+    assertPrecommitStable() {
+      if (closed) throw new Error('forensic original source evidence is already closed')
+      assertPathSetStable()
+      assertHeldRegularFilesStable(evidence, options)
+      assertPathSetStable()
+    },
+    assertDescriptorsStable() {
+      if (closed) throw new Error('forensic original source evidence is already closed')
+      assertHeldRegularFileDescriptorsStable(evidence, options)
+    },
+    release() {
+      if (closed) return
+      closed = true
+      close()
+    },
+    close() {
+      if (closed) return
+      closed = true
+      close()
+    },
+  }
+}
+
+function holdLiveForensicSources(
+  userDataPath: string,
+  entries: ReadonlyMap<string, DigestDescriptor>,
+  options: BackupReadOptions,
+  publication?: Pick<RestoreTransactionFile, 'settings' | 'journal'>,
+): HeldOriginalSourceLease {
+  const userDataIdentity = bindDirectChildDirectory(
+    path.resolve(userDataPath),
+    fs.realpathSync.native(path.dirname(path.resolve(userDataPath))),
+    'forensic live source root',
+  )
+  const sources: OpenRegularFile[] = []
+  const evidence: ExpectedOpenRegularFile[] = []
+  const absent = new Set<string>()
+  try {
+    for (const relativePath of [SETTINGS_FILE, BABY_INFO_JOURNAL_FILE]) {
+      const originalExpected = entries.get(relativePath)
+      const publicationExpected = relativePath === SETTINGS_FILE
+        ? publication?.settings
+        : publication?.journal
+      if (!fs.existsSync(path.join(userDataPath, relativePath))) {
+        if (originalExpected) {
+          throw new Error(`live ${relativePath} vanished after forensic preservation`)
+        }
+        absent.add(relativePath)
+        continue
+      }
+      const source = openRegularFileOnce(userDataPath, relativePath, options)
+      sources.push(source)
+      const actual = stableHashOpenRegularFile(source, options)
+      if ((!originalExpected || !sameDescriptor(actual, originalExpected))
+        && (!publicationExpected || !sameDescriptor(actual, publicationExpected))) {
+        throw new Error(`live ${relativePath} matches neither forensic nor restore authority`)
+      }
+      evidence.push({ source, expected: actual })
+    }
+    const assertPathSetStable = () => {
+      assertBoundDirectory(userDataIdentity)
+      for (const relativePath of Array.from(absent)) {
+        if (fs.existsSync(path.join(userDataPath, relativePath))) {
+          throw new Error(`absent live ${relativePath} appeared before primary publication`)
+        }
+      }
+      assertBoundDirectory(userDataIdentity)
+    }
+    const lease = originalSourceLease(
+      evidence,
+      options,
+      assertPathSetStable,
+      () => closeOpenRegularFiles(sources),
+    )
+    lease.assertPrecommitStable()
+    return lease
+  } catch (error) {
+    closeOpenRegularFiles(sources)
+    throw error
+  }
+}
+
+function composeForensicEvidenceLease(
+  archive: HeldEvidence<ForensicArchiveAuthority>,
+  sources: HeldOriginalSourceLease,
+): HeldForensicEvidenceLease {
+  let closed = false
+  let sourcesReleased = false
+  return {
+    authority: archive.value,
+    assertPrecommitStable() {
+      if (closed) throw new Error('forensic preservation lease is already closed')
+      sources.assertPrecommitStable()
+      archive.assertStable()
+      sources.assertPrecommitStable()
+    },
+    assertArchiveStable() {
+      if (closed) throw new Error('forensic preservation lease is already closed')
+      archive.assertStable()
+    },
+    assertSourceDescriptorsStable() {
+      if (closed) throw new Error('forensic preservation lease is already closed')
+      if (!sourcesReleased) sources.assertDescriptorsStable()
+    },
+    releaseSourceDescriptorsForPublication() {
+      if (closed) throw new Error('forensic preservation lease is already closed')
+      if (sourcesReleased) return
+      sources.assertDescriptorsStable()
+      sources.release()
+      sourcesReleased = true
+    },
+    close() {
+      if (closed) return
+      closed = true
+      if (!sourcesReleased) sources.close()
+      archive.close()
+    },
+  }
+}
+
+function holdForensicEvidenceLease(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: BackupReadOptions,
+): HeldForensicEvidenceLease {
+  const archive = holdForensicEvidence(userDataPath, transaction, options)
+  let sources: HeldOriginalSourceLease | undefined
+  try {
+    sources = holdLiveForensicSources(userDataPath, archive.value.entries, options, transaction)
+    const lease = composeForensicEvidenceLease(archive, sources)
+    lease.assertPrecommitStable()
+    return lease
+  } catch (error) {
+    sources?.close()
+    archive.close()
+    throw error
   }
 }
 
@@ -3678,41 +4056,54 @@ export function recoverSettingsAndJournalPair(
     )
   }
 
-  const selected = newestVerifiedBackup(userDataPath, options)
-  if (!selected.pair) {
-    throw new SettingsRecoveryError(
-      'Settings and baby-info history are damaged, and no fully verified backup pair is available.',
-      selected.rejected,
-      forensic.preserved,
-      false,
-      true,
-    )
-  }
   try {
-    prepareRestoreIntent(userDataPath, selected.pair, forensic, options)
-    if ((options.platform ?? process.platform) === 'win32') {
-      throw windowsRestartError(
-        'Windows recovery evidence was prepared without modifying the primary files. Restart the application twice so independent startups can confirm it before restore.',
-      )
+    const originalsArePreserved = () => {
+      if (!forensic.preserved) return false
+      try {
+        forensic.lease.assertArchiveStable()
+        return true
+      } catch {
+        return false
+      }
     }
-    resumeRestoreIntent(userDataPath, options)
-  } catch (error) {
-    if (error instanceof SettingsRecoveryError) {
+    const selected = newestVerifiedBackup(userDataPath, options)
+    if (!selected.pair) {
       throw new SettingsRecoveryError(
-        error.message,
+        'Settings and baby-info history are damaged, and no fully verified backup pair is available.',
         selected.rejected,
-        error.originalsPreserved,
-        error.restartRequired,
-        error.primaryUntouched,
+        originalsArePreserved(),
+        false,
+        true,
       )
     }
-    throw new SettingsRecoveryError(
-      `Unable to restore the verified settings/journal pair: ${error instanceof Error ? error.message : String(error)}`,
-      selected.rejected,
-      forensic.preserved,
-      false,
-      true,
-    )
+    try {
+      prepareRestoreIntent(userDataPath, selected.pair, forensic, options)
+      if ((options.platform ?? process.platform) === 'win32') {
+        throw windowsRestartError(
+          'Windows recovery evidence was prepared without modifying the primary files. Restart the application twice so independent startups can confirm it before restore.',
+        )
+      }
+      resumeRestoreIntent(userDataPath, options, forensic.lease)
+    } catch (error) {
+      if (error instanceof SettingsRecoveryError) {
+        throw new SettingsRecoveryError(
+          error.message,
+          selected.rejected,
+          error.originalsPreserved,
+          error.restartRequired,
+          error.primaryUntouched,
+        )
+      }
+      throw new SettingsRecoveryError(
+        `Unable to restore the verified settings/journal pair: ${error instanceof Error ? error.message : String(error)}`,
+        selected.rejected,
+        originalsArePreserved(),
+        false,
+        true,
+      )
+    }
+  } finally {
+    forensic.lease.close()
   }
 }
 
