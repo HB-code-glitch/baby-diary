@@ -17,12 +17,17 @@ interface WorkflowJob {
   needs?: string | string[]
   'runs-on': string
   if?: string
+  'continue-on-error'?: unknown
   steps: WorkflowStep[]
 }
 
 interface ReleaseWorkflow {
   name: string
   permissions: Record<string, string>
+  concurrency?: {
+    group?: string
+    'cancel-in-progress'?: boolean
+  }
   on: {
     push: { branches: string[]; tags: string[] }
     pull_request: { branches: string[] }
@@ -43,6 +48,9 @@ interface PackagedE2ESpec {
 }
 
 const workflowSource = readFileSync('.github/workflows/build.yml', 'utf8')
+const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as {
+  build?: { publish?: Array<{ provider?: string; releaseType?: string }> }
+}
 // js-yaml v4 uses its YAML 1.2-oriented default schema and rejects duplicate
 // mapping keys. It is declared directly so this CI contract does not rely on a
 // transitive electron-builder dependency.
@@ -57,6 +65,16 @@ const REQUIRED_NODE_VERSION = '24.18.0'
 const RELEASE_TAG_CONDITION = "startsWith(github.ref, 'refs/tags/v')"
 const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
 const REQUIRED_RELEASE_NEEDS = ['release-preflight', 'e2e-win', 'e2e-mac']
+const REQUIRED_PUBLISH_NEEDS = ['build-mac', 'release-win', 'release-mac']
+const RELEASE_CRITICAL_JOBS = [
+  'build-mac',
+  'e2e-mac',
+  'e2e-win',
+  'release-preflight',
+  'release-win',
+  'release-mac',
+  'publish-release',
+] as const
 
 const PACKAGED_E2E_SPECS: PackagedE2ESpec[] = [
   {
@@ -136,6 +154,22 @@ function nodeRuntimeContractErrors(candidate: ReleaseWorkflow): string[] {
 function normalizedNeeds(job: WorkflowJob): string[] {
   if (job.needs == null) return []
   return Array.isArray(job.needs) ? job.needs : [job.needs]
+}
+
+function releaseFailOpenContractErrors(candidate: ReleaseWorkflow): string[] {
+  const errors: string[] = []
+  for (const jobName of RELEASE_CRITICAL_JOBS) {
+    const job = candidate.jobs[jobName]
+    if (!job) {
+      errors.push(`missing ${jobName}`)
+      continue
+    }
+    if (Boolean(job['continue-on-error'])) errors.push(`${jobName} must not continue on error`)
+    job.steps.forEach((step, index) => {
+      if (Boolean(step['continue-on-error'])) errors.push(`${jobName} step ${index} must not continue on error`)
+    })
+  }
+  return errors
 }
 
 function releasePreflightContractErrors(candidate: ReleaseWorkflow): string[] {
@@ -252,6 +286,7 @@ describe('release workflow CI gates', () => {
       'release-preflight',
       'release-win',
       'release-mac',
+      'publish-release',
     ]))
   })
 
@@ -264,7 +299,60 @@ describe('release workflow CI gates', () => {
       .map(([jobName]) => jobName)
 
     expect(new Set(unconditionalJobs)).toEqual(new Set(['build-mac', 'e2e-mac', 'e2e-win']))
-    expect(new Set(tagOnlyJobs)).toEqual(new Set(['release-preflight', 'release-win', 'release-mac']))
+    expect(new Set(tagOnlyJobs)).toEqual(new Set(['release-preflight', 'release-win', 'release-mac', 'publish-release']))
+  })
+
+  it('serializes same-ref workflow reruns without cancelling an in-flight draft upload', () => {
+    expect(workflow.concurrency).toEqual({
+      group: '${{ github.workflow }}-${{ github.ref }}',
+      'cancel-in-progress': false,
+    })
+  })
+
+  it('keeps platform uploads private and exposes one final publish transition', () => {
+    expect(packageJson.build?.publish).toEqual([{
+      provider: 'github',
+      owner: 'HB-code-glitch',
+      repo: 'baby-diary-releases',
+      releaseType: 'draft',
+    }])
+
+    const publishJob = workflow.jobs['publish-release']
+    expect(publishJob).toBeDefined()
+    expect(publishJob?.['runs-on']).toBe('ubuntu-latest')
+    expect(publishJob?.if).toBe(RELEASE_TAG_CONDITION)
+    expect(new Set(normalizedNeeds(publishJob))).toEqual(new Set(REQUIRED_PUBLISH_NEEDS))
+    expect(publishJob?.if).not.toMatch(/always\s*\(/)
+
+    const commands = Object.entries(workflow.jobs).flatMap(([jobName, job]) => job.steps.flatMap(step => {
+      const command = normalizedRun(step)
+      return command == null ? [] : [{ jobName, command }]
+    }))
+    const validationCommands = commands.filter(({ command }) => command.includes('validate-release-assets.mjs'))
+    const publicTransitions = commands.filter(({ command }) => /gh\s+release\s+edit[\s\S]*--draft=false[\s\S]*--latest/.test(command))
+
+    expect(validationCommands).toHaveLength(1)
+    expect(validationCommands[0].jobName).toBe('publish-release')
+    expect(validationCommands[0].command).toContain('gh api --paginate --slurp')
+    expect(publicTransitions).toHaveLength(1)
+    expect(publicTransitions[0].jobName).toBe('publish-release')
+  })
+
+  it('rejects job-level and step-level continue-on-error on every release-critical path', () => {
+    expect(releaseFailOpenContractErrors(workflow)).toEqual([])
+
+    for (const jobName of RELEASE_CRITICAL_JOBS) {
+      const jobMutation = structuredClone(workflow)
+      expect(jobMutation.jobs[jobName]).toBeDefined()
+      jobMutation.jobs[jobName]['continue-on-error'] = true
+      expect(releaseFailOpenContractErrors(jobMutation)).toContain(`${jobName} must not continue on error`)
+
+      const stepMutation = structuredClone(workflow)
+      const runStepIndex = stepMutation.jobs[jobName].steps.findIndex(step => normalizedRun(step) != null)
+      expect(runStepIndex).toBeGreaterThanOrEqual(0)
+      stepMutation.jobs[jobName].steps[runStepIndex]['continue-on-error'] = true
+      expect(releaseFailOpenContractErrors(stepMutation)).toContain(`${jobName} step ${runStepIndex} must not continue on error`)
+    }
   })
 
   it('pins every CI and release job to the Electron 43 bundled Node runtime', () => {

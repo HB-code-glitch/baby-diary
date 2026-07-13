@@ -27,7 +27,7 @@ describe('security runtime dependency pins', () => {
   })
 
   it('keeps every setup-node job on the exact Electron 43 bundled Node version', () => {
-    const expectedVersions = Array(6).fill('24.18.0')
+    const expectedVersions = Array(7).fill('24.18.0')
 
     expect(nodeVersions(workflowSource)).toEqual(expectedVersions)
 
