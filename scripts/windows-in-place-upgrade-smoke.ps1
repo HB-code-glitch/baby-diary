@@ -62,20 +62,27 @@ $ProcessCleanupTimeoutSeconds = 15
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $upgradeDriver = Join-Path $PSScriptRoot 'upgrade-e2e.mjs'
 $dataContract = Join-Path $PSScriptRoot 'upgrade-data-contract.mjs'
+$rulesDriver = Join-Path $PSScriptRoot 'upgrade-firestore-rules.mjs'
+$upgradeRulesRoot = $env:BABYDIARY_UPGRADE_RULES_ROOT
+$upgradeRulesRunId = $env:BABYDIARY_UPGRADE_RULES_RUN_ID
 $runId = [Guid]::NewGuid().ToString('N')
 $runRoot = Join-Path ([IO.Path]::GetTempPath()) "baby-diary-upgrade-$runId"
-$isolatedAppData = Join-Path $runRoot 'AppData\Roaming'
-$canonicalProfile = Join-Path $isolatedAppData 'baby-diary'
+$canonicalProfile = Join-Path $runRoot 'user-data\baby-diary'
 $baselineProjection = Join-Path $runRoot 'baseline-projection.json'
 $firstProjection = Join-Path $runRoot 'candidate-first-projection.json'
 $secondProjection = Join-Path $runRoot 'candidate-second-projection.json'
 $baselineManifest = Join-Path $runRoot 'baseline-raw-manifest.json'
 $candidateProvenanceVerified = Join-Path $runRoot 'candidate-provenance-verified.json'
+$interactiveProfileBefore = Join-Path $runRoot 'interactive-profile-before.json'
+$interactiveProfileAfter = Join-Path $runRoot 'interactive-profile-after.json'
 $originalAppData = $env:APPDATA
+$originalTestUserData = $env:BABYDIARY_TEST_USERDATA
+$originalAttestRunId = $env:BABYDIARY_UPGRADE_ATTEST_RUN_ID
 $originalE2eExecutable = $env:BABYDIARY_E2E_EXECUTABLE
 $originalSyncE2eExecutable = $env:BABYDIARY_SYNC_E2E_EXECUTABLE
-$originalSyncE2eUpgradeProfile = $env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE
 $originalExpectedE2eArch = $env:BABYDIARY_EXPECTED_E2E_ARCH
+$originalFirebaseEmulator = $env:BABYDIARY_FIREBASE_EMULATOR
+$originalFirebaseEmulatorProjectId = $env:BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID
 $originalCanonicalData = if ([string]::IsNullOrWhiteSpace($originalAppData)) {
   $null
 } else {
@@ -86,6 +93,7 @@ $script:failureInjected = $false
 $script:baselineManifestCreated = $false
 $script:candidateFirstLaunchStarted = $false
 $script:candidateFirstLaunchCompleted = $false
+$script:interactiveProfileFingerprintCaptured = $false
 
 function Initialize-BoundedProcessJobApi {
   if ('BabyDiary.Upgrade.JobObjectProcess' -as [type]) { return }
@@ -816,6 +824,16 @@ function Get-ExactInstalledApplication {
   if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Installed Baby Diary executable not found: $executable"
   }
+  $executableItem = Get-Item -LiteralPath $executable
+  $expectedExecutableProductVersion = "$ExpectedVersion.0"
+  if (-not [string]::Equals(
+      $executableItem.VersionInfo.ProductVersion,
+      $expectedExecutableProductVersion,
+      [StringComparison]::Ordinal
+    )) {
+    throw "Installed Baby Diary executable ProductVersion does not match $expectedExecutableProductVersion"
+  }
+  $installedExecutableSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
   return [pscustomobject]@{
     PSPath = $psPath
     PSChildName = $psChildName
@@ -834,6 +852,9 @@ function Get-ExactInstalledApplication {
     UninstallerPath = $uninstallerPath
     InstallLocationPath = $installLocationPath
     Executable = [IO.Path]::GetFullPath($executable)
+    InstalledExecutableSha256 = $installedExecutableSha256
+    InstalledExecutableSize = $executableItem.Length
+    InstalledExecutableProductVersion = $executableItem.VersionInfo.ProductVersion
   }
 }
 
@@ -856,6 +877,14 @@ function Write-InstallRegistryEvidence {
     }
     sourceSha = if ($Stage -eq 'Baseline') { $BaselineSourceSha } else { $CandidateSourceSha }
     packageSha256 = if ($Stage -eq 'Baseline') { $BaselineAssetSha256 } else { $CandidatePackageSha256 }
+    packageSize = if ($Stage -eq 'Baseline') {
+      $BaselineAssetSize
+    } else {
+      (Get-Item -LiteralPath $CandidateSetupPath).Length
+    }
+    installedExecutableSha256 = $Install.InstalledExecutableSha256
+    installedExecutableSize = $Install.InstalledExecutableSize
+    installedExecutableProductVersion = $Install.InstalledExecutableProductVersion
     PSPath = $Install.PSPath
     PSChildName = $Install.PSChildName
     RegistryHive = $Install.RegistryHive
@@ -956,6 +985,7 @@ function Record-BaselineLegacyTrust {
     releaseId = $BaselineReleaseId
     assetId = $BaselineAssetId
     assetName = $BaselineAssetName
+    size = $BaselineAssetSize
     sourceSha = $BaselineSourceSha
     sha256 = $BaselineAssetSha256
     trustPolicy = 'legacy-input-evidence-only'
@@ -1032,7 +1062,11 @@ function Start-VerifiedSetup {
 }
 
 function Invoke-Node {
-  param([Parameter(Mandatory = $true)][string[]]$Arguments)
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Arguments,
+    [int]$TimeoutSeconds = $DriverTimeoutSeconds,
+    [string]$Label = 'Node upgrade driver'
+  )
   $json = ConvertTo-Json -Compress -InputObject @($Arguments)
   $encodedArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
   $childCommand = @"
@@ -1044,7 +1078,7 @@ exit `$LASTEXITCODE
   $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
   $result = Invoke-BoundedProcess -FilePath 'powershell.exe' `
     -Arguments @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
-    -TimeoutSeconds $DriverTimeoutSeconds -Label 'Node upgrade driver' -AllowNonZero
+    -TimeoutSeconds $TimeoutSeconds -Label $Label -AllowNonZero
   if ($result.ExitCode -ne 0) {
     throw "Node command failed with exit code $($result.ExitCode)"
   }
@@ -1084,6 +1118,30 @@ function Invoke-UpgradePhase {
   $phaseCompleted = $false
   try {
     Invoke-Node -Arguments $arguments
+    if (-not (Test-Path -LiteralPath $DiagnosticPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $DiagnosticPath).Length -le 0) {
+      throw 'Upgrade phase diagnostic artifact is missing or empty after child exit'
+    }
+    if (-not (Test-Path -LiteralPath $ProjectionOutput -PathType Leaf) -or
+        (Get-Item -LiteralPath $ProjectionOutput).Length -le 0) {
+      throw 'Upgrade phase projection artifact is missing or empty after child exit'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $canonicalProfile 'settings.json') -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $canonicalProfile 'data') -PathType Container)) {
+      throw 'Upgrade phase canonical profile artifacts are missing after child exit'
+    }
+    Invoke-Node -Arguments @(
+      $upgradeDriver,
+      'verify-artifacts',
+      '--run-id', $runId,
+      '--mode', $Mode,
+      '--expected-version', $ExpectedVersion,
+      '--expected-arch', 'x64',
+      '--source-sha', $SourceSha,
+      '--diagnostic', $DiagnosticPath,
+      '--projection', $ProjectionOutput,
+      '--profile-root', $canonicalProfile
+    )
     $phaseCompleted = $true
   }
   finally {
@@ -1098,6 +1156,15 @@ function New-BaselineManifest {
     'manifest',
     '--root', $canonicalProfile,
     '--output', $baselineManifest
+  )
+  if (-not (Test-Path -LiteralPath $baselineManifest -PathType Leaf) -or
+      (Get-Item -LiteralPath $baselineManifest).Length -le 0) {
+    throw 'Baseline raw manifest is missing or empty after child exit'
+  }
+  Invoke-Node -Arguments @(
+    $upgradeDriver,
+    'verify-baseline-manifest',
+    '--manifest', $baselineManifest
   )
   $script:baselineManifestCreated = $true
 }
@@ -1230,6 +1297,45 @@ exit `$LASTEXITCODE
     -Arguments @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
     -TimeoutSeconds $NpmTimeoutSeconds -Label "npm run $Name" -WorkingDirectory $repoRoot -AllowNonZero
   if ($result.ExitCode -ne 0) { throw "npm run $Name failed with exit code $($result.ExitCode)" }
+}
+
+function Assert-ExactEnvironmentValue {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Expected
+  )
+  $actual = [Environment]::GetEnvironmentVariable($Name, 'Process')
+  if (-not [string]::Equals($actual, $Expected, [StringComparison]::Ordinal)) {
+    throw "Required exact upgrade emulator binding is missing: $Name=$Expected"
+  }
+}
+
+function Assert-UpgradeRulesEnvironment {
+  if ($upgradeRulesRunId -notmatch '^[0-9a-f]{32}$') {
+    throw 'BABYDIARY_UPGRADE_RULES_RUN_ID must be a lowercase 32-hex nonce'
+  }
+  if ([string]::IsNullOrWhiteSpace($upgradeRulesRoot)) {
+    throw 'BABYDIARY_UPGRADE_RULES_ROOT is required'
+  }
+  $item = Get-Item -LiteralPath $upgradeRulesRoot -Force -ErrorAction Stop
+  if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'BABYDIARY_UPGRADE_RULES_ROOT must be a prepared non-reparse directory'
+  }
+  $expectedLeaf = "baby-diary-upgrade-rules-$upgradeRulesRunId"
+  if (-not [string]::Equals($item.Name, $expectedLeaf, [StringComparison]::Ordinal)) {
+    throw 'BABYDIARY_UPGRADE_RULES_ROOT is not bound to its run nonce'
+  }
+  $script:upgradeRulesRoot = $item.FullName
+}
+
+function Invoke-FirestoreRulesTransition {
+  Invoke-Node -Arguments @(
+    $rulesDriver,
+    'transition',
+    '--root', $upgradeRulesRoot,
+    '--run-id', $upgradeRulesRunId,
+    '--candidate-source-sha', $CandidateSourceSha
+  ) -TimeoutSeconds $DriverTimeoutSeconds -Label 'Firestore rules baseline-to-candidate transition'
 }
 
 function Invoke-VerifiedUninstall {
@@ -1431,6 +1537,12 @@ function Remove-RunOwnedTempRoot {
   Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force
 }
 
+Assert-ExactEnvironmentValue -Name 'BABYDIARY_UPGRADE_FIREBASE_EMULATOR' -Expected '1'
+Assert-ExactEnvironmentValue -Name 'BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID' -Expected 'demo-baby-diary'
+Assert-ExactEnvironmentValue -Name 'FIREBASE_AUTH_EMULATOR_HOST' -Expected '127.0.0.1:9099'
+Assert-ExactEnvironmentValue -Name 'FIRESTORE_EMULATOR_HOST' -Expected '127.0.0.1:8080'
+Assert-UpgradeRulesEnvironment
+
 if ([string]::IsNullOrWhiteSpace($ExpectedPublisher)) { throw 'ExpectedPublisher is required' }
 if ($ExpectedCertificateSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
   throw 'ExpectedCertificateSha256 must be exactly 64 hexadecimal characters'
@@ -1473,17 +1585,22 @@ $installLocation = $null
 $baselineInstallLocation = $null
 $cleanupError = $null
 
-New-Item -ItemType Directory -Path $isolatedAppData -Force | Out-Null
-
 try {
+  Invoke-Node -Arguments @(
+    $upgradeDriver,
+    'capture-profile-fingerprint',
+    '--interactive-profile', $originalCanonicalData,
+    '--temp-root', $runRoot,
+    '--run-id', $runId,
+    '--output', $interactiveProfileBefore
+  ) -Label 'interactive profile fingerprint before any run-owned write'
+  $script:interactiveProfileFingerprintCaptured = $true
+  New-Item -ItemType Directory -Path (Split-Path -Parent $canonicalProfile) -Force | Out-Null
   if (@(Get-BabyDiaryInstall).Count -ne 0) {
     throw 'Refusing to run with a pre-existing Baby Diary installation'
   }
-  if (Test-Path -LiteralPath $originalCanonicalData) {
-    throw 'Refusing to run with a pre-existing canonical data directory'
-  }
   if (Test-Path -LiteralPath $canonicalProfile) {
-    throw 'Refusing to reuse the isolated canonical data directory'
+    throw 'Refusing to reuse the nonce-owned userData directory'
   }
 
   Assert-BaselineAssetContract -Path $BaselineSetupPath
@@ -1492,7 +1609,6 @@ try {
   # Candidate trust is mandatory and is checked before any candidate bytes can replace v0.3.8.
   Assert-CandidateSignature -Path $CandidateSetupPath
 
-  $env:APPDATA = $isolatedAppData
   $installationStarted = $true
   Start-VerifiedSetup -SetupPath $BaselineSetupPath -Label 'Baseline'
   $baselineInstall = Get-ExactInstalledApplication -ExpectedVersion $ExpectedBaselineVersion -Stage 'Baseline'
@@ -1515,6 +1631,7 @@ try {
   Invoke-FailurePoint -Point 'after-baseline-close'
   Invoke-FailurePoint -Point 'after-manifest-creation'
   Assert-ProfileMatchesBaseline
+  Invoke-FirestoreRulesTransition
 
   Invoke-FailurePoint -Point 'before-candidate-replacement'
   Install-CandidateWithRetry
@@ -1555,11 +1672,14 @@ try {
   $env:BABYDIARY_E2E_EXECUTABLE = $candidateExecutable
   $env:BABYDIARY_SYNC_E2E_EXECUTABLE = $candidateExecutable
   $env:BABYDIARY_EXPECTED_E2E_ARCH = 'x64'
+  $env:BABYDIARY_FIREBASE_EMULATOR = '1'
+  $env:BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID = 'demo-baby-diary'
+  $env:BABYDIARY_TEST_USERDATA = $canonicalProfile
+  $env:BABYDIARY_UPGRADE_ATTEST_RUN_ID = $runId
   Push-Location $repoRoot
   try {
     Invoke-NpmScript -Name 'test:e2e'
-    $env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE = $canonicalProfile
-    Invoke-NpmScript -Name 'test:e2e:sync'
+    Invoke-Node -Arguments @((Join-Path $PSScriptRoot 'sync-e2e.mjs'), '--inside-emulators') -TimeoutSeconds $NpmTimeoutSeconds -Label 'sync E2E inside existing emulators'
   }
   finally {
     Pop-Location
@@ -1571,18 +1691,39 @@ catch {
   throw
 }
 finally {
-  $env:APPDATA = $originalAppData
+  if ($null -eq $originalTestUserData) { Remove-Item Env:BABYDIARY_TEST_USERDATA -ErrorAction SilentlyContinue }
+  else { $env:BABYDIARY_TEST_USERDATA = $originalTestUserData }
+  if ($null -eq $originalAttestRunId) { Remove-Item Env:BABYDIARY_UPGRADE_ATTEST_RUN_ID -ErrorAction SilentlyContinue }
+  else { $env:BABYDIARY_UPGRADE_ATTEST_RUN_ID = $originalAttestRunId }
   if ($null -eq $originalE2eExecutable) { Remove-Item Env:BABYDIARY_E2E_EXECUTABLE -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_E2E_EXECUTABLE = $originalE2eExecutable }
   if ($null -eq $originalSyncE2eExecutable) { Remove-Item Env:BABYDIARY_SYNC_E2E_EXECUTABLE -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_SYNC_E2E_EXECUTABLE = $originalSyncE2eExecutable }
-  if ($null -eq $originalSyncE2eUpgradeProfile) { Remove-Item Env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE -ErrorAction SilentlyContinue }
-  else { $env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE = $originalSyncE2eUpgradeProfile }
   if ($null -eq $originalExpectedE2eArch) { Remove-Item Env:BABYDIARY_EXPECTED_E2E_ARCH -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_EXPECTED_E2E_ARCH = $originalExpectedE2eArch }
+  if ($null -eq $originalFirebaseEmulator) { Remove-Item Env:BABYDIARY_FIREBASE_EMULATOR -ErrorAction SilentlyContinue }
+  else { $env:BABYDIARY_FIREBASE_EMULATOR = $originalFirebaseEmulator }
+  if ($null -eq $originalFirebaseEmulatorProjectId) { Remove-Item Env:BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID -ErrorAction SilentlyContinue }
+  else { $env:BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID = $originalFirebaseEmulatorProjectId }
   if ($installationStarted) {
     try { Invoke-VerifiedUninstall -KnownInstallLocation $installLocation }
-    catch { $cleanupError = $_ }
+    catch { if ($null -eq $cleanupError) { $cleanupError = $_ } }
+  }
+  if ($script:interactiveProfileFingerprintCaptured) {
+    try {
+      Invoke-Node -Arguments @(
+        $upgradeDriver,
+        'verify-profile-noninterference',
+        '--interactive-profile', $originalCanonicalData,
+        '--temp-root', $runRoot,
+        '--run-id', $runId,
+        '--before', $interactiveProfileBefore,
+        '--output', $interactiveProfileAfter
+      ) -Label 'interactive profile non-interference verification after uninstall'
+    }
+    catch {
+      if ($null -eq $cleanupError) { $cleanupError = $_ }
+    }
   }
   if ($success -and $null -eq $cleanupError) {
     Remove-RunOwnedTempRoot

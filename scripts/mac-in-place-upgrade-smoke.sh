@@ -68,6 +68,24 @@ case "$failure_point" in
   *) echo 'invalid deterministic failure point' >&2; exit 2 ;;
 esac
 
+# The outer release job owns one Firebase Emulator Suite process for this
+# entire wrapper. Refuse to install either exact artifact unless every phase
+# is pinned to that same demo-only endpoint set.
+required_emulator_environment=(
+  'BABYDIARY_UPGRADE_FIREBASE_EMULATOR=1'
+  'BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID=demo-baby-diary'
+  'FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099'
+  'FIRESTORE_EMULATOR_HOST=127.0.0.1:8080'
+)
+for binding in "${required_emulator_environment[@]}"; do
+  variable_name=${binding%%=*}
+  expected_value=${binding#*=}
+  [[ "${!variable_name-}" == "$expected_value" ]] || {
+    echo "required exact upgrade emulator binding is missing: $variable_name=$expected_value" >&2
+    exit 2
+  }
+done
+
 for command_name in node npm hdiutil shasum stat uuidgen codesign spctl xcrun lipo; do
   command -v "$command_name" >/dev/null || { echo "required command is unavailable: $command_name" >&2; exit 2; }
 done
@@ -90,21 +108,40 @@ candidate_provenance=$(canonical_regular_file "$candidate_provenance")
 
 original_home=${HOME:?runner HOME is required}
 original_canonical_profile="$original_home/Library/Application Support/baby-diary"
-[[ ! -e "$original_canonical_profile" && ! -L "$original_canonical_profile" ]] || {
-  echo 'refusing to run with a pre-existing canonical Baby Diary data directory' >&2
-  exit 2
-}
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 upgrade_driver="$repo_root/scripts/upgrade-e2e.mjs"
 data_contract="$repo_root/scripts/upgrade-data-contract.mjs"
+rules_driver="$repo_root/scripts/upgrade-firestore-rules.mjs"
+upgrade_rules_root=${BABYDIARY_UPGRADE_RULES_ROOT-}
+upgrade_rules_run_id=${BABYDIARY_UPGRADE_RULES_RUN_ID-}
+[[ "$upgrade_rules_run_id" =~ ^[0-9a-f]{32}$ ]] || {
+  echo 'BABYDIARY_UPGRADE_RULES_RUN_ID must be a lowercase 32-hex nonce' >&2
+  exit 2
+}
+[[ -n "$upgrade_rules_root" && -d "$upgrade_rules_root" && ! -L "$upgrade_rules_root" ]] || {
+  echo 'BABYDIARY_UPGRADE_RULES_ROOT must be a prepared non-linked directory' >&2
+  exit 2
+}
+resolved_upgrade_rules_root=$(cd "$upgrade_rules_root" && pwd -P)
+[[ "${upgrade_rules_root%/}" == "$resolved_upgrade_rules_root" ]] || {
+  echo 'BABYDIARY_UPGRADE_RULES_ROOT must be an absolute canonical path' >&2
+  exit 2
+}
+[[ "$(basename "$resolved_upgrade_rules_root")" == "baby-diary-upgrade-rules-$upgrade_rules_run_id" ]] || {
+  echo 'BABYDIARY_UPGRADE_RULES_ROOT is not bound to its run nonce' >&2
+  exit 2
+}
+upgrade_rules_root=$resolved_upgrade_rules_root
 run_id=$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')
 [[ "$run_id" =~ ^[0-9a-f]{32}$ ]] || { echo 'uuidgen did not produce a lowercase 32-hex nonce' >&2; exit 2; }
 temp_parent=$(cd "${TMPDIR:-/tmp}" && pwd -P)
-run_root=$(mktemp -d "$temp_parent/baby-diary-upgrade-${run_id}.XXXXXX")
-run_root=$(cd "$run_root" && pwd -P)
+run_root="$temp_parent/baby-diary-upgrade-$run_id"
+[[ ! -e "$run_root" && ! -L "$run_root" ]] || {
+  echo 'refusing to reuse a nonce-owned upgrade root' >&2
+  exit 2
+}
 
-temporary_home="$run_root/home"
 applications_root="$run_root/Applications"
 installed_app="$run_root/Applications/Baby Diary.app"
 candidate_ready_app="$run_root/candidate-ready.app"
@@ -112,12 +149,14 @@ retired_baseline_app="$run_root/retired-baseline.app"
 interrupted_staging_app="$run_root/interrupted-staging.app"
 baseline_mount="$run_root/baseline-mount"
 candidate_mount="$run_root/candidate-mount"
-canonical_profile="$temporary_home/Library/Application Support/baby-diary"
+canonical_profile="$run_root/user-data/baby-diary"
 baseline_projection="$run_root/baseline-projection.json"
 first_projection="$run_root/candidate-first-projection.json"
 second_projection="$run_root/candidate-second-projection.json"
 baseline_manifest="$run_root/baseline-raw-manifest.json"
 candidate_provenance_verified="$run_root/candidate-provenance-verified.json"
+interactive_profile_before="$run_root/interactive-profile-before.json"
+interactive_profile_after="$run_root/interactive-profile-after.json"
 baseline_executable_sha256=''
 candidate_executable=''
 baseline_mounted=false
@@ -130,8 +169,7 @@ candidate_first_launch_completed=false
 active_process_group=''
 termination_kind='none'
 success=false
-
-mkdir -p "$temporary_home" "$applications_root" "$baseline_mount" "$candidate_mount"
+profile_fingerprint_captured=false
 
 terminate_active_process_group() {
   local deadline
@@ -283,11 +321,47 @@ invoke_upgrade_phase() {
   )
   [[ -z "$comparison" ]] || arguments+=( '--comparison-projection' "$comparison" )
   run_bounded "$phase_timeout_seconds" "upgrade driver $mode" node "${arguments[@]}"
+  [[ -s "$diagnostic" && -s "$projection" ]] || {
+    echo 'upgrade phase diagnostic or projection artifact is missing or empty after child exit' >&2
+    return 1
+  }
+  [[ -f "$canonical_profile/settings.json" ]] || {
+    echo 'upgrade phase canonical settings artifact is missing after child exit' >&2
+    return 1
+  }
+  [[ -d "$canonical_profile/data" ]] || {
+    echo 'upgrade phase canonical event directory is missing after child exit' >&2
+    return 1
+  }
+  run_bounded "$phase_timeout_seconds" "upgrade artifact verification $mode" node \
+    "$upgrade_driver" 'verify-artifacts' \
+    '--run-id' "$run_id" \
+    '--mode' "$mode" \
+    '--expected-version' "$expected_version" \
+    '--expected-arch' "$expected_driver_arch" \
+    '--source-sha' "$source_sha" \
+    '--diagnostic' "$diagnostic" \
+    '--projection' "$projection" \
+    '--profile-root' "$canonical_profile"
+}
+
+invoke_firestore_rules_transition() {
+  run_bounded "$phase_timeout_seconds" 'Firestore rules baseline-to-candidate transition' node \
+    "$rules_driver" 'transition' \
+    '--root' "$upgrade_rules_root" \
+    '--run-id' "$upgrade_rules_run_id" \
+    '--candidate-source-sha' "$candidate_source_sha"
 }
 
 new_baseline_manifest() {
   run_bounded "$phase_timeout_seconds" 'baseline manifest creation' \
     node "$data_contract" 'manifest' '--root' "$canonical_profile" '--output' "$baseline_manifest"
+  [[ -s "$baseline_manifest" ]] || {
+    echo 'baseline raw manifest is missing or empty after child exit' >&2
+    return 1
+  }
+  run_bounded "$phase_timeout_seconds" 'baseline raw manifest artifact verification' \
+    node "$upgrade_driver" 'verify-baseline-manifest' '--manifest' "$baseline_manifest"
   baseline_manifest_created=true
 }
 
@@ -439,7 +513,7 @@ remove_run_owned_root() {
   local resolved_parent resolved_name
   resolved_parent=$(cd "$(dirname "$run_root")" && pwd -P)
   resolved_name=$(basename "$run_root")
-  [[ "$resolved_parent" == "$temp_parent" && "$resolved_name" == baby-diary-upgrade-"$run_id".* ]] || {
+  [[ "$resolved_parent" == "$temp_parent" && "$resolved_name" == "baby-diary-upgrade-$run_id" ]] || {
     echo 'refusing to remove a root not bound to this run nonce' >&2
     return 1
   }
@@ -470,7 +544,15 @@ cleanup() {
   if [[ "$baseline_mounted" == true ]]; then
     if run_bounded "$mount_timeout_seconds" 'baseline DMG detach' hdiutil detach "$baseline_mount" >/dev/null 2>&1; then baseline_mounted=false; else cleanup_status=1; fi
   fi
-  export HOME="$original_home"
+  if [[ "$profile_fingerprint_captured" == true ]]; then
+    run_bounded "$phase_timeout_seconds" 'interactive profile non-interference verification' node \
+      "$upgrade_driver" 'verify-profile-noninterference' \
+      '--interactive-profile' "$original_canonical_profile" \
+      '--temp-root' "$run_root" \
+      '--run-id' "$run_id" \
+      '--before' "$interactive_profile_before" \
+      '--output' "$interactive_profile_after" || cleanup_status=$?
+  fi
   if [[ "$success" == true && $cleanup_status -eq 0 ]]; then
     remove_run_owned_root || cleanup_status=$?
   else
@@ -491,6 +573,15 @@ trap on_error ERR
 trap cleanup EXIT
 trap 'on_interrupt 130' INT
 trap 'on_interrupt 143' TERM
+
+run_bounded "$phase_timeout_seconds" 'interactive profile fingerprint before any run-owned write' node \
+  "$upgrade_driver" 'capture-profile-fingerprint' \
+  '--interactive-profile' "$original_canonical_profile" \
+  '--temp-root' "$run_root" \
+  '--run-id' "$run_id" \
+  '--output' "$interactive_profile_before"
+profile_fingerprint_captured=true
+mkdir -p "$applications_root" "$baseline_mount" "$candidate_mount" "$(dirname "$canonical_profile")"
 
 verify_candidate_provenance
 [[ "$(stat -f%z "$baseline_dmg")" == "$baseline_asset_size" ]] || { echo 'baseline DMG size mismatch' >&2; exit 1; }
@@ -525,13 +616,13 @@ baseline_executable_sha256=$(sha256_file "$installed_app/Contents/MacOS/Baby Dia
   exit 1
 }
 
-export HOME="$temporary_home"
 invoke_upgrade_phase 'baseline-initialize' "$installed_app/Contents/MacOS/Baby Diary" \
   "$expected_baseline_version" "$baseline_source_sha" "$run_root/baseline-diagnostic.json" "$baseline_projection"
 new_baseline_manifest
 invoke_failure_point 'after-baseline-close'
 invoke_failure_point 'after-manifest-creation'
 assert_profile_matches_baseline
+invoke_firestore_rules_transition
 
 candidate_source_executable_sha256=$(sha256_file "$candidate_source_executable")
 invoke_failure_point 'before-candidate-replacement'
@@ -562,9 +653,15 @@ expected_driver_arch='x64'
 cd "$repo_root"
 run_bounded "$npm_timeout_seconds" 'npm run test:e2e' env \
   BABYDIARY_E2E_EXECUTABLE="$candidate_executable" \
-  BABYDIARY_EXPECTED_E2E_ARCH="$expected_driver_arch" npm run test:e2e
-run_bounded "$npm_timeout_seconds" 'npm run test:e2e:sync' env \
+  BABYDIARY_EXPECTED_E2E_ARCH="$expected_driver_arch" \
+  BABYDIARY_TEST_USERDATA="$canonical_profile" \
+  BABYDIARY_UPGRADE_ATTEST_RUN_ID="$run_id" npm run test:e2e
+run_bounded "$npm_timeout_seconds" 'sync E2E inside existing emulators' env \
   BABYDIARY_SYNC_E2E_EXECUTABLE="$candidate_executable" \
-  BABYDIARY_SYNC_E2E_UPGRADE_PROFILE="$canonical_profile" npm run test:e2e:sync
+  BABYDIARY_FIREBASE_EMULATOR=1 \
+  BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID=demo-baby-diary \
+  BABYDIARY_TEST_USERDATA="$canonical_profile" \
+  BABYDIARY_UPGRADE_ATTEST_RUN_ID="$run_id" \
+  node "$repo_root/scripts/sync-e2e.mjs" --inside-emulators
 
 success=true

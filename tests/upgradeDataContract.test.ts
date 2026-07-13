@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as contract from '../scripts/upgrade-data-contract.mjs'
+import { V038_DEFAULT_FIREBASE_EVIDENCE } from '../scripts/upgrade-firebase-continuity.mjs'
 
 const roots: string[] = []
 
@@ -74,6 +75,48 @@ afterEach(() => {
 })
 
 describe('v0.3.8 upgrade data contract', () => {
+  it('preseeds only the exact v0.3.8 settings schema with emulator config before first launch', async () => {
+    const root = tempRoot('firebase-bootstrap')
+    await contract.writeV038FirebaseBootstrap(root)
+    const settings = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8'))
+    expect(settings.familyId).toBe('')
+    expect(settings.profile.uid).toBe('')
+    const stableJson = (value: any): string => {
+      if (value === null || typeof value !== 'object') return JSON.stringify(value)
+      if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+      return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+    }
+    expect(createHash('sha256').update(settings.firebase.apiKey).digest('hex'))
+      .toBe(V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256)
+    expect(createHash('sha256').update(stableJson(settings.firebase)).digest('hex'))
+      .toBe(V038_DEFAULT_FIREBASE_EVIDENCE.configSha256)
+    expect(settings).not.toHaveProperty('babyInfoSync')
+    expect(settings).not.toHaveProperty('upgradeOpaque')
+    expect(settings.profile).not.toHaveProperty('legacyContact')
+    expect(Object.keys(settings).sort()).toEqual([
+      'baby', 'familyId', 'firebase', 'language', 'profile', 'theme',
+    ])
+    expect(existsSync(join(root, 'data'))).toBe(false)
+    expect(existsSync(join(root, 'Local Storage', 'upgrade-auth-sentinel.json'))).toBe(false)
+  })
+
+  it('binds the historical fixture to the real authenticated uid and created family', () => {
+    const fixture = contract.buildV038Fixture({
+      profileUid: 'firebase-auth-uid',
+      familyId: 'firestore-family-id',
+    })
+    expect(fixture.settings.profile.uid).toBe('firebase-auth-uid')
+    expect(fixture.settings.familyId).toBe('firestore-family-id')
+    expect(fixture.settings.babyInfoSync.mutations.every(
+      (mutation: any) => mutation.familyId === 'firestore-family-id',
+    )).toBe(true)
+    expect(fixture.settings.babyInfoSync.mutations[0].authorId).toBe('firebase-auth-uid')
+    expect(fixture.settings.babyInfoSync.pendingMutationKeys).toHaveLength(1)
+    expect(fixture.settings.babyInfoSync.pendingMutationKeys[0]).toBe(
+      contract.getBabyInfoMutationKey(fixture.settings.babyInfoSync.mutations[1]),
+    )
+  })
+
   it('pins the immutable source and exact public release assets', () => {
     expect(existsSync(resolve(import.meta.dirname, '../scripts/upgrade-data-contract.mjs'))).toBe(true)
     expect(contract.V038_SOURCE).toEqual({
@@ -295,7 +338,7 @@ describe('v0.3.8 upgrade data contract', () => {
       { label: 'settings', relativePath: 'settings.json' },
       { label: 'journal', relativePath: 'baby-info-journal-v1.jsonl', journal: true },
       { label: 'event', relativePath: 'data/events-2026-07.jsonl' },
-      { label: 'auxiliary', relativePath: 'Local Storage/upgrade-auth-sentinel.json' },
+      { label: 'auxiliary', relativePath: 'auxiliary/legacy-attachment.bin' },
     ]
 
     for (const testCase of cases) {
@@ -430,12 +473,11 @@ describe('v0.3.8 upgrade data contract', () => {
     expect(() => contract.assertSemanticPreservation(baseline, substituted)).toThrow(/account|family|identity/i)
   })
 
-  it('preserves unknown/deep settings and exact auxiliary/auth sentinel files', async () => {
+  it('preserves unknown/deep settings and exact non-auth auxiliary files', async () => {
     const baselineRoot = tempRoot('opaque-before')
     await contract.writeV038Fixture(baselineRoot)
     const baseline = await contract.projectUpgradeSemantics(baselineRoot)
     expect(baseline.auxiliaryFiles.map((item: any) => item.path)).toEqual([
-      'Local Storage/upgrade-auth-sentinel.json',
       'auxiliary/legacy-attachment.bin',
     ])
 

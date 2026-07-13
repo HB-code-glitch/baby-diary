@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
@@ -7,30 +8,48 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path, { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   UPGRADE_MODES,
+  V038_USERDATA_OVERRIDE_EVIDENCE,
   acquireWithTimeout,
+  assertDistinctProfileIdentities,
+  assertProfileFingerprintUnchanged,
+  assertRuntimeDiscoverability,
   buildPackagedLaunchEnvironment,
-  canonicalProfileForPlatform,
+  captureProfileFingerprintArtifact,
   closeElectronApplication,
+  fingerprintProfileTree,
+  mergeUpgradeNetworkEvidence,
   parseUpgradeCli,
+  redactUpgradeProjection,
+  resolveInteractiveProfileForPlatform,
   runUpgradePhase,
   sanitizeUpgradeDiagnostic,
+  validateMainProcessAttestation,
+  validateBaselineManifestArtifact,
+  validateCompletedUpgradePhaseArtifacts,
   validateNonceOwnedPaths,
+  validateV038UserDataOverrideContract,
+  verifyProfileNonInterferenceArtifact,
 } from '../scripts/upgrade-e2e.mjs'
 import {
   V038_SOURCE,
+  buildFixtureEventDerivative,
+  canonicalJson,
   getBabyInfoMutationKey,
   materializeMigratedBabyInfoJournal,
   projectUpgradeSemantics,
   writeV038Fixture,
 } from '../scripts/upgrade-data-contract.mjs'
+import { V038_DEFAULT_FIREBASE_EVIDENCE } from '../scripts/upgrade-firebase-continuity.mjs'
 
 const roots: string[] = []
 const RUN_ID = '0123456789abcdef0123456789abcdef'
+const REPOSITORY_ROOT = resolve(import.meta.dirname, '..')
 
 function tempRunRoot(label = 'run') {
   const container = mkdtempSync(join(tmpdir(), `baby-diary-upgrade-test-${label}-`))
@@ -41,23 +60,55 @@ function tempRunRoot(label = 'run') {
 }
 
 function platformProfile(root: string) {
+  const profileRoot = join(root, 'user-data', 'baby-diary')
+  const interactiveRoot = join(path.dirname(root), 'interactive-profile')
   if (process.platform === 'win32') {
-    const appData = join(root, 'AppData', 'Roaming')
+    const appData = join(interactiveRoot, 'AppData', 'Roaming')
     mkdirSync(appData, { recursive: true })
-    return { profileRoot: join(appData, 'baby-diary'), env: { APPDATA: appData } }
+    return {
+      profileRoot,
+      interactiveProfileRoot: join(appData, 'baby-diary'),
+      env: { APPDATA: appData },
+    }
   }
   if (process.platform === 'darwin') {
-    const home = join(root, 'home')
-    mkdirSync(home)
+    const home = join(interactiveRoot, 'home')
+    mkdirSync(home, { recursive: true })
     return {
-      profileRoot: join(home, 'Library', 'Application Support', 'baby-diary'),
+      profileRoot,
+      interactiveProfileRoot: join(home, 'Library', 'Application Support', 'baby-diary'),
       env: { HOME: home },
     }
   }
-  const home = join(root, 'home')
+  const home = join(interactiveRoot, 'home')
   const config = join(home, '.config')
   mkdirSync(config, { recursive: true })
-  return { profileRoot: join(config, 'baby-diary'), env: { HOME: home, XDG_CONFIG_HOME: config } }
+  return {
+    profileRoot,
+    interactiveProfileRoot: join(config, 'baby-diary'),
+    env: { HOME: home, XDG_CONFIG_HOME: config },
+  }
+}
+
+function mainProcessAttestation(profileRoot: string, appVersion: string) {
+  return {
+    runId: RUN_ID,
+    userDataPath: resolve(profileRoot),
+    appVersion,
+    hostArchitecture: process.arch,
+    beforeUi: true,
+  }
+}
+
+async function recordMainProcessAttestation(
+  context: Record<string, any>,
+  profileRoot: string,
+  appVersion: string,
+) {
+  if (typeof context.onMainProcessAttestation !== 'function') {
+    throw new Error('test session did not receive the attestation recorder')
+  }
+  await context.onMainProcessAttestation(mainProcessAttestation(profileRoot, appVersion))
 }
 
 function runtimeViewFromProjection(projection: any, mode: string) {
@@ -159,6 +210,15 @@ describe('packaged in-place upgrade driver', () => {
 
   it('wires the production renderer session to exact event and baby-info IPC discovery', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../scripts/upgrade-e2e.mjs'), 'utf8')
+    expect(source).toContain('writeV038FirebaseBootstrap(owned.profileRoot)')
+    expect(source).toContain('startUpgradeDenyProxy()')
+    expect(source).toContain('buildFailClosedChromiumArgs({ denyProxyPort: denyProxy.port })')
+    expect(source).toContain('installCdpUpgradeNetworkGuard(page')
+    expect(source).toContain('await page.addInitScript(installUpgradeAuthFormObserver)')
+    expect(source).toContain(".lang-picker-card.lang-picker-card-visible")
+    expect(source).toContain(".lang-picker-btn[lang=\"ko\"]")
+    expect(source).toContain('validateUpgradeEmulatorEnvironment(env)')
+    expect(source).toContain('assertUpgradeContinuity(comparisonEvidence.authSync, projection.authSync, options.mode)')
     expect(source).toContain('api.getSettings()')
     expect(source).toContain('api.listEvents()')
     expect(source).toContain('api.getBabyInfoSummary(settings.familyId)')
@@ -173,7 +233,134 @@ describe('packaged in-place upgrade driver', () => {
     expect(source).toContain('[data-settings-baby-name]')
     expect(source).toContain('[data-settings-account-name]')
     expect(source).toContain('[data-sync-state]')
-    expect(source).toContain('assertRuntimeDiscoverability(projection, runtime.publicView, options.mode)')
+    expect(source).toContain('assertRuntimeDiscoverability(baseProjection, runtime.publicView, options.mode)')
+  })
+
+  it('persists only hashed real-auth continuity and rejects candidate signup/signed-out fallback', async () => {
+    const root = tempRunRoot('auth-continuity')
+    const { profileRoot, env } = platformProfile(root)
+    const executablePath = join(root, process.platform === 'win32' ? 'Baby Diary.exe' : 'Baby Diary')
+    const baselineProjectionPath = join(root, 'baseline-projection.json')
+    const baselineDiagnosticPath = join(root, 'baseline-diagnostic.json')
+    writeFileSync(executablePath, 'candidate')
+    await writeV038Fixture(profileRoot)
+    const projection = await projectUpgradeSemantics(profileRoot)
+    const sourceByContentId = new Map(
+      projection.eventSources.map((item: any) => [item.contentId, JSON.parse(item.canonical)]),
+    )
+    const onlineEvent = sourceByContentId.get(projection.eventWinners.find((item: any) => item.id === 'legacy-pee').contentId)
+    const pendingEvent = sourceByContentId.get(projection.eventWinners.find((item: any) => item.id === 'legacy-poop').contentId)
+    const commonContinuity = {
+      uid: projection.identity.account.uid,
+      email: 'upgrade-parent@example.test',
+      familyId: projection.identity.familyId,
+      inviteCode: 'ABC234',
+      memberUids: [projection.identity.account.uid],
+      onlineEvent,
+      pendingEvent,
+    }
+    const runtimeBase = {
+      appVersion: '0.3.8',
+      hostArchitecture: process.arch,
+      canonicalUserDataPath: resolve(profileRoot),
+      publicView: runtimeViewFromProjection(projection, 'baseline-initialize'),
+    }
+
+    await runUpgradePhase({
+      mode: 'baseline-initialize',
+      executablePath,
+      profileRoot,
+      tempRoot: root,
+      runId: RUN_ID,
+      diagnosticPath: baselineDiagnosticPath,
+      projectionOutputPath: baselineProjectionPath,
+      sourceSha: V038_SOURCE.commit,
+      expectedVersion: '0.3.8',
+      expectedArch: process.arch,
+      platform: process.platform,
+      env,
+      forbiddenRoots: [],
+    }, {
+      hashExecutable: async () => 'a'.repeat(64),
+      validateV038Fixture: async () => projection,
+      runPackagedSession: async (context: Record<string, any>) => {
+        await recordMainProcessAttestation(context, profileRoot, '0.3.8')
+        expect(JSON.parse(readFileSync(baselineDiagnosticPath, 'utf8'))).toMatchObject({
+          passed: false,
+          processReportedRunId: RUN_ID,
+          canonicalUserDataPath: resolve(profileRoot),
+          attestationBeforeUi: true,
+          baselineUserDataOverrideEvidence: V038_USERDATA_OVERRIDE_EVIDENCE,
+        })
+        return {
+          ...runtimeBase,
+          continuity: {
+            ...commonContinuity,
+            pendingCount: 1,
+            cloudPendingCopies: 0,
+            authFormVisible: false,
+            signupAttempted: true,
+          },
+        }
+      },
+    })
+    const baselineWritten = JSON.parse(readFileSync(baselineProjectionPath, 'utf8'))
+    expect(baselineWritten.authSync).toMatchObject({
+      uidSha256: createHash('sha256').update(projection.identity.account.uid).digest('hex'),
+      familyIdSha256: createHash('sha256').update(projection.identity.familyId).digest('hex'),
+      pendingCount: 1,
+      cloudPendingCopies: 0,
+      signupAttempted: true,
+    })
+    const persistedAuth = JSON.stringify(baselineWritten.authSync)
+    for (const forbidden of [
+      projection.identity.account.uid,
+      projection.identity.familyId,
+      'upgrade-parent@example.test',
+      'ABC234',
+      onlineEvent.id,
+      pendingEvent.id,
+    ]) expect(persistedAuth).not.toContain(forbidden)
+
+    await expect(runUpgradePhase({
+      mode: 'candidate-first-run',
+      executablePath,
+      profileRoot,
+      tempRoot: root,
+      runId: RUN_ID,
+      diagnosticPath: join(root, 'candidate-diagnostic.json'),
+      projectionOutputPath: join(root, 'candidate-projection.json'),
+      comparisonProjectionPath: baselineProjectionPath,
+      sourceSha: 'b'.repeat(40),
+      expectedVersion: '0.3.9',
+      expectedArch: process.arch,
+      platform: process.platform,
+      env,
+      forbiddenRoots: [],
+    }, {
+      hashExecutable: async () => 'b'.repeat(64),
+      projectUpgradeSemantics: async () => projection,
+      runPackagedSession: async (context: Record<string, any>) => {
+        await recordMainProcessAttestation(context, profileRoot, '0.3.9')
+        return {
+          ...runtimeBase,
+          appVersion: '0.3.9',
+          publicView: runtimeViewFromProjection(projection, 'candidate-first-run'),
+          continuity: {
+            ...commonContinuity,
+            pendingCount: 0,
+            cloudPendingCopies: 1,
+            authFormVisible: true,
+            signupAttempted: true,
+            secondDevice: {
+              uid: 'device-two',
+              familyId: projection.identity.familyId,
+              convergedEventIds: [onlineEvent.id, pendingEvent.id],
+            },
+          },
+        }
+      },
+    })).rejects.toThrow(/auth|signup|restore/i)
   })
 
   it('accepts exactly the three planned modes and rejects secret-bearing/unknown CLI input', () => {
@@ -201,36 +388,99 @@ describe('packaged in-place upgrade driver', () => {
     expect(() => parseUpgradeCli(['--mode', 'baseline-initialize', '--mode', 'candidate-first-run'])).toThrow(/duplicate/i)
   })
 
-  it('derives the canonical OS profile leaf from APPDATA/HOME without a test userData override', () => {
-    expect(canonicalProfileForPlatform('win32', { APPDATA: 'C:\\nonce\\Roaming' })).toBe(
-      path.win32.resolve('C:\\nonce\\Roaming', 'baby-diary'),
+  it('accepts a quote-safe, strict phase-env entrypoint without accepting arbitrary environment fields', () => {
+    const env = {
+      APPDATA: 'C:\\nonce\\Roaming',
+      BABYDIARY_UPGRADE_PHASE_MODE: 'baseline-initialize',
+      BABYDIARY_UPGRADE_PHASE_EXECUTABLE: 'C:\\Program Files\\Baby Diary\\Baby Diary.exe',
+      BABYDIARY_UPGRADE_PHASE_PROFILE_ROOT: 'C:\\nonce\\Roaming\\baby-diary',
+      BABYDIARY_UPGRADE_PHASE_TEMP_ROOT: 'C:\\nonce',
+      BABYDIARY_UPGRADE_PHASE_RUN_ID: RUN_ID,
+      BABYDIARY_UPGRADE_PHASE_DIAGNOSTIC: 'C:\\nonce\\diagnostic.json',
+      BABYDIARY_UPGRADE_PHASE_PROJECTION_OUTPUT: 'C:\\nonce\\baseline.json',
+      BABYDIARY_UPGRADE_PHASE_SOURCE_SHA: V038_SOURCE.commit,
+      BABYDIARY_UPGRADE_PHASE_EXPECTED_VERSION: '0.3.8',
+      BABYDIARY_UPGRADE_PHASE_EXPECTED_ARCH: 'x64',
+      PASSWORD: 'must-not-become-an-option',
+    }
+
+    const parsed = parseUpgradeCli(['phase-env'], env, 'win32')
+    expect(parsed).toMatchObject({
+      mode: 'baseline-initialize',
+      executablePath: env.BABYDIARY_UPGRADE_PHASE_EXECUTABLE,
+      profileRoot: env.BABYDIARY_UPGRADE_PHASE_PROFILE_ROOT,
+      tempRoot: env.BABYDIARY_UPGRADE_PHASE_TEMP_ROOT,
+      runId: RUN_ID,
+      platform: 'win32',
+      env,
+    })
+    expect(parsed).not.toHaveProperty('password')
+    expect(() => parseUpgradeCli(['phase-env', '--mode'], env, 'win32')).toThrow(/phase-env|exact/i)
+    expect(() => parseUpgradeCli(['phase-env'], {
+      ...env,
+      BABYDIARY_UPGRADE_PHASE_MODE: 'candidate-first-run',
+    }, 'win32')).toThrow(/comparison projection/i)
+  })
+
+  it('executes rather than silently succeeding through a junction entrypoint with preserve-symlinks-main', () => {
+    const runRoot = tempRunRoot('junction-entrypoint')
+    const linkedRepository = join(runRoot, 'repo-entry')
+    symlinkSync(REPOSITORY_ROOT, linkedRepository, process.platform === 'win32' ? 'junction' : 'dir')
+    const cleanEnv = Object.fromEntries(Object.entries(process.env)
+      .filter(([key]) => !key.startsWith('BABYDIARY_UPGRADE_PHASE_')))
+    const result = spawnSync(process.execPath, [
+      '--preserve-symlinks-main',
+      join(linkedRepository, 'scripts', 'upgrade-e2e.mjs'),
+      'phase-env',
+    ], { cwd: runRoot, env: cleanEnv, encoding: 'utf8' })
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('[upgrade-e2e] FAIL')
+  })
+
+  it('independently resolves the interactive profile while forcing the nonce profile through the test override', () => {
+    expect(resolveInteractiveProfileForPlatform('win32', { APPDATA: 'C:\\interactive\\Roaming' })).toBe(
+      path.win32.resolve('C:\\interactive\\Roaming', 'baby-diary'),
     )
-    expect(canonicalProfileForPlatform('darwin', { HOME: '/nonce/home' })).toBe(
-      '/nonce/home/Library/Application Support/baby-diary',
+    expect(resolveInteractiveProfileForPlatform('darwin', { HOME: '/interactive/home' })).toBe(
+      '/interactive/home/Library/Application Support/baby-diary',
     )
-    expect(canonicalProfileForPlatform('linux', { HOME: '/nonce/home' })).toBe(
-      '/nonce/home/.config/baby-diary',
+    expect(resolveInteractiveProfileForPlatform('linux', { HOME: '/interactive/home' })).toBe(
+      '/interactive/home/.config/baby-diary',
     )
 
     const launchEnv = buildPackagedLaunchEnvironment({
-      APPDATA: 'C:\\nonce\\Roaming',
+      APPDATA: 'C:\\interactive\\Roaming',
       BABYDIARY_TEST_USERDATA: 'C:\\real-profile',
+      BABYDIARY_UPGRADE_ATTEST_RUN_ID: 'f'.repeat(32),
+      BABYDIARY_UPGRADE_PHASE_TEMP_ROOT: 'C:\\nonce',
+      BABYDIARY_UPGRADE_RULES_ROOT: 'C:\\rules',
       FIREBASE_API_KEY: 'must-not-cross',
       NODE_ENV: 'test',
+    }, {
+      profileRoot: 'C:\\nonce\\user-data\\baby-diary',
+      runId: RUN_ID,
     })
-    expect(launchEnv).not.toHaveProperty('BABYDIARY_TEST_USERDATA')
+    expect(launchEnv.BABYDIARY_TEST_USERDATA).toBe(path.resolve('C:\\nonce\\user-data\\baby-diary'))
+    expect(launchEnv.BABYDIARY_UPGRADE_ATTEST_RUN_ID).toBe(RUN_ID)
+    expect(launchEnv).not.toHaveProperty('BABYDIARY_UPGRADE_PHASE_TEMP_ROOT')
+    expect(launchEnv).not.toHaveProperty('BABYDIARY_UPGRADE_RULES_ROOT')
     expect(launchEnv).not.toHaveProperty('FIREBASE_API_KEY')
     expect(launchEnv.NODE_ENV).toBe('production')
-    expect(launchEnv.APPDATA).toBe('C:\\nonce\\Roaming')
+    expect(launchEnv.APPDATA).toBe('C:\\interactive\\Roaming')
+    expect(() => buildPackagedLaunchEnvironment({}, {
+      profileRoot: '',
+      runId: RUN_ID,
+    })).toThrow(/profile/i)
   })
 
-  it('rejects outside, real/equal, nonce-mismatched, and linked profile roots', async () => {
+  it('rejects outside, interactive/equal or contained, nonce-mismatched, and linked profile roots', async () => {
     const root = tempRunRoot('paths')
-    const { profileRoot } = platformProfile(root)
+    const { profileRoot, interactiveProfileRoot } = platformProfile(root)
     const output = join(root, 'phase.json')
     await expect(validateNonceOwnedPaths({
       tempRoot: root,
       profileRoot,
+      interactiveProfileRoot,
       outputPaths: [output],
       runId: RUN_ID,
       forbiddenRoots: [],
@@ -239,6 +489,7 @@ describe('packaged in-place upgrade driver', () => {
     await expect(validateNonceOwnedPaths({
       tempRoot: root,
       profileRoot: root,
+      interactiveProfileRoot,
       outputPaths: [output],
       runId: RUN_ID,
       forbiddenRoots: [],
@@ -246,6 +497,7 @@ describe('packaged in-place upgrade driver', () => {
     await expect(validateNonceOwnedPaths({
       tempRoot: root,
       profileRoot: join(path.dirname(root), 'outside', 'baby-diary'),
+      interactiveProfileRoot,
       outputPaths: [output],
       runId: RUN_ID,
       forbiddenRoots: [],
@@ -253,6 +505,7 @@ describe('packaged in-place upgrade driver', () => {
     await expect(validateNonceOwnedPaths({
       tempRoot: root,
       profileRoot,
+      interactiveProfileRoot,
       outputPaths: [output],
       runId: 'ffffffffffffffffffffffffffffffff',
       forbiddenRoots: [],
@@ -260,22 +513,257 @@ describe('packaged in-place upgrade driver', () => {
     await expect(validateNonceOwnedPaths({
       tempRoot: root,
       profileRoot,
+      interactiveProfileRoot,
       outputPaths: [output],
       runId: RUN_ID,
       forbiddenRoots: [profileRoot],
     })).rejects.toThrow(/real|forbidden/i)
 
+    await expect(validateNonceOwnedPaths({
+      tempRoot: root,
+      profileRoot,
+      interactiveProfileRoot: join(root, 'user-data'),
+      outputPaths: [output],
+      runId: RUN_ID,
+      forbiddenRoots: [],
+    })).rejects.toThrow(/interactive|contain/i)
+
     const linkedTarget = join(root, 'linked-target')
     mkdirSync(linkedTarget)
-    const linkedProfile = join(root, 'linked-profile')
+    mkdirSync(join(root, 'user-data'), { recursive: true })
+    const linkedProfile = profileRoot
     symlinkSync(linkedTarget, linkedProfile, process.platform === 'win32' ? 'junction' : 'dir')
     await expect(validateNonceOwnedPaths({
       tempRoot: root,
       profileRoot: linkedProfile,
+      interactiveProfileRoot,
       outputPaths: [output],
       runId: RUN_ID,
       forbiddenRoots: [],
     })).rejects.toThrow(/link|reparse/i)
+    rmSync(linkedProfile, { recursive: true, force: true })
+
+    const interactiveTarget = join(path.dirname(root), 'interactive-target')
+    mkdirSync(interactiveTarget)
+    const linkedInteractive = join(path.dirname(root), 'interactive-linked')
+    symlinkSync(interactiveTarget, linkedInteractive, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(validateNonceOwnedPaths({
+      tempRoot: root,
+      profileRoot,
+      interactiveProfileRoot: linkedInteractive,
+      outputPaths: [output],
+      runId: RUN_ID,
+      forbiddenRoots: [],
+    })).rejects.toThrow(/interactive|link|reparse/i)
+
+    expect(() => assertDistinctProfileIdentities({
+      nonceProfileRoot: profileRoot,
+      interactiveProfileRoot,
+      nonceIdentity: { dev: 7n, ino: 9n },
+      interactiveIdentity: { dev: 7n, ino: 9n },
+    })).toThrow(/same.*inode|identity/i)
+  })
+
+  it('pins the exact v0.3.8 main-process bytes that implement the userData override', async () => {
+    expect(V038_USERDATA_OVERRIDE_EVIDENCE).toEqual({
+      sourceSha: V038_SOURCE.commit,
+      sourcePath: 'electron/main.ts',
+      blobSha1: '5c578300008b8a005fcc72110d9817feca3d626e',
+      byteLength: 10125,
+      bytesSha256: 'da05cc989892d0d575be601be6c8e4ca7b456074ee40d5d18545f182987fd7d1',
+      environmentVariable: 'BABYDIARY_TEST_USERDATA',
+    })
+    await expect(validateV038UserDataOverrideContract({ repositoryRoot: REPOSITORY_ROOT }))
+      .resolves.toEqual(V038_USERDATA_OVERRIDE_EVIDENCE)
+  })
+
+  it('accepts only a pre-UI, process-reported run-id and userData attestation', () => {
+    const profileRoot = resolve('nonce-owned', 'user-data', 'baby-diary')
+    expect(validateMainProcessAttestation(mainProcessAttestation(profileRoot, '0.3.8'), {
+      profileRoot,
+      runId: RUN_ID,
+      expectedVersion: '0.3.8',
+      expectedArch: process.arch,
+    })).toEqual(mainProcessAttestation(profileRoot, '0.3.8'))
+    expect(() => validateMainProcessAttestation({
+      ...mainProcessAttestation(profileRoot, '0.3.8'),
+      runId: 'f'.repeat(32),
+    }, {
+      profileRoot,
+      runId: RUN_ID,
+      expectedVersion: '0.3.8',
+      expectedArch: process.arch,
+    })).toThrow(/process.*run.?id|attestation/i)
+    expect(() => validateMainProcessAttestation({
+      ...mainProcessAttestation(profileRoot, '0.3.8'),
+      beforeUi: false,
+    }, {
+      profileRoot,
+      runId: RUN_ID,
+      expectedVersion: '0.3.8',
+      expectedArch: process.arch,
+    })).toThrow(/before.*UI|pre-UI/i)
+  })
+
+  it('fingerprints the interactive profile before creating the nonce root and proves non-interference', async () => {
+    const container = mkdtempSync(join(tmpdir(), 'baby-diary-profile-fingerprint-'))
+    roots.push(container)
+    const interactiveProfileRoot = join(container, 'interactive', 'baby-diary')
+    mkdirSync(join(interactiveProfileRoot, 'data'), { recursive: true })
+    writeFileSync(join(interactiveProfileRoot, 'settings.json'), '{"language":"ko"}\n')
+    writeFileSync(join(interactiveProfileRoot, 'data', 'events-2026-07.jsonl'), '{"id":"real"}\n')
+    const plannedRoot = join(container, `baby-diary-upgrade-${RUN_ID}`)
+    const beforePath = join(plannedRoot, 'interactive-profile-before.json')
+    const afterPath = join(plannedRoot, 'interactive-profile-after.json')
+
+    expect(existsSync(plannedRoot)).toBe(false)
+    const directBefore = await fingerprintProfileTree(interactiveProfileRoot)
+    const captured = await captureProfileFingerprintArtifact({
+      interactiveProfileRoot,
+      tempRoot: plannedRoot,
+      runId: RUN_ID,
+      outputPath: beforePath,
+    })
+    expect(existsSync(plannedRoot)).toBe(true)
+    expect(captured).toMatchObject({ version: 1, stage: 'before', runId: RUN_ID, fingerprint: directBefore })
+    const unchanged = await verifyProfileNonInterferenceArtifact({
+      interactiveProfileRoot,
+      tempRoot: plannedRoot,
+      runId: RUN_ID,
+      beforePath,
+      outputPath: afterPath,
+    })
+    expect(unchanged).toMatchObject({ version: 1, stage: 'after', runId: RUN_ID, unchanged: true })
+    expect(() => assertProfileFingerprintUnchanged(directBefore, {
+      ...directBefore,
+      treeSha256: 'f'.repeat(64),
+    })).toThrow(/interactive profile.*changed|non-interference/i)
+
+    writeFileSync(join(interactiveProfileRoot, 'settings.json'), '{"language":"ja"}\n')
+    await expect(verifyProfileNonInterferenceArtifact({
+      interactiveProfileRoot,
+      tempRoot: plannedRoot,
+      runId: RUN_ID,
+      beforePath,
+      outputPath: afterPath,
+    })).rejects.toThrow(/interactive profile.*changed|non-interference/i)
+    expect(JSON.parse(readFileSync(afterPath, 'utf8'))).toMatchObject({ unchanged: false })
+  })
+
+  it('rejects child-code-zero false positives unless bound phase artifacts, profile, network proof, and manifest exist', async () => {
+    const root = tempRunRoot('artifact-verification')
+    const { profileRoot } = platformProfile(root)
+    await writeV038Fixture(profileRoot)
+    const projectionPath = join(root, 'baseline-projection.json')
+    const diagnosticPath = join(root, 'baseline-diagnostic.json')
+    const manifestPath = join(root, 'baseline-raw-manifest.json')
+    const rawProjection = await projectUpgradeSemantics(profileRoot)
+    const projection = {
+      ...redactUpgradeProjection(rawProjection),
+      authSync: {
+        version: 2,
+        uidSha256: '1'.repeat(64),
+        emailSha256: '2'.repeat(64),
+        familyIdSha256: '3'.repeat(64),
+        inviteCodeSha256: '4'.repeat(64),
+        memberUidSha256s: ['1'.repeat(64)],
+        onlineEvent: { idSha256: '5'.repeat(64), rev: 1, deleted: false, semanticSha256: '6'.repeat(64) },
+        pendingEvent: { idSha256: '7'.repeat(64), rev: 1, deleted: false, semanticSha256: '8'.repeat(64) },
+        pendingCount: 1,
+        cloudPendingCopies: 0,
+        authFormVisible: false,
+        signupAttempted: true,
+      },
+    }
+    writeFileSync(projectionPath, JSON.stringify(projection))
+    writeFileSync(diagnosticPath, JSON.stringify(sanitizeUpgradeDiagnostic({
+      runId: RUN_ID,
+      sourceSha: V038_SOURCE.commit,
+      executableSha256: 'a'.repeat(64),
+      executableSize: 181185024,
+      appVersion: '0.3.8',
+      hostArchitecture: process.arch,
+      canonicalUserDataPath: resolve(profileRoot),
+      processReportedRunId: RUN_ID,
+      attestationBeforeUi: true,
+      baselineUserDataOverrideEvidence: V038_USERDATA_OVERRIDE_EVIDENCE,
+      fixtureProjectionHash: 'b'.repeat(64),
+      firebaseSettingsEvidence: {
+        settingsBytesSha256: 'e'.repeat(64),
+        configSha256: V038_DEFAULT_FIREBASE_EVIDENCE.configSha256,
+        apiKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        configMatchesExactTag: true,
+      },
+      phase: 'baseline-initialize',
+      passed: true,
+      networkEvidence: {
+        rewrittenAuth: 1,
+        rewrittenPasswordPolicy: 1,
+        rewrittenFirestore: 2,
+        runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        expectedOfflineBlocks: 1,
+        externalBlocks: 0,
+      },
+    })))
+    writeFileSync(manifestPath, JSON.stringify({
+      version: 1,
+      entries: [
+        { path: 'settings.json', type: 'file', size: 10, sha256: 'c'.repeat(64) },
+        { path: 'data', type: 'directory' },
+        { path: 'data/events-2026-07.jsonl', type: 'file', size: 10, sha256: 'd'.repeat(64) },
+      ],
+    }))
+    const options = {
+      runId: RUN_ID,
+      mode: 'baseline-initialize',
+      expectedVersion: '0.3.8',
+      expectedArch: process.arch,
+      sourceSha: V038_SOURCE.commit,
+      diagnosticPath,
+      projectionPath,
+      profileRoot,
+    }
+
+    await expect(validateCompletedUpgradePhaseArtifacts(options)).resolves.toMatchObject({
+      runId: RUN_ID,
+      phase: 'baseline-initialize',
+    })
+    await expect(validateBaselineManifestArtifact({ manifestPath })).resolves.toMatchObject({ entryCount: 3 })
+
+    writeFileSync(diagnosticPath, '')
+    await expect(validateCompletedUpgradePhaseArtifacts(options)).rejects.toThrow(/diagnostic|empty|JSON/i)
+    writeFileSync(diagnosticPath, JSON.stringify(sanitizeUpgradeDiagnostic({
+      runId: 'f'.repeat(32),
+      sourceSha: V038_SOURCE.commit,
+      executableSha256: 'a'.repeat(64),
+      executableSize: 181185024,
+      appVersion: '0.3.8',
+      hostArchitecture: process.arch,
+      canonicalUserDataPath: resolve(profileRoot),
+      processReportedRunId: 'f'.repeat(32),
+      attestationBeforeUi: true,
+      baselineUserDataOverrideEvidence: V038_USERDATA_OVERRIDE_EVIDENCE,
+      fixtureProjectionHash: 'b'.repeat(64),
+      firebaseSettingsEvidence: {
+        settingsBytesSha256: 'e'.repeat(64),
+        configSha256: V038_DEFAULT_FIREBASE_EVIDENCE.configSha256,
+        apiKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        configMatchesExactTag: true,
+      },
+      phase: 'baseline-initialize',
+      passed: true,
+      networkEvidence: {
+        rewrittenAuth: 1,
+        rewrittenPasswordPolicy: 1,
+        rewrittenFirestore: 1,
+        runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        expectedOfflineBlocks: 1,
+        externalBlocks: 0,
+      },
+    })))
+    await expect(validateCompletedUpgradePhaseArtifacts(options)).rejects.toThrow(/run id|run-id/i)
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, entries: [] }))
+    await expect(validateBaselineManifestArtifact({ manifestPath })).rejects.toThrow(/manifest|empty|entries/i)
   })
 
   it('orchestrates baseline, first, and second phases with real on-disk projections', async () => {
@@ -297,8 +785,10 @@ describe('packaged in-place upgrade driver', () => {
           await materializeMigratedBabyInfoJournal(profileRoot)
         }
         const projection = await projectUpgradeSemantics(profileRoot)
+        const version = context.mode === 'baseline-initialize' ? '0.3.8' : '0.3.9'
+        await recordMainProcessAttestation(context, profileRoot, version)
         return {
-          appVersion: context.mode === 'baseline-initialize' ? '0.3.8' : '0.3.9',
+          appVersion: version,
           hostArchitecture: process.arch,
           canonicalUserDataPath: resolve(profileRoot),
           publicView: runtimeViewFromProjection(projection, String(context.mode)),
@@ -386,13 +876,66 @@ describe('packaged in-place upgrade driver', () => {
       forbiddenRoots: [],
     }, {
       hashExecutable: async () => 'b'.repeat(64),
-      runPackagedSession: async () => ({
-        appVersion: '0.3.9',
-        hostArchitecture: process.arch,
-        canonicalUserDataPath: resolve(profileRoot),
-        publicView,
-      }),
+      runPackagedSession: async (context: Record<string, any>) => {
+        await recordMainProcessAttestation(context, profileRoot, '0.3.9')
+        return {
+          appVersion: '0.3.9',
+          hostArchitecture: process.arch,
+          canonicalUserDataPath: resolve(profileRoot),
+          publicView,
+        }
+      },
     })).rejects.toThrow(/runtime|visible|listEvents|tombstone/i)
+  })
+
+  it('accepts only a projected auth-bound derivative as the visible form of its retained source', async () => {
+    const root = tempRunRoot('runtime-derivative')
+    const { profileRoot } = platformProfile(root)
+    await writeV038Fixture(profileRoot)
+    await materializeMigratedBabyInfoJournal(profileRoot)
+    const projection = await projectUpgradeSemantics(profileRoot)
+    const derivative = buildFixtureEventDerivative()
+    const derivativeCanonical = canonicalJson(derivative)
+    projection.eventDerivatives.push({
+      mutationId: derivative.mutationId,
+      sourceContentId: derivative.migration.sourceContentId,
+      canonicalHash: createHash('sha256').update(derivativeCanonical).digest('hex'),
+    })
+    const publicView = runtimeViewFromProjection(projection, 'candidate-first-run')
+    publicView.events = publicView.events.map((event: any) => (
+      event.id === derivative.id ? derivative : event
+    ))
+    expect(() => assertRuntimeDiscoverability(projection, publicView, 'candidate-first-run')).not.toThrow()
+
+    publicView.events = publicView.events.map((event: any) => (
+      event.id === derivative.id ? { ...event, mutationId: 'substituted' } : event
+    ))
+    expect(() => assertRuntimeDiscoverability(projection, publicView, 'candidate-first-run'))
+      .toThrow(/substituted|derivative|source/i)
+  })
+
+  it('persists only hashed identity/event payload evidence while retaining deterministic comparisons', async () => {
+    const root = tempRunRoot('redacted-projection')
+    const { profileRoot } = platformProfile(root)
+    await writeV038Fixture(profileRoot)
+    const raw = await projectUpgradeSemantics(profileRoot)
+    const redacted = redactUpgradeProjection(raw)
+    const serialized = JSON.stringify(redacted)
+    const firstEvent = JSON.parse(raw.eventSources[0].canonical)
+
+    expect(redacted).toMatchObject({ evidenceSchemaVersion: 2, version: 1 })
+    expect(redacted.identity).toEqual({ semanticSha256: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    expect(redacted.eventSources[0]).toMatchObject({
+      id: expect.stringMatching(/^[0-9a-f]{64}$/),
+      canonical: expect.stringMatching(/^[0-9a-f]{64}$/),
+    })
+    for (const forbidden of [
+      raw.identity.account.uid,
+      raw.identity.familyId,
+      raw.eventSources[0].id,
+      firstEvent.author.uid,
+    ]) expect(serialized).not.toContain(forbidden)
+    expect(redactUpgradeProjection(redacted)).toEqual(redacted)
   })
 
   it('fails closed when candidate baby-info IPC hides acknowledged or pending originals', async () => {
@@ -430,30 +973,101 @@ describe('packaged in-place upgrade driver', () => {
       forbiddenRoots: [],
     }, {
       hashExecutable: async () => 'd'.repeat(64),
-      runPackagedSession: async () => ({
-        appVersion: '0.3.9',
-        hostArchitecture: process.arch,
-        canonicalUserDataPath: resolve(profileRoot),
-        publicView,
-      }),
+      runPackagedSession: async (context: Record<string, any>) => {
+        await recordMainProcessAttestation(context, profileRoot, '0.3.9')
+        return {
+          appVersion: '0.3.9',
+          hostArchitecture: process.arch,
+          canonicalUserDataPath: resolve(profileRoot),
+          publicView,
+        }
+      },
     })).rejects.toThrow(/runtime|baby|acknowledged|mutation/i)
   })
 
   it('whitelists diagnostics and never persists a thrown secret-bearing message', async () => {
     const clean = sanitizeUpgradeDiagnostic({
+      runId: RUN_ID,
       sourceSha: 'a'.repeat(40),
       executableSha256: 'b'.repeat(64),
+      executableSize: 123,
       appVersion: '0.3.9',
       hostArchitecture: 'x64',
       canonicalUserDataPath: '/nonce/profile',
       fixtureProjectionHash: 'c'.repeat(64),
+      firebaseSettingsEvidence: {
+        settingsBytesSha256: 'd'.repeat(64),
+        configSha256: V038_DEFAULT_FIREBASE_EVIDENCE.configSha256,
+        apiKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        configMatchesExactTag: true,
+      },
       phase: 'candidate-first-run',
       passed: true,
+      networkEvidence: {
+        rewrittenFirestore: 3,
+        externalBlocks: 1,
+        runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        firstExternalBlock: {
+          host: 'identity-toolkit',
+          pathname: '/v2/passwordPolicy',
+          method: 'POST',
+          queryParameterNames: ['clientType', 'key'],
+          configuredDemoKeyEquality: false,
+          requestKeySha256: 'a'.repeat(64),
+          hasFragment: false,
+          hasUserInfo: false,
+          blockReason: 'identity-request-shape',
+          rawUrl: 'https://must-disappear.example/?token=must-disappear',
+        },
+      },
+      failureUiState: {
+        familyChoiceVisible: true,
+        createSubmitVisible: true,
+        createSubmitDisabled: false,
+        errorClassPresent: true,
+        inviteVisible: false,
+        domText: 'must-disappear',
+      },
       password: 'must-disappear',
       firebaseApiKey: 'must-disappear',
     })
     expect(clean).not.toHaveProperty('password')
     expect(clean).not.toHaveProperty('firebaseApiKey')
+    expect(clean).toMatchObject({
+      schemaVersion: 2,
+      runId: RUN_ID,
+      executableSize: 123,
+      firebaseSettingsEvidence: {
+        settingsBytesSha256: 'd'.repeat(64),
+        configSha256: V038_DEFAULT_FIREBASE_EVIDENCE.configSha256,
+        apiKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        configMatchesExactTag: true,
+      },
+      networkEvidence: {
+        rewrittenFirestore: 3,
+        externalBlocks: 1,
+        runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        firstExternalBlock: {
+          host: 'identity-toolkit',
+          pathname: '/v2/passwordPolicy',
+          method: 'POST',
+          queryParameterNames: ['clientType', 'key'],
+          configuredDemoKeyEquality: false,
+          requestKeySha256: 'a'.repeat(64),
+          hasFragment: false,
+          hasUserInfo: false,
+          blockReason: 'identity-request-shape',
+        },
+      },
+      failureUiState: {
+        familyChoiceVisible: true,
+        createSubmitVisible: true,
+        createSubmitDisabled: false,
+        errorClassPresent: true,
+        inviteVisible: false,
+      },
+    })
+    expect(JSON.stringify(clean)).not.toContain('must-disappear')
 
     const root = tempRunRoot('failure')
     const { profileRoot, env } = platformProfile(root)
@@ -476,7 +1090,8 @@ describe('packaged in-place upgrade driver', () => {
       forbiddenRoots: [],
     }, {
       hashExecutable: async () => 'd'.repeat(64),
-      runPackagedSession: async () => {
+      runPackagedSession: async (context: Record<string, any>) => {
+        await recordMainProcessAttestation(context, profileRoot, '0.3.8')
         throw new Error('password=hunter2 firebaseApiKey=never-persist')
       },
     })).rejects.toThrow(/password=hunter2/)
@@ -484,5 +1099,39 @@ describe('packaged in-place upgrade driver', () => {
     expect(serialized).not.toContain('hunter2')
     expect(serialized).not.toContain('never-persist')
     expect(JSON.parse(serialized)).toMatchObject({ phase: 'baseline-initialize', passed: false })
+  })
+
+  it('sums network counters while retaining the first value-free blocked-request shape', () => {
+    const firstExternalBlock = {
+      host: 'identity-toolkit',
+      pathname: '/v2/passwordPolicy',
+      method: 'POST',
+      queryParameterNames: ['clientType', 'key', 'version'],
+      configuredDemoKeyEquality: true,
+      requestKeySha256: 'a'.repeat(64),
+      hasFragment: false,
+      hasUserInfo: false,
+      blockReason: 'identity-request-shape',
+    }
+    expect(mergeUpgradeNetworkEvidence([
+      {
+        rewrittenAuth: 1,
+        externalBlocks: 1,
+        runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+        firstExternalBlock,
+      },
+      {
+        rewrittenAuth: 2,
+        rewrittenFirestore: 3,
+        externalBlocks: 0,
+        runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+      },
+    ])).toEqual({
+      rewrittenAuth: 3,
+      rewrittenFirestore: 3,
+      externalBlocks: 1,
+      runtimeRequestKeySha256: V038_DEFAULT_FIREBASE_EVIDENCE.apiKeySha256,
+      firstExternalBlock,
+    })
   })
 })

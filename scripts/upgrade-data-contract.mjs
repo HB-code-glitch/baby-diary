@@ -13,11 +13,14 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
+  unlink,
   writeFile,
 } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { v5 as uuidv5 } from 'uuid'
+import { buildUpgradeFirebaseConfig } from './upgrade-firebase-continuity.mjs'
 
 const EVENT_CONTENT_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 const LEGACY_EVENT_NAMESPACE = '6ba7b811-9dad-11d1-80b4-00c04fd430c8'
@@ -31,10 +34,6 @@ const DEFAULT_MANIFEST_LIMITS = Object.freeze({
 })
 
 const V038_AUXILIARY_FILES = Object.freeze([
-  Object.freeze({
-    path: 'Local Storage/upgrade-auth-sentinel.json',
-    bytes: Buffer.from('{"version":1,"kind":"auth-continuity","account":"account-dad-v038"}\n', 'utf8'),
-  }),
   Object.freeze({
     path: 'auxiliary/legacy-attachment.bin',
     bytes: Buffer.from([0x42, 0x44, 0x30, 0x33, 0x38, 0x00, 0xff, 0x7f]),
@@ -230,20 +229,25 @@ function fixtureEvents() {
 }
 
 /** Exact data accepted and preserved by the published v0.3.8 stores. */
-export function buildV038Fixture() {
+export function buildV038Fixture({
+  profileUid = DAD.uid,
+  familyId = FAMILY_ID,
+} = {}) {
+  const acknowledgedBabyMutation = {
+    ...cloneJson(ACKNOWLEDGED_BABY_MUTATION),
+    familyId,
+    authorId: profileUid,
+  }
+  const pendingBabyMutation = {
+    ...cloneJson(PENDING_BABY_MUTATION),
+    familyId,
+  }
   const fixture = {
     settings: {
       baby: { name: '하루・ハル', birthdate: '2026-01-15', gender: 'girl' },
-      profile: { ...cloneJson(DAD), legacyContact: { label: '가족・家族', enabled: false } },
-      familyId: FAMILY_ID,
-      firebase: {
-        apiKey: 'fixture-api-key-never-log',
-        authDomain: 'demo-baby-diary.firebaseapp.com',
-        projectId: 'demo-baby-diary',
-        storageBucket: 'demo-baby-diary.appspot.com',
-        messagingSenderId: '38039',
-        appId: '1:38039:web:upgrade-fixture',
-      },
+      profile: { ...cloneJson(DAD), uid: profileUid, legacyContact: { label: '가족・家族', enabled: false } },
+      familyId,
+      firebase: buildUpgradeFirebaseConfig(),
       language: 'ko',
       theme: 'dark',
       upgradeOpaque: {
@@ -260,13 +264,64 @@ export function buildV038Fixture() {
       // acknowledged and one pending baby-info mutation to the v0.3.9 importer.
       babyInfoSync: {
         version: 1,
-        mutations: [cloneJson(ACKNOWLEDGED_BABY_MUTATION), cloneJson(PENDING_BABY_MUTATION)],
-        pendingMutationKeys: [PENDING_BABY_KEY],
+        mutations: [acknowledgedBabyMutation, pendingBabyMutation],
+        pendingMutationKeys: [getBabyInfoMutationKey(pendingBabyMutation)],
       },
     },
     events: fixtureEvents(),
   }
   return cloneJson(fixture)
+}
+
+/**
+ * The exact v0.3.8 renderer reads settings before any UI automation is
+ * possible. Seed only its released settings shape so the very first Firebase
+ * initialization targets the isolated demo project. Real Auth/Firestore state
+ * is then created by the packaged UI; no synthetic auth sentinel is written.
+ */
+export async function writeV038FirebaseBootstrap(profileRoot) {
+  const root = path.resolve(profileRoot)
+  const settings = {
+    baby: { name: '하루・ハル', birthdate: '2026-01-15', gender: 'girl' },
+    profile: { uid: '', name: DAD.name, role: DAD.role },
+    familyId: '',
+    firebase: buildUpgradeFirebaseConfig(),
+    language: 'ko',
+    theme: 'dark',
+  }
+  await mkdir(root, { recursive: true })
+  const rootStats = await lstat(root)
+  if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+    throw new Error('v0.3.8 Firebase bootstrap root must be a real directory')
+  }
+  if (normalizeFsPath(await realpath(root)) !== normalizeFsPath(root)) {
+    throw new Error('v0.3.8 Firebase bootstrap root traverses a link/reparse point')
+  }
+  const target = path.join(root, 'settings.json')
+  const temporary = path.join(root, `.settings.bootstrap-${process.pid}-${Date.now()}.tmp`)
+  let descriptor
+  try {
+    descriptor = await open(temporary, 'wx', 0o600)
+    await descriptor.writeFile(`${JSON.stringify(settings, null, 2)}\n`, 'utf8')
+    await descriptor.sync()
+    await descriptor.close()
+    descriptor = undefined
+    await rename(temporary, target)
+    const targetStats = await lstat(target)
+    if (!targetStats.isFile() || targetStats.isSymbolicLink()
+      || normalizeFsPath(await realpath(target)) !== normalizeFsPath(target)) {
+      throw new Error('v0.3.8 Firebase bootstrap settings path changed during publication')
+    }
+    if (process.platform !== 'win32') {
+      const directory = await open(root, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0))
+      try { await directory.sync() } finally { await directory.close() }
+    }
+  } catch (error) {
+    if (descriptor) await descriptor.close().catch(() => {})
+    await unlink(temporary).catch(() => {})
+    throw error
+  }
+  return cloneJson(settings)
 }
 
 function fixtureMonthFile(at) {
