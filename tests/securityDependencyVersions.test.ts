@@ -27,12 +27,15 @@ describe('security runtime dependency pins', () => {
   })
 
   it('keeps every setup-node job on the exact Electron 43 bundled Node version', () => {
-    const expectedVersions = Array(7).fill('24.18.0')
+    const versions = nodeVersions(workflowSource)
+    const setupNodeJobs = [...workflowSource.matchAll(/uses:\s*actions\/setup-node@/g)]
 
-    expect(nodeVersions(workflowSource)).toEqual(expectedVersions)
+    expect(versions).toHaveLength(setupNodeJobs.length)
+    expect(versions.length).toBeGreaterThan(0)
+    expect(new Set(versions)).toEqual(new Set(['24.18.0']))
 
     const node20Mutation = workflowSource.replace("node-version: '24.18.0'", "node-version: '20'")
-    expect(nodeVersions(node20Mutation)).not.toEqual(expectedVersions)
     expect(nodeVersions(node20Mutation)).toContain('20')
+    expect(new Set(nodeVersions(node20Mutation))).not.toEqual(new Set(['24.18.0']))
   })
 })

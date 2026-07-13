@@ -1,6 +1,10 @@
 {
   "name": "baby-diary",
   "version": "0.3.9",
+  "author": {
+    "name": "HB-code-glitch"
+  },
+  "description": "Baby Diary",
   "private": true,
   "main": "dist-electron/electron/main.js",
   "scripts": {
@@ -65,6 +69,7 @@
     ],
     "win": {
       "icon": "build/icon.ico",
+      "legalTrademarks": "HB-code-glitch",
       "target": [
         {
           "target": "nsis",
@@ -99,7 +104,8 @@
       ]
     },
     "nsis": {
-      "shortcutName": "베이비 다이어리"
+      "shortcutName": "Baby Diary",
+      "uninstallDisplayName": "Baby Diary"
     },
     "publish": [
       {

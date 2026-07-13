@@ -187,6 +187,15 @@ async function main() {
       // Playwright's _electron doesn't need a browser download
     })
 
+    const expectedPackagedArch = process.env.BABYDIARY_EXPECTED_E2E_ARCH
+    if (expectedPackagedArch) {
+      const actualPackagedArch = await app.evaluate(() => process.arch)
+      assert(
+        actualPackagedArch === expectedPackagedArch,
+        `packaged architecture is ${expectedPackagedArch} (got ${actualPackagedArch})`,
+      )
+    }
+
     const page = await app.firstWindow()
     await page.setViewportSize({ width: 960, height: 640 })
 

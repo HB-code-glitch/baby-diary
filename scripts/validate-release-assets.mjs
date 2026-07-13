@@ -2,6 +2,7 @@ import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import {
+  createReleaseNotes,
   expectedReleaseAssetNames,
   validateReleaseBundle,
   validateReleasePreUpload,
@@ -91,7 +92,7 @@ async function runPreUpload(payload, context) {
     action: result.action,
     tag: context.tag,
   }, null, 2)}\n`)
-  await writeText(notesPath, `${result.provenanceMarker}\n`)
+  await writeText(notesPath, createReleaseNotes(context))
   return result
 }
 

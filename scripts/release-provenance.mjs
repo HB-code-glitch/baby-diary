@@ -106,6 +106,18 @@ export function createSourceProvenanceMarker(context) {
   return `<!-- baby-diary-source-provenance:${encoded} -->`
 }
 
+export function createReleaseNotes(context) {
+  return [
+    '## Install Baby Diary',
+    '',
+    'The universal Mac installer supports both Apple Silicon and Intel Macs.',
+    'Download `INSTALL-ME-BabyDiary-Mac.dmg` for the recommended Mac installation.',
+    '',
+    createSourceProvenanceMarker(context),
+    '',
+  ].join('\n')
+}
+
 function parseSourceProvenance(body) {
   if (typeof body !== 'string') return { errors: ['release source provenance marker is missing'] }
   const matches = [...body.matchAll(SOURCE_MARKER_PATTERN)]

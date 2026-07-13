@@ -68,13 +68,35 @@ const REQUIRED_NODE_VERSION = '24.18.0'
 const RELEASE_TAG_CONDITION = "startsWith(github.ref, 'refs/tags/v')"
 const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
 const RELEASE_UPLOAD_TARGET_STEP_NAME = 'Verify release upload target is absent or a private draft'
-const REQUIRED_RELEASE_NEEDS = ['release-preflight', 'e2e-win', 'e2e-mac']
+const REQUIRED_RELEASE_NEEDS = [
+  'release-context',
+  'release-preflight',
+  'e2e-win',
+  'e2e-mac',
+  'package-mac',
+  'package-win',
+  'smoke-mac-arm64',
+  'smoke-mac-intel',
+  'smoke-win',
+]
+const RELEASE_MANIFEST_NEED: Record<string, string> = {
+  'release-win': 'manifest-win',
+  'release-mac': 'manifest-mac',
+}
 const REQUIRED_PUBLISH_NEEDS = ['build-mac', 'release-win', 'release-mac']
 const RELEASE_CRITICAL_JOBS = [
   'build-mac',
   'e2e-mac',
   'e2e-win',
+  'release-context',
   'release-preflight',
+  'package-mac',
+  'package-win',
+  'smoke-mac-arm64',
+  'smoke-mac-intel',
+  'smoke-win',
+  'manifest-mac',
+  'manifest-win',
   'release-win',
   'release-mac',
   'publish-release',
@@ -328,9 +350,10 @@ function releaseGateContractErrors(candidate: ReleaseWorkflow): string[] {
     if (job.if !== RELEASE_TAG_CONDITION) errors.push(`${jobName} must run only for v tags`)
     if (/always\s*\(/.test(job.if ?? '')) errors.push(`${jobName} must not bypass failed or skipped needs`)
     const needs = normalizedNeeds(job)
-    if (needs.length !== REQUIRED_RELEASE_NEEDS.length
-      || !REQUIRED_RELEASE_NEEDS.every(required => needs.includes(required))) {
-      errors.push(`${jobName} must need release-preflight, e2e-win, and e2e-mac`)
+    const requiredNeeds = [...REQUIRED_RELEASE_NEEDS, RELEASE_MANIFEST_NEED[jobName]]
+    if (needs.length !== requiredNeeds.length
+      || !requiredNeeds.every(required => needs.includes(required))) {
+      errors.push(`${jobName} must need preflight, both unpacked E2E jobs, both package jobs, all installed smoke jobs, and its verified manifest`)
     }
   }
 
@@ -375,9 +398,9 @@ function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
     errors.push('prepare draft must have exactly one create transition')
   }
 
-  for (const [jobName, platform, artifactName] of [
-    ['release-win', 'windows', 'release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}'],
-    ['release-mac', 'mac', 'release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}'],
+  for (const [jobName, packageJobName, platform, artifactName] of [
+    ['release-win', 'package-win', 'windows', 'release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}'],
+    ['release-mac', 'package-mac', 'mac', 'release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}'],
   ] as const) {
     const job = candidate.jobs[jobName]
     if (!job) {
@@ -386,8 +409,13 @@ function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
     }
     const commands = job.steps.flatMap(step => normalizedRun(step) ?? [])
     const commandText = commands.join('\n')
+    const packageCommandText = candidate.jobs[packageJobName]?.steps
+      .flatMap(step => normalizedRun(step) ?? [])
+      .join('\n') ?? ''
+    if (!packageCommandText.includes('--publish never')) {
+      errors.push(`${packageJobName} is missing: --publish never`)
+    }
     for (const fragment of [
-      '--publish never',
       `node scripts/create-release-manifest.mjs --platform ${platform}`,
       '--source-repository "${{ github.repository }}"',
       '--sha "${{ github.sha }}"',
@@ -505,7 +533,7 @@ function immutableReleaseOrchestrationErrors(candidate: ReleaseWorkflow): string
       '--staging-dir',
       '--source-repository "${{ github.repository }}"',
       '--release-repository "HB-code-glitch/baby-diary-releases"',
-      '--tag "${{ github.ref_name }}"',
+      '--tag "${{ needs.release-context.outputs.tag }}"',
       '--sha "${{ github.sha }}"',
       '--run-id "${{ github.run_id }}"',
       '--run-attempt "${{ github.run_attempt }}"',
@@ -603,7 +631,15 @@ describe('release workflow CI gates', () => {
       'build-mac',
       'e2e-mac',
       'e2e-win',
+      'release-context',
       'release-preflight',
+      'package-mac',
+      'package-win',
+      'smoke-mac-arm64',
+      'smoke-mac-intel',
+      'smoke-win',
+      'manifest-mac',
+      'manifest-win',
       'release-win',
       'release-mac',
       'publish-release',
@@ -890,7 +926,10 @@ describe('release workflow CI gates', () => {
 
   it.each(['release-win', 'release-mac'])('$jobName waits for preflight and both packaged E2E jobs', jobName => {
     const releaseJob = workflow.jobs[jobName]
-    expect(new Set(normalizedNeeds(releaseJob))).toEqual(new Set(REQUIRED_RELEASE_NEEDS))
+    expect(new Set(normalizedNeeds(releaseJob))).toEqual(new Set([
+      ...REQUIRED_RELEASE_NEEDS,
+      RELEASE_MANIFEST_NEED[jobName],
+    ]))
     expect(releaseJob.if).toBe(RELEASE_TAG_CONDITION)
     expect(releaseJob.if).not.toMatch(/always\s*\(/)
   })
