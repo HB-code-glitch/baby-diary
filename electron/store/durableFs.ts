@@ -132,6 +132,31 @@ export function isDurableTruncateUncertainError(error: unknown): error is Durabl
       && (error as { code?: unknown }).code === 'DURABLE_TRUNCATE_UNCERTAIN')
 }
 
+export class DurableTruncateCommittedError extends Error {
+  readonly code = 'DURABLE_TRUNCATE_COMMITTED_WITH_ERROR' as const
+  readonly committed = true as const
+  readonly fileSynced = true as const
+
+  constructor(
+    readonly target: string,
+    readonly truncatedLength: number,
+    readonly postCommitError: unknown,
+  ) {
+    super(
+      `Durable truncation committed the shorter file but a later operation failed: ${postCommitError instanceof Error ? postCommitError.message : String(postCommitError)}`,
+    )
+    this.name = 'DurableTruncateCommittedError'
+    Object.assign(this, { cause: postCommitError })
+  }
+}
+
+export function isDurableTruncateCommittedError(error: unknown): error is DurableTruncateCommittedError {
+  return error instanceof DurableTruncateCommittedError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'DURABLE_TRUNCATE_COMMITTED_WITH_ERROR')
+}
+
 function asBuffer(data: string | Uint8Array): Buffer {
   return typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)
 }
@@ -160,6 +185,19 @@ function ensureParent(target: string, ops: DurableFileOps): void {
   if (!ops.existsSync(parent)) ops.mkdirSync(parent, { recursive: true })
 }
 
+class DurableDirectorySyncCleanupError extends Error {
+  constructor(
+    readonly syncError: unknown,
+    readonly closeError: unknown,
+  ) {
+    super(
+      `Parent directory sync failed and its handle cleanup also failed: ${syncError instanceof Error ? syncError.message : String(syncError)}; ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+    )
+    this.name = 'DurableDirectorySyncCleanupError'
+    Object.assign(this, { cause: syncError })
+  }
+}
+
 function syncParentDirectory(
   target: string,
   ops: DurableFileOps,
@@ -171,11 +209,29 @@ function syncParentDirectory(
   if (platform === 'win32') return false
 
   const fd = ops.openSync(path.dirname(target), 'r')
+  let syncFailed = false
+  let syncError: unknown
   try {
     ops.fsyncSync(fd)
-  } finally {
-    ops.closeSync(fd)
+  } catch (error) {
+    syncFailed = true
+    syncError = error
   }
+
+  let closeFailed = false
+  let closeError: unknown
+  try {
+    ops.closeSync(fd)
+  } catch (error) {
+    closeFailed = true
+    closeError = error
+  }
+
+  if (syncFailed && closeFailed) {
+    throw new DurableDirectorySyncCleanupError(syncError, closeError)
+  }
+  if (syncFailed) throw syncError
+  if (closeFailed) throw closeError
   return true
 }
 
@@ -345,11 +401,18 @@ export function truncateDurableFileSync(
         closeError,
       )
     }
+    if (fileSyncCompleted && closeFailed) {
+      throw new DurableTruncateCommittedError(target, length, closeError)
+    }
     if (operationFailed) throw operationError
     throw closeError
   }
-  return {
-    fileSynced: true,
-    directorySynced: syncParentDirectory(target, ops, platform),
+
+  let directorySynced: boolean
+  try {
+    directorySynced = syncParentDirectory(target, ops, platform)
+  } catch (error) {
+    throw new DurableTruncateCommittedError(target, length, error)
   }
+  return { fileSynced: true, directorySynced }
 }

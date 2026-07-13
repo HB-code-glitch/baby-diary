@@ -28,6 +28,7 @@ import {
   appendDurableFileSync,
   isDurableAppendCommittedError,
   isDurableAppendUncertainError,
+  isDurableTruncateCommittedError,
   isDurableTruncateUncertainError,
   truncateDurableFileSync,
   type DurableFileOps,
@@ -334,6 +335,7 @@ export class BabyInfoJournal {
       // bytes from the failed attempt into this process's memory.
       if (isDurableAppendUncertainError(error)
         || isDurableAppendCommittedError(error)
+        || isDurableTruncateCommittedError(error)
         || isDurableTruncateUncertainError(error)) {
         this.storageUncertain = true
       }

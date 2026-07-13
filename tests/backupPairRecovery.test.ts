@@ -741,6 +741,93 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.existsSync(intentPath)).toBe(true)
   })
 
+  it('finalizes a primary-verified Windows intent when staging vanished but exact live and forensic evidence survive', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(130)])
+    writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'vanished-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'vanished-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'vanished-boot-2' }))
+      .toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+    fs.rmSync(stagingPath, { recursive: true, force: true })
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'vanished-boot-3',
+    })).not.toThrow()
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.existsSync(stagingPath)).toBe(false)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+    expect(liveSettings).toEqual(fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')))
+    expect(liveJournal).toEqual(snapshot.journal)
+  })
+
+  it.each([
+    ['mismatched', (root: string) => fs.writeFileSync(path.join(root, 'settings.json'), '{mixed live')],
+    ['missing', (root: string) => fs.unlinkSync(path.join(root, 'settings.json'))],
+  ])('fails closed when staging vanished and the primary-verified live pair is %s', (_case, damageLive) => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(_case === 'mismatched' ? 131 : 132)])
+    writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: `${_case}-boot-0` }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: `${_case}-boot-1` }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: `${_case}-boot-2` }))
+      .toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    fs.rmSync(path.join(tmpDir, RESTORE_STAGING_DIR), { recursive: true, force: true })
+    damageLive(tmpDir)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const liveSettings = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath) : null
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `${_case}-boot-3`,
+    })).toThrow(/live settings\/journal pair|does not match|settings\/journal/i)
+    expect(fs.existsSync(intentPath)).toBe(true)
+    expect(fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath) : null).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+  })
+
+  it('fails closed when staging vanished and primary-verified forensic evidence no longer matches', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(133)])
+    writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'forensic-gone-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'forensic-gone-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'forensic-gone-boot-2' }))
+      .toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    fs.rmSync(path.join(tmpDir, RESTORE_STAGING_DIR), { recursive: true, force: true })
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    const forensicArchive = path.join(forensicRoot, fs.readdirSync(forensicRoot)[0])
+    fs.appendFileSync(path.join(forensicArchive, 'settings.json'), 'tampered')
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'forensic-gone-boot-3',
+    })).toThrow(/forensic|checksum/i)
+    expect(fs.existsSync(intentPath)).toBe(true)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+  })
+
   it('bounds forensic archive enumeration before rejecting hostile extra entries', () => {
     writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(119)])
     const original = writeCorruptLivePair(tmpDir)

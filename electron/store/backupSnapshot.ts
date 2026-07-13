@@ -1032,20 +1032,32 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
   const intentPath = path.join(userDataPath, RESTORE_INTENT_FILE)
   if (!fs.existsSync(intentPath)) return false
   const stagingPath = path.join(userDataPath, RESTORE_STAGING_DIR)
-  if (!fs.existsSync(stagingPath)) {
-    throw new SettingsRecoveryError(
-      'Restore intent survived but its verified staging directory is missing.',
-      [],
-      false,
-      false,
-      true,
-    )
-  }
   let primaryWriteStarted = false
   let forensicConfirmed = platform !== 'win32'
   try {
     const parsedIntent = readTransactionFile(userDataPath, RESTORE_INTENT_FILE, { platform })
     const intentTransaction = normalizeTransaction(parsedIntent)
+    if (!fs.existsSync(stagingPath)) {
+      if (intentTransaction.phase !== 'primary-verified') {
+        throw new SettingsRecoveryError(
+          'Restore intent survived but its verified staging directory is missing.',
+          [],
+          false,
+          false,
+          true,
+        )
+      }
+
+      // The outer intent is durably published only after both live members
+      // verify. If cleanup removed the whole staging directory first, the
+      // immutable descriptors in that intent can still prove the live pair
+      // and its original forensic archive without rewriting either primary.
+      verifyPairDirectory(userDataPath, intentTransaction, { platform })
+      verifyForensicEvidence(userDataPath, intentTransaction, { platform, now: options.now })
+      forensicConfirmed = true
+      removeIntentDurably(userDataPath, platform, ops)
+      return true
+    }
     let transaction = intentTransaction
     let pair = verifyPairDirectory(stagingPath, intentTransaction, { platform })
 

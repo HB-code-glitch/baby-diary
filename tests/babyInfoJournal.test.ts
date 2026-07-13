@@ -547,6 +547,97 @@ describe('main-process baby-info append-only journal', () => {
     })
   })
 
+  it('latches read-only after torn-tail truncation commits but its file close fails', () => {
+    const confirmed = mutation(70_009, 'family-truncate-close')
+    const candidate = mutation(70_010, 'family-truncate-close')
+    new BabyInfoJournal(tmpDir).ingest('family-truncate-close', [confirmed], [])
+
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const confirmedBytes = fs.readFileSync(journalPath)
+    fs.appendFileSync(journalPath, '{"version":1,"type":"mutation"')
+
+    const realOpen = fs.openSync.bind(fs)
+    const targets = new Map<number, string>()
+    let truncationCompleted = false
+    let truncateFileSynced = false
+    let closeFailed = false
+    let journalWrites = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, String(target))
+        return fd
+      },
+      writeSync(fd, buffer, offset, length, position) {
+        if (targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) journalWrites += 1
+        return fs.writeSync(fd, buffer, offset, length, position)
+      },
+      ftruncateSync(fd, length) {
+        fs.ftruncateSync(fd, length)
+        if (targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) truncationCompleted = true
+      },
+      fsyncSync(fd) {
+        fs.fsyncSync(fd)
+        if (truncationCompleted && targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          truncateFileSynced = true
+        }
+      },
+      closeSync(fd) {
+        const target = targets.get(fd)
+        targets.delete(fd)
+        fs.closeSync(fd)
+        if (!closeFailed
+          && truncationCompleted
+          && truncateFileSynced
+          && target?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          closeFailed = true
+          throw new Error('injected committed truncate close failure')
+        }
+      },
+    }
+    const journal = new (BabyInfoJournal as unknown as new (
+      root: string,
+      options: { durableFs: DurableFileOps },
+    ) => BabyInfoJournal)(tmpDir, { durableFs })
+
+    let caught: unknown
+    try { journal.ingest('family-truncate-close', [candidate], []) } catch (error) { caught = error }
+
+    expect(caught).toMatchObject({
+      code: 'DURABLE_TRUNCATE_COMMITTED_WITH_ERROR',
+      committed: true,
+      fileSynced: true,
+      truncatedLength: confirmedBytes.byteLength,
+    })
+    expect(closeFailed).toBe(true)
+    expect(journalWrites).toBe(0)
+    expect(fs.readFileSync(journalPath)).toEqual(confirmedBytes)
+    expect(journal.getSummary('family-truncate-close')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: confirmed,
+    })
+    expect(() => journal.listPending('family-truncate-close', { limit: 10 }))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+    expect(() => journal.ingest('family-truncate-close', [candidate], []))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+    expect(journalWrites).toBe(0)
+
+    const restarted = new BabyInfoJournal(tmpDir)
+    expect(restarted.getSummary('family-truncate-close')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: confirmed,
+    })
+    restarted.ingest('family-truncate-close', [candidate], [])
+    expect(restarted.getSummary('family-truncate-close')).toMatchObject({
+      mutationCount: 2,
+      pendingCount: 2,
+      winner: candidate,
+    })
+  })
+
   it('fails closed when an append is durable but its handle close reports an error', () => {
     const confirmed = mutation(70_006, 'family-close')
     const committed = mutation(70_007, 'family-close')

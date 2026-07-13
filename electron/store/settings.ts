@@ -41,6 +41,7 @@ import {
   isDurableAppendCommittedError,
   isDurableAppendUncertainError,
   isDurableReplaceCommittedError,
+  isDurableTruncateCommittedError,
   isDurableTruncateUncertainError,
   type DurableWriteOptions,
 } from './durableFs'
@@ -78,25 +79,6 @@ export class SettingsLocalMutationRecoveryError extends SettingsRecoveryError {
   }
 }
 
-export class SettingsJournalMutationRecoveryError extends SettingsRecoveryError {
-  readonly localDataModified = true as const
-  readonly readOnly = true as const
-  readonly journalEvidence: {
-    kind: 'legacy-import' | 'legacy-local-pair' | 'user-edit' | 'reconcile'
-    durable: true
-  }
-
-  constructor(
-    kind: 'legacy-import' | 'legacy-local-pair' | 'user-edit' | 'reconcile',
-    cause: unknown,
-  ) {
-    super('Baby-info journal changes became durable before settings projection failed.', [], false, true)
-    this.name = 'SettingsJournalMutationRecoveryError'
-    this.journalEvidence = { kind, durable: true }
-    Object.assign(this, { cause })
-  }
-}
-
 export class SettingsCommittedWriteRecoveryError extends SettingsRecoveryError {
   readonly localDataModified = true as const
   readonly readOnly = true as const
@@ -113,6 +95,29 @@ export class SettingsCommittedWriteRecoveryError extends SettingsRecoveryError {
   }
 }
 
+export class SettingsJournalMutationRecoveryError extends SettingsRecoveryError {
+  readonly localDataModified = true as const
+  readonly readOnly = true as const
+  readonly journalEvidence: {
+    kind: 'legacy-import' | 'legacy-local-pair' | 'user-edit' | 'reconcile'
+    durable: true
+  }
+  readonly settingsEvidence?: SettingsCommittedWriteRecoveryError['settingsEvidence']
+
+  constructor(
+    kind: 'legacy-import' | 'legacy-local-pair' | 'user-edit' | 'reconcile',
+    cause: unknown,
+  ) {
+    super('Baby-info journal changes became durable before settings projection failed.', [], false, true)
+    this.name = 'SettingsJournalMutationRecoveryError'
+    this.journalEvidence = { kind, durable: true }
+    if (cause instanceof SettingsCommittedWriteRecoveryError) {
+      this.settingsEvidence = cause.settingsEvidence
+    }
+    Object.assign(this, { cause })
+  }
+}
+
 export class SettingsJournalStorageRecoveryError extends SettingsRecoveryError {
   readonly localDataModified = true as const
   readonly readOnly = true as const
@@ -125,6 +130,7 @@ export class SettingsJournalStorageRecoveryError extends SettingsRecoveryError {
 
   constructor(cause: unknown) {
     const committed = isDurableAppendCommittedError(cause)
+      || isDurableTruncateCommittedError(cause)
     super('Baby-info journal storage changed but the process could not safely continue.', [], false, true)
     this.name = 'SettingsJournalStorageRecoveryError'
     this.journalEvidence = {
@@ -140,6 +146,7 @@ export class SettingsJournalStorageRecoveryError extends SettingsRecoveryError {
 function isJournalStorageRecoveryError(error: unknown): boolean {
   return isDurableAppendCommittedError(error)
     || isDurableAppendUncertainError(error)
+    || isDurableTruncateCommittedError(error)
     || isDurableTruncateUncertainError(error)
     || (typeof error === 'object'
       && error !== null
