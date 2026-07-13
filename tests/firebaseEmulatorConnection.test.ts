@@ -86,7 +86,7 @@ describe('Firebase emulator connection', () => {
     exposeBridge(bridge)
   })
 
-  it('connects Auth and Firestore emulators before persistence or credential work', async () => {
+  it('connects Auth and Firestore emulators without changing restored auth persistence', async () => {
     const { initFirebase } = await import('../src/sync/firebase')
 
     await expect(initFirebase(demoConfig)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
@@ -97,12 +97,10 @@ describe('Firebase emulator connection', () => {
       'http://127.0.0.1:9099',
       { disableWarnings: true },
     )
-    expect(firebase.connectFirestoreEmulator.mock.invocationCallOrder[0]).toBeLessThan(
-      firebase.setPersistence.mock.invocationCallOrder[0],
-    )
     expect(firebase.connectAuthEmulator.mock.invocationCallOrder[0]).toBeLessThan(
-      firebase.setPersistence.mock.invocationCallOrder[0],
+      firebase.connectFirestoreEmulator.mock.invocationCallOrder[0],
     )
+    expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
   it('does not connect emulators in an ordinary production renderer', async () => {
@@ -113,7 +111,7 @@ describe('Firebase emulator connection', () => {
 
     expect(firebase.connectFirestoreEmulator).not.toHaveBeenCalled()
     expect(firebase.connectAuthEmulator).not.toHaveBeenCalled()
-    expect(firebase.setPersistence).toHaveBeenCalledWith(firebase.auth, firebase.local)
+    expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
   it('rejects an invalid requested bridge before creating a Firebase app', async () => {
@@ -146,7 +144,7 @@ describe('Firebase emulator connection', () => {
     await expect(initFirebase(demoConfig)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
     expect(firebase.initializeApp).toHaveBeenCalledTimes(2)
     expect(firebase.connectFirestoreEmulator).toHaveBeenCalledTimes(2)
-    expect(firebase.setPersistence).toHaveBeenCalledOnce()
+    expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
   it('connects each emulator once per app lifecycle', async () => {
