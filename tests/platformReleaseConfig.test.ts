@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 const root = resolve(import.meta.dirname, '..')
 const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
 
 function loadReleaseConfig() {
   const configPath = resolve(root, 'electron-builder.release.cjs')
@@ -21,7 +22,7 @@ function loadReleaseConfig() {
       MAC_CSC_NAME: 'Developer ID Application: HB-code-glitch (ABCDEF1234)',
       WIN_CSC_LINK: 'fixture-win-link',
       WIN_CSC_KEY_PASSWORD: 'fixture-win-password',
-      WIN_EXPECTED_PUBLISHER: 'HB-code-glitch',
+      WIN_EXPECTED_PUBLISHER: expectedPublisher,
     },
   })
   expect(result.status, result.stderr).toBe(0)
@@ -84,7 +85,7 @@ describe('release-only electron-builder trust configuration', () => {
       cscKeyPassword: 'fixture-win-password',
       legalTrademarks: 'HB-code-glitch',
       signtoolOptions: {
-        publisherName: 'HB-code-glitch',
+        publisherName: expectedPublisher,
         signingHashAlgorithms: ['sha256'],
         rfc3161TimeStampServer: 'http://timestamp.digicert.com',
       },
@@ -129,5 +130,14 @@ describe('release signing operator documentation', () => {
     expect(source).toContain('Developer ID Application')
     expect(source).toContain('signed_package_dry_run')
     expect(source).toContain('does not create, update, upload, or publish a GitHub release')
+    expect(source).toContain('`platform-release-signing`')
+    expect(source).toContain('`platform-release-publish`')
+    expect(source).toContain('`Required reviewers`')
+    expect(source).toContain('`Prevent self-review`')
+    expect(source).toContain('`Selected branches and tags`')
+    expect(source).toContain('`master` 브랜치')
+    expect(source).toContain('`v*` 태그')
+    expect(source).toContain('전체 Subject DN')
+    expect(source).toContain('CN=')
   })
 })

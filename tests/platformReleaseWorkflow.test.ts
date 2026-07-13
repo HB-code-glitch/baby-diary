@@ -15,6 +15,7 @@ type Step = {
 type Job = {
   needs?: string | string[]
   if?: string
+  environment?: string
   'runs-on': string
   outputs?: Record<string, string>
   steps: Step[]
@@ -34,13 +35,15 @@ const yaml = createRequire(import.meta.url)('js-yaml') as { load(source: string)
 const source = readFileSync('.github/workflows/build.yml', 'utf8')
 const workflow = yaml.load(source) as Workflow
 
-const TAG_ONLY = "startsWith(github.ref, 'refs/tags/v')"
-const SIGNED_RUN = "startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)"
+const PRODUCTION_TAG_PUSH = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+const SIGNED_RUN = "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)"
 const RUN_SCOPE = '${{ github.run_id }}-${{ github.run_attempt }}'
 const MAC_PACKAGE_ARTIFACT = `signed-mac-packages-${RUN_SCOPE}`
 const WIN_PACKAGE_ARTIFACT = `signed-windows-packages-${RUN_SCOPE}`
 const MAC_VERIFIED_MANIFEST = `verified-release-manifest-mac-${RUN_SCOPE}`
 const WIN_VERIFIED_MANIFEST = `verified-release-manifest-windows-${RUN_SCOPE}`
+const SIGNING_ENVIRONMENT = 'platform-release-signing'
+const PUBLISH_ENVIRONMENT = 'platform-release-publish'
 
 const signedJobs = [
   'release-context',
@@ -56,6 +59,15 @@ const signedJobs = [
 const tagMutationJobs = ['release-preflight', 'release-mac', 'release-win', 'publish-release']
 const allReleaseJobs = [...signedJobs, ...tagMutationJobs]
 const allSmokeJobs = ['smoke-mac-arm64', 'smoke-mac-intel', 'smoke-win']
+const secretJobEnvironments: Record<string, string> = {
+  'package-mac': SIGNING_ENVIRONMENT,
+  'package-win': SIGNING_ENVIRONMENT,
+  'smoke-win': SIGNING_ENVIRONMENT,
+  'release-preflight': PUBLISH_ENVIRONMENT,
+  'release-mac': PUBLISH_ENVIRONMENT,
+  'release-win': PUBLISH_ENVIRONMENT,
+  'publish-release': PUBLISH_ENVIRONMENT,
+}
 
 function clone(): Workflow {
   return structuredClone(workflow)
@@ -110,7 +122,17 @@ function workflowErrors(candidate: Workflow): string[] {
       errors.push(`missing ${jobName}`)
       continue
     }
-    if (job.if !== TAG_ONLY) errors.push(`${jobName} must remain tag-only`)
+    if (job.if !== PRODUCTION_TAG_PUSH) errors.push(`${jobName} must remain production tag-push-only`)
+  }
+  for (const [jobName, environment] of Object.entries(secretJobEnvironments)) {
+    if (candidate.jobs[jobName]?.environment !== environment) {
+      errors.push(`${jobName} must use protected environment ${environment}`)
+    }
+  }
+  for (const [jobName, job] of Object.entries(candidate.jobs)) {
+    if (JSON.stringify(job).includes('secrets.') && !(jobName in secretJobEnvironments)) {
+      errors.push(`${jobName} consumes a secret without an approved protected environment`)
+    }
   }
 
   const macPackage = candidate.jobs['package-mac']
@@ -279,6 +301,36 @@ describe('signed platform release workflow', () => {
     ].sort())
   })
 
+  it.each([
+    { eventName: 'push', ref: 'refs/tags/v0.3.9', dryRun: false, signed: true, mutation: true },
+    { eventName: 'push', ref: 'refs/heads/master', dryRun: false, signed: false, mutation: false },
+    { eventName: 'workflow_dispatch', ref: 'refs/heads/master', dryRun: false, signed: false, mutation: false },
+    { eventName: 'workflow_dispatch', ref: 'refs/heads/master', dryRun: true, signed: true, mutation: false },
+    { eventName: 'workflow_dispatch', ref: 'refs/tags/v0.3.9', dryRun: false, signed: false, mutation: false },
+    { eventName: 'workflow_dispatch', ref: 'refs/tags/v0.3.9', dryRun: true, signed: true, mutation: false },
+  ])('enforces the release truth table for $eventName $ref dryRun=$dryRun', ({ eventName, ref, dryRun, signed, mutation }) => {
+    const evaluate = (condition: string | undefined) => {
+      const expression = new Function(
+        'github',
+        'inputs',
+        'startsWith',
+        `return Boolean(${condition ?? 'true'})`,
+      ) as (
+        github: { event_name: string; ref: string },
+        inputs: { signed_package_dry_run: boolean },
+        startsWith: (value: string, prefix: string) => boolean,
+      ) => boolean
+      return expression(
+        { event_name: eventName, ref },
+        { signed_package_dry_run: dryRun },
+        (value, prefix) => value.startsWith(prefix),
+      )
+    }
+
+    for (const jobName of signedJobs) expect(evaluate(workflow.jobs[jobName].if), jobName).toBe(signed)
+    for (const jobName of tagMutationJobs) expect(evaluate(workflow.jobs[jobName].if), jobName).toBe(mutation)
+  })
+
   it('rejects missing or bypassed signing credential gates', () => {
     const missing = clone()
     const gate = namedStep(missing.jobs['package-mac'], 'Fail closed on missing Mac release credentials')!
@@ -288,6 +340,20 @@ describe('signed platform release workflow', () => {
     const bypass = clone()
     namedStep(bypass.jobs['package-win'], 'Fail closed on missing Windows release credentials')!['continue-on-error'] = true
     expect(workflowErrors(bypass)).toContain('package-win step must not continue on error')
+  })
+
+  it('binds every secret consumer to the split signing or publish environment', () => {
+    expect(Object.fromEntries(
+      Object.entries(workflow.jobs)
+        .filter(([, job]) => JSON.stringify(job).includes('secrets.'))
+        .map(([jobName, job]) => [jobName, job.environment]),
+    )).toEqual(secretJobEnvironments)
+
+    const unprotected = clone()
+    delete unprotected.jobs['package-mac'].environment
+    expect(workflowErrors(unprotected)).toContain(
+      `package-mac must use protected environment ${SIGNING_ENVIRONMENT}`,
+    )
   })
 
   it('rejects signing, notarization, verification, and manifest ordering regressions', () => {
@@ -334,9 +400,9 @@ describe('signed platform release workflow', () => {
 
   it('rejects fail-open always/continue-on-error mutations', () => {
     const always = clone()
-    always.jobs['release-win'].if = `${TAG_ONLY} && always()`
+    always.jobs['release-win'].if = `${PRODUCTION_TAG_PUSH} && always()`
     expect(workflowErrors(always)).toEqual(expect.arrayContaining([
-      'release-win must remain tag-only',
+      'release-win must remain production tag-push-only',
       'release-win must not bypass failed dependencies',
     ]))
 

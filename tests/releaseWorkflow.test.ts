@@ -65,7 +65,7 @@ function parseWorkflow(source = workflowSource): ReleaseWorkflow {
 
 const workflow = parseWorkflow()
 const REQUIRED_NODE_VERSION = '24.18.0'
-const RELEASE_TAG_CONDITION = "startsWith(github.ref, 'refs/tags/v')"
+const RELEASE_TAG_CONDITION = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
 const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
 const RELEASE_UPLOAD_TARGET_STEP_NAME = 'Verify release upload target is absent or a private draft'
 const REQUIRED_RELEASE_NEEDS = [
@@ -260,7 +260,7 @@ function releasePreflightContractErrors(candidate: ReleaseWorkflow): string[] {
   const job = candidate.jobs['release-preflight']
   if (!job) return ['missing release-preflight']
   if (job['runs-on'] !== 'ubuntu-latest') errors.push('release-preflight must run on ubuntu-latest')
-  if (job.if !== RELEASE_TAG_CONDITION) errors.push('release-preflight must run only for v tags')
+  if (job.if !== RELEASE_TAG_CONDITION) errors.push('release-preflight must run only for pushed v tags')
 
   const checkoutIndex = job.steps.findIndex(step => step.uses === 'actions/checkout@v4')
   const validationSteps = job.steps.filter(step => step.name === RELEASE_PREFLIGHT_STEP_NAME)
@@ -347,7 +347,7 @@ function releaseGateContractErrors(candidate: ReleaseWorkflow): string[] {
       errors.push(`missing ${jobName}`)
       continue
     }
-    if (job.if !== RELEASE_TAG_CONDITION) errors.push(`${jobName} must run only for v tags`)
+    if (job.if !== RELEASE_TAG_CONDITION) errors.push(`${jobName} must run only for pushed v tags`)
     if (/always\s*\(/.test(job.if ?? '')) errors.push(`${jobName} must not bypass failed or skipped needs`)
     const needs = normalizedNeeds(job)
     const requiredNeeds = [...REQUIRED_RELEASE_NEEDS, RELEASE_MANIFEST_NEED[jobName]]

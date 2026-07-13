@@ -21,7 +21,9 @@ const version = '0.3.9'
 const releaseDir = '/fixture/release'
 const expectedIdentity = 'Developer ID Application: HB-code-glitch (ABCDEF1234)'
 const expectedTeamId = 'ABCDEF1234'
-const expectedPublisher = 'HB-code-glitch'
+const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
+const reorderedExpectedPublisher = 'C=KR, O=Expected\\, Publisher, CN=HB-code-glitch'
+const sameCommonNameDifferentOrganization = 'CN=HB-code-glitch, O="Different, Publisher", C=KR'
 
 const macCredentials = {
   MAC_CSC_LINK: 'fixture-p12',
@@ -121,6 +123,14 @@ describe('release credential fail-closed gate', () => {
     ]))
   })
 
+  it('rejects a bare common name instead of accepting it as the expected certificate Subject', async () => {
+    const requiredCredentialErrors = await api('requiredCredentialErrors')
+    expect(requiredCredentialErrors('windows', {
+      ...windowsCredentials,
+      WIN_EXPECTED_PUBLISHER: 'HB-code-glitch',
+    })).toContain('WIN_EXPECTED_PUBLISHER must be a full Subject DN containing CN')
+  })
+
   it('rejects an ad-hoc, development, or malformed Mac identity before packaging', async () => {
     const requiredCredentialErrors = await api('requiredCredentialErrors')
     for (const identity of ['-', 'Apple Development: Example', 'Developer ID Installer: Example']) {
@@ -217,10 +227,26 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
     expect(calls).toEqual(['setup', 'portable', 'installed-main', 'elevate'])
   })
 
+  it('normalizes full Subject DN attribute order for executables and updater metadata', async () => {
+    const verifyWindowsRelease = await api('verifyWindowsRelease')
+    const yaml = windowsYamlFixtures()
+    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, {
+      exists: async () => true,
+      inspectExecutable: async (descriptor: { role: string }) => ({
+        ...validWindowsReport(descriptor.role),
+        publisher: reorderedExpectedPublisher,
+      }),
+      readBytes: async () => setupBytes(),
+      readYaml: async (path: string) => path.endsWith('latest.yml')
+        ? yaml.latest
+        : { ...yaml.appUpdate, publisherName: [reorderedExpectedPublisher] },
+    })).resolves.toEqual({ executableCount: 4 })
+  })
+
   it.each([
     ['unsigned', { status: 'NotSigned' }, /valid Authenticode/],
     ['invalid chain', { status: 'HashMismatch' }, /valid Authenticode/],
-    ['wrong subject', { publisher: 'Attacker' }, /expected publisher/],
+    ['same CN but different organization', { publisher: sameCommonNameDifferentOrganization }, /expected publisher/],
     ['untimestamped', { timestamped: false }, /trusted timestamp/],
   ])('rejects a %s executable', async (_label, mutation, message) => {
     const verifyWindowsRelease = await api('verifyWindowsRelease')

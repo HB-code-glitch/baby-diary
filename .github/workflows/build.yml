@@ -108,7 +108,7 @@ jobs:
 
   release-context:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     outputs:
       version: ${{ steps.context.outputs.version }}
       tag: ${{ steps.context.outputs.tag }}
@@ -130,7 +130,8 @@ jobs:
   release-preflight:
     needs: release-context
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -199,7 +200,8 @@ jobs:
   package-mac:
     needs: release-context
     runs-on: macos-15
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -285,7 +287,8 @@ jobs:
   package-win:
     needs: release-context
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -327,7 +330,7 @@ jobs:
   smoke-mac-arm64:
     needs: [release-context, package-mac]
     runs-on: macos-15
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -353,7 +356,7 @@ jobs:
   smoke-mac-intel:
     needs: [release-context, package-mac]
     runs-on: macos-15-intel
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -379,7 +382,8 @@ jobs:
   smoke-win:
     needs: [release-context, package-win]
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -408,7 +412,7 @@ jobs:
   manifest-mac:
     needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -440,7 +444,7 @@ jobs:
   manifest-win:
     needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run)
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -482,7 +486,8 @@ jobs:
       - smoke-win
       - manifest-mac
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -540,7 +545,8 @@ jobs:
       - smoke-win
       - manifest-win
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -588,7 +594,8 @@ jobs:
   publish-release:
     needs: [build-mac, release-win, release-mac]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

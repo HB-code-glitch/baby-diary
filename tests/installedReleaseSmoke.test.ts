@@ -54,6 +54,9 @@ describe('installed Windows release smoke script', () => {
   it('checks trusted publisher/updater metadata, runs both E2E suites, and always uninstalls', () => {
     expect(script).toContain('Get-AuthenticodeSignature')
     expect(script).toContain('TimeStamperCertificate')
+    expect(script).toContain('$signature.SignerCertificate.Subject')
+    expect(script).not.toContain('GetNameInfo')
+    expect(script).toContain('normalizePublisherSubject')
     expect(script).toContain('WIN_EXPECTED_PUBLISHER')
     expect(script).toContain('publisherName')
     expect(script).toContain('BABYDIARY_E2E_EXECUTABLE')

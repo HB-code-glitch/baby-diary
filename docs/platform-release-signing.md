@@ -6,8 +6,21 @@
 
 ## 보호 환경과 secret
 
-아래 값은 GitHub의 보호된 릴리스 환경에 저장하고, 로그나 저장소 파일에
-평문으로 기록하지 않는다. 하나라도 없으면 패키징 전에 작업이 실패한다.
+두 GitHub Environment를 아래의 정확한 이름으로 만든다. secret은 로그나 저장소
+파일에 평문으로 기록하지 않으며, 하나라도 없으면 패키징 전에 작업이 실패한다.
+
+### `platform-release-signing`
+
+Apple/Windows 인증서와 공증 secret만 저장한다. 보호 규칙에서
+`Required reviewers`와 `Prevent self-review`를 켜고, `Selected branches and tags`를
+선택해 `master` 브랜치와 `v*` 태그만 허용한다. 수동 서명 dry-run은 `master`를
+ref로 선택한다. 이 환경에는 `RELEASE_TOKEN`을 저장하지 않는다.
+
+### `platform-release-publish`
+
+`RELEASE_TOKEN`만 저장한다. `Required reviewers`, `Prevent self-review`,
+`Selected branches and tags`를 켜고 `v*` 태그만 허용한다. 브랜치는 허용하지
+않는다. 이 환경에는 인증서나 공증 secret을 저장하지 않는다.
 
 ### macOS
 
@@ -26,8 +39,10 @@
 - `WIN_CSC_LINK`: electron-builder가 읽을 수 있는 Authenticode PFX 인증서 링크
   또는 base64 데이터
 - `WIN_CSC_KEY_PASSWORD`: 위 PFX의 암호
-- `WIN_EXPECTED_PUBLISHER`: 인증서 Subject와 설치된 `app-update.yml`에서
-  일치시킬 정확한 publisher 이름(현재 `HB-code-glitch`)
+- `WIN_EXPECTED_PUBLISHER`: 인증서의 전체 Subject DN. 예:
+  `CN=HB-code-glitch, O=Example Company, C=KR`. bare CN(`HB-code-glitch`)만 넣지
+  않는다. Authenticode 검사와 electron-builder의 `app-update.yml.publisherName`은
+  속성 순서를 정규화한 뒤 이 전체 DN이 정확히 같은지 확인한다.
 
 ### GitHub 릴리스
 
@@ -35,8 +50,9 @@
   사용하는 GitHub 토큰. 태그 실행에서만 필요하며 수동 dry-run 작업에는
   주입하지 않는다.
 
-보호 환경은 승인자를 두고 태그 정책을 적용한다. 인증서와 API 키는 만료 전에
-교체하며, 교체 뒤에는 먼저 수동 dry-run으로 서명·공증·설치 검증을 확인한다.
+두 보호 환경 모두 관리자 우회를 끄는 것을 권장한다. 인증서와 API 키는 만료 전에
+교체하며, 교체 뒤에는 먼저 `master`의 수동 dry-run으로 서명·공증·설치 검증을
+확인한다.
 
 ## 수동 서명 dry-run
 

@@ -29,11 +29,9 @@ function Assert-TrustedSignature {
   if ($null -eq $signature.TimeStamperCertificate) {
     throw "Trusted timestamp is missing: $Path"
   }
-  $publisher = $signature.SignerCertificate.GetNameInfo(
-    [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
-    $false
-  )
-  if ($publisher -cne $ExpectedPublisher) {
+  $publisher = $signature.SignerCertificate.Subject
+  & node -e "import('./scripts/platform-release-verification.mjs').then(m => { const actual=m.normalizePublisherSubject(process.argv[1]); const expected=m.normalizePublisherSubject(process.argv[2]); if(expected===null || actual!==expected) throw new Error('Authenticode publisher Subject DN mismatch') })" $publisher $ExpectedPublisher
+  if ($LASTEXITCODE -ne 0) {
     throw "Authenticode publisher does not match WIN_EXPECTED_PUBLISHER: $Path"
   }
 }
@@ -100,7 +98,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Installed application PE architecture validation failed' }
 
   $appUpdatePath = Join-Path $installLocation 'resources\app-update.yml'
-  & node -e "const fs=require('node:fs'); const yaml=require('js-yaml'); const value=yaml.load(fs.readFileSync(process.argv[1],'utf8')).publisherName; const names=Array.isArray(value)?value:[value]; if(!names.includes(process.argv[2])) throw new Error('installed app-update.yml publisherName mismatch')" $appUpdatePath $ExpectedPublisher
+  & node -e "const fs=require('node:fs'); const yaml=require('js-yaml'); import('./scripts/platform-release-verification.mjs').then(m => { const value=yaml.load(fs.readFileSync(process.argv[1],'utf8')).publisherName; const names=Array.isArray(value)?value:[value]; const expected=m.normalizePublisherSubject(process.argv[2]); if(expected===null || !names.some(name => m.normalizePublisherSubject(name)===expected)) throw new Error('installed app-update.yml publisherName mismatch') })" $appUpdatePath $ExpectedPublisher
   if ($LASTEXITCODE -ne 0) { throw 'Installed updater publisherName validation failed' }
 
   $env:BABYDIARY_E2E_EXECUTABLE = $installedExecutable

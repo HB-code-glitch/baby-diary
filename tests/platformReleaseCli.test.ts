@@ -26,6 +26,8 @@ const macCredentials = {
   APPLE_API_ISSUER: '00000000-0000-0000-0000-000000000000',
 }
 
+const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
+
 function minimalPe(machine = 0x8664) {
   const bytes = Buffer.alloc(256)
   bytes.write('MZ', 0, 'ascii')
@@ -163,7 +165,7 @@ describe('native platform inspection adapters', () => {
       run: async (command: string, args: string[], options?: { env?: Record<string, string> }) => {
         calls.push([command, args, options])
         return {
-          stdout: JSON.stringify({ status: 'Valid', publisher: 'HB-code-glitch', timestamped: true }),
+          stdout: JSON.stringify({ status: 'Valid', publisher: expectedPublisher, timestamped: true }),
           stderr: '',
         }
       },
@@ -171,12 +173,14 @@ describe('native platform inspection adapters', () => {
     })
     expect(report).toEqual({
       status: 'Valid',
-      publisher: 'HB-code-glitch',
+      publisher: expectedPublisher,
       timestamped: true,
       machine: 'x64',
     })
     expect(calls[0][0]).toMatch(/powershell(?:\.exe)?$/i)
     expect(calls[0][1].join(' ')).not.toContain('Baby Diary.exe')
+    expect(calls[0][1].join(' ')).toContain('$signature.SignerCertificate.Subject')
+    expect(calls[0][1].join(' ')).not.toContain('GetNameInfo')
     expect(calls[0][2]?.env).toEqual({
       BABYDIARY_AUTHENTICODE_PATH: 'C:\\release\\Baby Diary.exe',
     })

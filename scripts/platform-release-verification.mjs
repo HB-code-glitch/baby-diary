@@ -31,6 +31,77 @@ function present(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+function parsePublisherSubject(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) return null
+  const source = value.trim()
+  const entries = []
+  let key = ''
+  let token = ''
+  let readingValue = false
+  let quoted = false
+
+  function appendEntry() {
+    const normalizedKey = key.trim().toUpperCase()
+    const normalizedValue = token.trim().normalize('NFC')
+    if (!/^(?:[A-Z][A-Z0-9.-]*|\d+(?:\.\d+)+)$/.test(normalizedKey) || normalizedValue.length === 0) {
+      return false
+    }
+    entries.push([normalizedKey, normalizedValue])
+    key = ''
+    token = ''
+    readingValue = false
+    return true
+  }
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\') {
+      if (index + 1 >= source.length) return null
+      const hexadecimal = source.slice(index + 1, index + 3)
+      const decoded = /^[0-9a-f]{2}$/i.test(hexadecimal)
+        ? String.fromCharCode(Number.parseInt(hexadecimal, 16))
+        : source[index + 1]
+      if (readingValue) token += decoded
+      else key += decoded
+      index += /^[0-9a-f]{2}$/i.test(hexadecimal) ? 2 : 1
+      continue
+    }
+    if (character === '"') {
+      quoted = !quoted
+      continue
+    }
+    if (!quoted && !readingValue && character === '=') {
+      readingValue = true
+      continue
+    }
+    if (!quoted && readingValue && [',', ';', '+'].includes(character)) {
+      if (!appendEntry()) return null
+      continue
+    }
+    if (readingValue) token += character
+    else key += character
+  }
+
+  if (quoted || !readingValue || !appendEntry()) return null
+  return entries
+}
+
+export function normalizePublisherSubject(value) {
+  const entries = parsePublisherSubject(value)
+  if (entries == null || !entries.some(([key]) => key === 'CN')) return null
+  entries.sort(([leftKey, leftValue], [rightKey, rightValue]) => {
+    if (leftKey !== rightKey) return leftKey < rightKey ? -1 : 1
+    if (leftValue === rightValue) return 0
+    return leftValue < rightValue ? -1 : 1
+  })
+  return JSON.stringify(entries)
+}
+
+function publisherSubjectsEqual(actual, expected) {
+  const normalizedExpected = normalizePublisherSubject(expected)
+  return normalizedExpected !== null && normalizePublisherSubject(actual) === normalizedExpected
+}
+
 export function requiredCredentialErrors(platform, env) {
   const names = platform === 'mac' ? MAC_CREDENTIALS : WINDOWS_CREDENTIALS
   const errors = names
@@ -43,6 +114,11 @@ export function requiredCredentialErrors(platform, env) {
     if (!identity.startsWith('Developer ID Application: ') || !identity.includes(`(${teamId})`)) {
       errors.push('MAC_CSC_NAME must be a Developer ID Application identity containing MAC_EXPECTED_TEAM_ID')
     }
+  }
+  if (platform === 'windows'
+    && present(env.WIN_EXPECTED_PUBLISHER)
+    && normalizePublisherSubject(env.WIN_EXPECTED_PUBLISHER) === null) {
+    errors.push('WIN_EXPECTED_PUBLISHER must be a full Subject DN containing CN')
   }
 
   return errors
@@ -130,7 +206,9 @@ function validateWindowsReport(descriptor, report, expectedPublisher) {
   const errors = []
   const label = descriptor.path
   if (report.status !== 'Valid') errors.push(`${label}: expected valid Authenticode status`)
-  if (report.publisher !== expectedPublisher) errors.push(`${label}: expected publisher does not match`)
+  if (!publisherSubjectsEqual(report.publisher, expectedPublisher)) {
+    errors.push(`${label}: expected publisher does not match`)
+  }
   if (report.timestamped !== true) errors.push(`${label}: trusted timestamp is missing`)
   if (descriptor.role === 'installed-main' && report.machine !== 'x64') {
     errors.push(`${label}: installed application must be x64`)
@@ -154,7 +232,7 @@ function validateWindowsUpdaterMetadata({ version, expectedPublisher, setupBytes
   const expectedSha512 = createHash('sha512').update(setupBytes).digest('base64')
   const expectedSize = setupBytes.length
 
-  if (!publisherNames(appUpdate?.publisherName).includes(expectedPublisher)) {
+  if (!publisherNames(appUpdate?.publisherName).some(name => publisherSubjectsEqual(name, expectedPublisher))) {
     errors.push('app-update.yml publisherName does not contain the expected publisher')
   }
 
@@ -375,7 +453,7 @@ const AUTHENTICODE_SCRIPT = `& {
   if ([string]::IsNullOrWhiteSpace($FilePath)) { throw 'BABYDIARY_AUTHENTICODE_PATH is required' }
   $signature = Get-AuthenticodeSignature -LiteralPath $FilePath
   $publisher = if ($null -ne $signature.SignerCertificate) {
-    $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+    $signature.SignerCertificate.Subject
   } else { $null }
   [pscustomobject]@{
     status = $signature.Status.ToString()
