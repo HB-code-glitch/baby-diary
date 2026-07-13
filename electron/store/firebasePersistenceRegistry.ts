@@ -20,6 +20,8 @@ const MAX_LEVELDB_MANIFEST_BYTES = 16 * 1024 * 1024
 const MAX_LEVELDB_FILE_BYTES = 64 * 1024 * 1024
 const MAX_LEVELDB_LIVE_FILES = 128
 const MAX_LEVELDB_TOTAL_BYTES = 256 * 1024 * 1024
+const MAX_LEVELDB_LOGICAL_BLOCK_BYTES = 64 * 1024 * 1024
+const MAX_LEVELDB_TABLE_BLOCKS = 16_384
 const LEGACY_DIAGNOSTIC = 'preexisting-profile-assumed-v0.3.8; all digest namespaces remain untouched'
 const FNV_DIAGNOSTIC = 'preexisting-profile-proved-unreleased-fnv; public v0.3.8 namespace absent'
 const FRESH_DIAGNOSTIC = 'fresh profile retired the legacy namespace before Firebase initialization'
@@ -525,6 +527,11 @@ interface AuthKeyVersion {
   present: boolean
 }
 
+interface LevelDbSequenceRange {
+  first: LevelDbSequence
+  last: LevelDbSequence
+}
+
 function compareLevelDbSequence(left: LevelDbSequence, right: LevelDbSequence): number {
   if (left.high !== right.high) return left.high < right.high ? -1 : 1
   if (left.low === right.low) return 0
@@ -563,7 +570,7 @@ function inspectLevelDbWriteBatch(
   batch: Buffer,
   authKeys: ReadonlySet<string>,
   versions: Map<string, AuthKeyVersion>,
-): void {
+): LevelDbSequenceRange | null {
   if (batch.length < 12) throw new Error('Firebase LevelDB WriteBatch is truncated')
   const baseSequence: LevelDbSequence = {
     low: batch.readUInt32LE(0),
@@ -574,7 +581,7 @@ function inspectLevelDbWriteBatch(
   }
   const count = batch.readUInt32LE(8)
   if (count > 1_000_000) throw new Error('Firebase LevelDB WriteBatch count is invalid')
-  if (count > 0) addLevelDbSequence(baseSequence, count - 1)
+  const lastSequence = count > 0 ? addLevelDbSequence(baseSequence, count - 1) : null
   let offset = 12
   for (let index = 0; index < count; index += 1) {
     if (offset >= batch.length) throw new Error('Firebase LevelDB WriteBatch record is truncated')
@@ -604,11 +611,36 @@ function inspectLevelDbWriteBatch(
     }
   }
   if (offset !== batch.length) throw new Error('Firebase LevelDB WriteBatch has trailing bytes')
+  return lastSequence ? { first: baseSequence, last: lastSequence } : null
 }
 
-function snappyDecode(bytes: Buffer): Buffer {
+interface LevelDbTableScanBudget {
+  logicalBytes: number
+  blockCount: number
+}
+
+function reserveLevelDbLogicalBytes(budget: LevelDbTableScanBudget, bytes: number): void {
+  const total = budget.logicalBytes + bytes
+  if (!Number.isSafeInteger(bytes) || bytes < 0
+    || !Number.isSafeInteger(total) || total > MAX_LEVELDB_LOGICAL_BLOCK_BYTES) {
+    throw new Error('Firebase LevelDB aggregate logical block bytes exceed the budget')
+  }
+  budget.logicalBytes = total
+}
+
+function reserveLevelDbTableBlocks(budget: LevelDbTableScanBudget, count: number): void {
+  const total = budget.blockCount + count
+  if (!Number.isSafeInteger(count) || count < 0
+    || !Number.isSafeInteger(total) || total > MAX_LEVELDB_TABLE_BLOCKS) {
+    throw new Error('Firebase LevelDB aggregate table block count exceeds the budget')
+  }
+  budget.blockCount = total
+}
+
+function snappyDecode(bytes: Buffer, budget: LevelDbTableScanBudget): Buffer {
   const expected = readVarint(bytes, 0)
   if (expected.value > MAX_LEVELDB_FILE_BYTES) throw new Error('Firebase LevelDB Snappy block is too large')
+  reserveLevelDbLogicalBytes(budget, expected.value)
   const output = Buffer.allocUnsafe(expected.value)
   let inputOffset = expected.offset
   let outputOffset = 0
@@ -676,19 +708,52 @@ function readBlockHandle(bytes: Buffer, start: number): { handle: LevelDbBlockHa
   return { handle: { offset: blockOffset.value, size: size.value }, offset: size.offset }
 }
 
-function readLevelDbTableBlock(table: Buffer, handle: LevelDbBlockHandle): Buffer {
+function levelDbBlockRange(
+  table: Buffer,
+  handle: LevelDbBlockHandle,
+): { start: number; end: number } {
   const trailerOffset = handle.offset + handle.size
-  if (handle.offset < 0 || handle.size < 0 || trailerOffset + 5 > table.length - 48) {
+  const end = trailerOffset + 5
+  if (!Number.isSafeInteger(handle.offset) || !Number.isSafeInteger(handle.size)
+    || handle.offset < 0 || handle.size < 0
+    || !Number.isSafeInteger(trailerOffset) || !Number.isSafeInteger(end)
+    || end > table.length - 48) {
     throw new Error('Firebase LevelDB table block handle is invalid')
   }
+  return { start: handle.offset, end }
+}
+
+function assertNonOverlappingLevelDbBlockHandles(
+  table: Buffer,
+  handles: readonly LevelDbBlockHandle[],
+): void {
+  const ranges = handles.map(handle => levelDbBlockRange(table, handle))
+    .sort((left, right) => left.start - right.start || left.end - right.end)
+  for (let index = 1; index < ranges.length; index += 1) {
+    if (ranges[index].start < ranges[index - 1].end) {
+      throw new Error('Firebase LevelDB table block handles duplicate or overlap')
+    }
+  }
+}
+
+function readLevelDbTableBlock(
+  table: Buffer,
+  handle: LevelDbBlockHandle,
+  budget: LevelDbTableScanBudget,
+): Buffer {
+  const { end } = levelDbBlockRange(table, handle)
+  const trailerOffset = end - 5
   const stored = table.subarray(handle.offset, trailerOffset)
   const compression = table[trailerOffset]
   const expectedCrc = table.readUInt32LE(trailerOffset + 1)
   if (maskedCrc32c(Buffer.concat([stored, Buffer.from([compression])])) !== expectedCrc) {
     throw new Error('Firebase LevelDB table block checksum is invalid')
   }
-  if (compression === 0) return Buffer.from(stored)
-  if (compression === 1) return snappyDecode(stored)
+  if (compression === 0) {
+    reserveLevelDbLogicalBytes(budget, stored.length)
+    return Buffer.from(stored)
+  }
+  if (compression === 1) return snappyDecode(stored, budget)
   throw new Error('Firebase LevelDB table compression is unsupported')
 }
 
@@ -730,6 +795,7 @@ function inspectLevelDbTable(
   table: Buffer,
   authKeys: ReadonlySet<string>,
   versions: Map<string, AuthKeyVersion>,
+  budget: LevelDbTableScanBudget,
 ): void {
   if (table.length < 48) throw new Error('Firebase LevelDB table footer is truncated')
   const footer = table.subarray(table.length - 48)
@@ -737,15 +803,31 @@ function inspectLevelDbTable(
   if (!footer.subarray(40).equals(magic)) throw new Error('Firebase LevelDB table magic is invalid')
   const meta = readBlockHandle(footer, 0)
   const index = readBlockHandle(footer, meta.offset)
-  const indexBlock = readLevelDbTableBlock(table, index.handle)
+  reserveLevelDbTableBlocks(budget, 2)
+  assertNonOverlappingLevelDbBlockHandles(table, [meta.handle, index.handle])
+  const metaBlock = readLevelDbTableBlock(table, meta.handle, budget)
+  const indexBlock = readLevelDbTableBlock(table, index.handle, budget)
+  const metaHandles: LevelDbBlockHandle[] = []
   const dataHandles: LevelDbBlockHandle[] = []
+  visitLevelDbBlockEntries(metaBlock, (_key, value) => {
+    const decoded = readBlockHandle(value, 0)
+    if (decoded.offset !== value.length) throw new Error('Firebase LevelDB metaindex handle has trailing bytes')
+    reserveLevelDbTableBlocks(budget, 1)
+    metaHandles.push(decoded.handle)
+  })
   visitLevelDbBlockEntries(indexBlock, (_key, value) => {
     const decoded = readBlockHandle(value, 0)
     if (decoded.offset !== value.length) throw new Error('Firebase LevelDB index handle has trailing bytes')
+    reserveLevelDbTableBlocks(budget, 1)
     dataHandles.push(decoded.handle)
   })
+  assertNonOverlappingLevelDbBlockHandles(
+    table,
+    [meta.handle, index.handle, ...metaHandles, ...dataHandles],
+  )
+  for (const handle of metaHandles) readLevelDbTableBlock(table, handle, budget)
   for (const handle of dataHandles) {
-    const dataBlock = readLevelDbTableBlock(table, handle)
+    const dataBlock = readLevelDbTableBlock(table, handle, budget)
     visitLevelDbBlockEntries(dataBlock, (internalKey) => {
       if (internalKey.length < 8) throw new Error('Firebase LevelDB internal key is truncated')
       const trailerOffset = internalKey.length - 8
@@ -859,20 +941,24 @@ function scanBrowserPersistenceEvidence(
   if (!currentMatch) throw new Error('Firebase LevelDB CURRENT is invalid')
   const manifestBytes = readProtected(currentMatch[1], MAX_LEVELDB_MANIFEST_BYTES)
   const manifest = parseLevelDbManifest(manifestBytes)
-  const liveNames: string[] = []
-  const liveLogNumbers = new Set<number>()
-  if (manifest.previousLogNumber !== null && manifest.previousLogNumber > 0) {
-    liveLogNumbers.add(manifest.previousLogNumber)
-  }
-  if (manifest.logNumber !== null && manifest.logNumber > 0) {
-    liveLogNumbers.add(manifest.logNumber)
-  }
-  for (const logNumber of Array.from(liveLogNumbers).sort((left, right) => left - right)) {
-    liveNames.push(`${String(logNumber).padStart(6, '0')}.log`)
-  }
-  if (liveLogNumbers.size + manifest.tableNumbers.size > MAX_LEVELDB_LIVE_FILES) {
+  const minimumLogNumber = manifest.logNumber ?? 0
+  const previousLogNumber = manifest.previousLogNumber ?? 0
+  const liveLogs = entriesBefore.flatMap(name => {
+    const match = /^([0-9]{6,})\.log$/.exec(name)
+    if (!match) return []
+    const fileNumber = Number(match[1])
+    if (!Number.isSafeInteger(fileNumber) || fileNumber <= 0
+      || `${String(fileNumber).padStart(6, '0')}.log` !== name) {
+      throw new Error('Firebase LevelDB log file name is invalid')
+    }
+    return fileNumber >= minimumLogNumber || fileNumber === previousLogNumber
+      ? [{ fileNumber, name }]
+      : []
+  }).sort((left, right) => left.fileNumber - right.fileNumber)
+  if (liveLogs.length + manifest.tableNumbers.size > MAX_LEVELDB_LIVE_FILES) {
     throw new Error('Firebase LevelDB manifest has too many live files')
   }
+  const liveTableNames: string[] = []
   for (const tableNumber of Array.from(manifest.tableNumbers).sort((left, right) => left - right)) {
     const prefix = String(tableNumber).padStart(6, '0')
     const ldb = `${prefix}.ldb`
@@ -880,20 +966,35 @@ function scanBrowserPersistenceEvidence(
     const hasLdb = entriesBefore.includes(ldb)
     const hasSst = entriesBefore.includes(sst)
     if (hasLdb === hasSst) throw new Error('Firebase LevelDB live table path is ambiguous or missing')
-    liveNames.push(hasLdb ? ldb : sst)
+    liveTableNames.push(hasLdb ? ldb : sst)
   }
   const publicKey = `firebase:authUser:${configValue.apiKey}:${LEGACY_FIREBASE_APP_NAME}`
   const fnvKey = `firebase:authUser:${configValue.apiKey}:${getUnreleasedFNVFirebaseAppName(configValue)}`
   const authKeys = new Set([publicKey, fnvKey])
   const versions = new Map<string, AuthKeyVersion>()
-  for (const name of liveNames) {
-    if (!entriesBefore.includes(name)) throw new Error('Firebase LevelDB live file is missing')
+  const tableBudget: LevelDbTableScanBudget = { logicalBytes: 0, blockCount: 0 }
+  let previousWalSequence: LevelDbSequence | null = null
+  for (const { name } of liveLogs) {
     const bytes = readProtected(name, MAX_LEVELDB_FILE_BYTES)
-    if (name.endsWith('.log')) {
-      for (const batch of readLevelDbLogRecords(bytes)) inspectLevelDbWriteBatch(batch, authKeys, versions)
-    } else {
-      inspectLevelDbTable(bytes, authKeys, versions)
+    for (const batch of readLevelDbLogRecords(bytes)) {
+      const range = inspectLevelDbWriteBatch(batch, authKeys, versions)
+      if (!range) continue
+      if (previousWalSequence) {
+        const expected = addLevelDbSequence(previousWalSequence, 1)
+        if (compareLevelDbSequence(range.first, expected) !== 0) {
+          throw new Error('Firebase LevelDB live WAL sequences are not contiguous and ordered')
+        }
+      }
+      previousWalSequence = range.last
     }
+  }
+  for (const name of liveTableNames) {
+    inspectLevelDbTable(
+      readProtected(name, MAX_LEVELDB_FILE_BYTES),
+      authKeys,
+      versions,
+      tableBudget,
+    )
   }
 
   const entriesAfter = fs.readdirSync(levelDbPath).sort()

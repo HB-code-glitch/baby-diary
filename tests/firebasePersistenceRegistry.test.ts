@@ -287,6 +287,85 @@ function makeLevelDbAuthTable(options: {
   return Buffer.concat(parts)
 }
 
+interface LevelDbTestBlock {
+  stored: Buffer
+  compression: 0 | 1
+}
+
+interface LevelDbTestBlockHandle {
+  offset: number
+  size: number
+}
+
+function makeLevelDbTableFixture(
+  dataBlocks: LevelDbTestBlock[],
+  transformHandles: (handles: LevelDbTestBlockHandle[]) => LevelDbTestBlockHandle[] = handles => handles,
+): Buffer {
+  const parts: Buffer[] = []
+  let offset = 0
+  const append = ({ stored, compression }: LevelDbTestBlock): LevelDbTestBlockHandle => {
+    const handle = { offset, size: stored.length }
+    const compressionBytes = Buffer.from([compression])
+    const trailer = Buffer.alloc(5)
+    trailer[0] = compression
+    const checksum = crc32c(Buffer.concat([stored, compressionBytes]))
+    trailer.writeUInt32LE((((checksum >>> 15) | (checksum << 17)) + 0xa282ead8) >>> 0, 1)
+    parts.push(stored, trailer)
+    offset += stored.length + trailer.length
+    return handle
+  }
+  const dataHandles = dataBlocks.map(append)
+  const metaHandle = append({ stored: makeLevelDbBlock([]), compression: 0 })
+  const indexEntries = transformHandles(dataHandles).map((handle, index) => {
+    const key = Buffer.alloc(4)
+    key.writeUInt32BE(index)
+    return {
+      key,
+      value: Buffer.concat([encodeVarint(handle.offset), encodeVarint(handle.size)]),
+    }
+  })
+  const indexHandle = append({ stored: makeLevelDbBlock(indexEntries), compression: 0 })
+  const footer = Buffer.alloc(48)
+  Buffer.concat([
+    encodeVarint(metaHandle.offset),
+    encodeVarint(metaHandle.size),
+    encodeVarint(indexHandle.offset),
+    encodeVarint(indexHandle.size),
+  ]).copy(footer)
+  Buffer.from([0x57, 0xfb, 0x80, 0x8b, 0x24, 0x75, 0x47, 0xdb]).copy(footer, 40)
+  parts.push(footer)
+  return Buffer.concat(parts)
+}
+
+function makeSnappyEmptyLevelDbBlock(logicalBytes: number): Buffer {
+  if (logicalBytes < 8 || logicalBytes % 4 !== 0) {
+    throw new Error('Snappy LevelDB test block size must be a positive restart-array size')
+  }
+  const restartCount = (logicalBytes - 4) / 4
+  const header = encodeVarint(logicalBytes)
+  const zerosRemaining = logicalBytes - 5
+  const copyCount = Math.ceil(zerosRemaining / 64)
+  const encoded = Buffer.alloc(header.length + 2 + copyCount * 3 + 5)
+  header.copy(encoded)
+  let offset = header.length
+  // One literal zero seeds distance-one copies for the all-zero restart array.
+  encoded[offset] = 0x00
+  encoded[offset + 1] = 0x00
+  offset += 2
+  let unwrittenZeros = zerosRemaining
+  while (unwrittenZeros > 0) {
+    const length = Math.min(64, unwrittenZeros)
+    encoded[offset] = ((length - 1) << 2) | 0x02
+    encoded[offset + 1] = 0x01
+    encoded[offset + 2] = 0x00
+    offset += 3
+    unwrittenZeros -= length
+  }
+  encoded[offset] = 0x0c
+  encoded.writeUInt32LE(restartCount, offset + 1)
+  return encoded
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -344,14 +423,14 @@ describe('main-owned Firebase persistence registry', () => {
       .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
   })
 
-  it('ignores an orphan WAL containing the released key when CURRENT/MANIFEST does not own it', () => {
+  it('ignores an older orphan WAL containing the released key when CURRENT/MANIFEST retired it', () => {
     const root = makeRoot('orphan-auth-log')
     const releasedLog = makeChromiumIndexedDbAuthLog(
       DEFAULT_FIREBASE_CONFIG.apiKey,
       LEGACY_FIREBASE_APP_NAME,
     )
     const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
-    writeFileSync(join(levelDb, '000006.log'), releasedLog)
+    writeFileSync(join(levelDb, '000003.log'), releasedLog)
 
     const registry = FirebasePersistenceRegistry.open(
       root,
@@ -372,7 +451,11 @@ describe('main-owned Firebase persistence registry', () => {
       join(levelDb, 'MANIFEST-000001'),
       makeLevelDbManifest({ logNumber: 6, previousLogNumber: 4 }),
     )
-    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 1 },
+    ))
 
     const registry = FirebasePersistenceRegistry.open(
       root,
@@ -380,6 +463,176 @@ describe('main-owned Firebase persistence registry', () => {
     )
 
     expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('applies a higher live WAL tombstone over an older Auth value in an SST', () => {
+    const root = makeRoot('higher-live-wal-delete')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 2 },
+    ))
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbAuthTable({
+      apiKey: DEFAULT_FIREBASE_CONFIG.apiKey,
+      appName: LEGACY_FIREBASE_APP_NAME,
+      sequenceLow: 1,
+      operation: 'put',
+    }))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 3, operation: 'delete' },
+    ))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('inherits Auth evidence created in a higher live WAL', () => {
+    const root = makeRoot('higher-live-wal-create')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 1 },
+    ))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2 },
+    ))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('merges several higher live WALs in file and sequence order', () => {
+    const root = makeRoot('several-higher-live-wals')
+    writeSettingsEvidence(root, customConfig)
+    const fnvAppName = getUnreleasedFNVFirebaseAppName(customConfig)
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      customConfig.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 1 },
+    ))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
+      customConfig.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2, operation: 'delete' },
+    ))
+    writeFileSync(join(levelDb, '000009.log'), makeChromiumIndexedDbAuthLog(
+      customConfig.apiKey,
+      fnvAppName,
+      { sequenceLow: 3 },
+    ))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(customConfig)).toMatchObject({
+      version: 2,
+      appName: fnvAppName,
+    })
+  })
+
+  it('fails closed on a checksum-invalid higher live WAL', () => {
+    const root = makeRoot('corrupt-higher-live-wal')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 1 },
+    ))
+    const corrupt = makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2 },
+    )
+    corrupt[0] ^= 0xff
+    writeFileSync(join(levelDb, '000006.log'), corrupt)
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/checksum|physical record|invalid/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it.each([
+    ['gap', 3],
+    ['duplicate', 1],
+  ])('fails closed on a %s between ordered live WAL WriteBatch sequences', (_label, nextSequence) => {
+    const root = makeRoot(`higher-live-wal-${_label}`)
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 1 },
+    ))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: nextSequence },
+    ))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/sequence|ordered|contiguous/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('detects a stable-directory inventory change while reading a higher live WAL', () => {
+    const root = makeRoot('higher-live-wal-inventory-change')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 1 },
+    ))
+    const highLogPath = join(levelDb, '000006.log')
+    writeFileSync(highLogPath, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2 },
+    ))
+    let attacked = false
+
+    expect(() => detectPreexistingFirebaseProfile(root, {
+      afterFirstFileRead: target => {
+        if (!attacked && target === highLogPath) {
+          attacked = true
+          writeFileSync(join(levelDb, '000007.log'), makeChromiumIndexedDbAuthLog(
+            'late',
+            'late',
+            { sequenceLow: 3 },
+          ))
+        }
+      },
+    })).toThrow(/directory identity changed|changed while reading/i)
+    expect(attacked).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('detects an identical-byte atomic swap of a higher live WAL', () => {
+    const root = makeRoot('higher-live-wal-atomic-swap')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      'unrelated',
+      'unrelated',
+      { sequenceLow: 1 },
+    ))
+    const highLogPath = join(levelDb, '000006.log')
+    const displaced = join(levelDb, '000006.displaced.log')
+    const original = makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 2 },
+    )
+    writeFileSync(highLogPath, original)
+    let attacked = false
+
+    expect(() => detectPreexistingFirebaseProfile(root, {
+      afterFirstFileRead: target => {
+        if (!attacked && target === highLogPath) {
+          attacked = true
+          renameSync(highLogPath, displaced)
+          writeFileSync(highLogPath, original)
+        }
+      },
+    })).toThrow(/changed while reading|identity changed|directory identity/i)
+    expect(attacked).toBe(true)
+    expect(readFileSync(displaced)).toEqual(original)
+    expect(readFileSync(highLogPath)).toEqual(original)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
   it('does not resurrect a retired WAL after the rotation manifest clears prev_log_number', () => {
@@ -432,6 +685,64 @@ describe('main-owned Firebase persistence registry', () => {
 
     expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName)
       .toBe(getDigestFirebasePersistenceIdentity(DEFAULT_FIREBASE_CONFIG).appName)
+  })
+
+  it('rejects duplicate data-block handles in a live SST', () => {
+    const root = makeRoot('duplicate-sst-block-handle')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+    const emptyBlock = { stored: makeLevelDbBlock([]), compression: 0 as const }
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbTableFixture(
+      [emptyBlock],
+      handles => [handles[0], handles[0]],
+    ))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/duplicate|overlap/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects overlapping data-block handles in a live SST', () => {
+    const root = makeRoot('overlapping-sst-block-handles')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+    const emptyBlock = { stored: makeLevelDbBlock([]), compression: 0 as const }
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbTableFixture(
+      [emptyBlock],
+      handles => [handles[0], { offset: handles[0].offset + 1, size: handles[0].size - 1 }],
+    ))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/duplicate|overlap/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects a live SST whose aggregate block count exceeds the scanner budget', () => {
+    const root = makeRoot('sst-block-count-budget')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+    const empty = makeLevelDbBlock([])
+    // 16,383 data blocks plus metaindex and index exceed the 16,384-block aggregate budget.
+    const dataBlocks = Array.from({ length: 16_383 }, () => ({
+      stored: empty,
+      compression: 0 as const,
+    }))
+    writeFileSync(join(levelDb, '000005.ldb'), makeLevelDbTableFixture(dataBlocks))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/block count|too many.*blocks|budget/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects Snappy blocks whose aggregate logical bytes exceed the scanner budget', () => {
+    const root = makeRoot('sst-logical-byte-budget')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog('unrelated', 'unrelated'))
+    const compressedEmptyBlock = makeSnappyEmptyLevelDbBlock(33 * 1024 * 1024)
+    const table = makeLevelDbTableFixture([{ stored: compressedEmptyBlock, compression: 1 }])
+    expect(table.length).toBeLessThan(4 * 1024 * 1024)
+    writeFileSync(join(levelDb, '000005.ldb'), table)
+    writeFileSync(join(levelDb, '000007.ldb'), table)
+    writeFileSync(
+      join(levelDb, 'MANIFEST-000001'),
+      makeLevelDbManifest({ logNumber: 4, tableNumbers: [5, 7] }),
+    )
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/logical|decoded|decompressed|budget/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
   it('rejects a checksum-invalid live WAL without leaking its key or value', () => {
@@ -574,8 +885,16 @@ describe('main-owned Firebase persistence registry', () => {
     const root = makeRoot('public-and-fnv-evidence')
     writeSettingsEvidence(root, customConfig)
     const log = Buffer.concat([
-      makeChromiumIndexedDbAuthLog(customConfig.apiKey, getUnreleasedFNVFirebaseAppName(customConfig)),
-      makeChromiumIndexedDbAuthLog(customConfig.apiKey, LEGACY_FIREBASE_APP_NAME),
+      makeChromiumIndexedDbAuthLog(
+        customConfig.apiKey,
+        getUnreleasedFNVFirebaseAppName(customConfig),
+        { sequenceLow: 1 },
+      ),
+      makeChromiumIndexedDbAuthLog(
+        customConfig.apiKey,
+        LEGACY_FIREBASE_APP_NAME,
+        { sequenceLow: 2 },
+      ),
     ])
     writeV038AuthLevelDb(root, log)
 
@@ -689,10 +1008,10 @@ describe('main-owned Firebase persistence registry', () => {
     const fnvAppName = getUnreleasedFNVFirebaseAppName(customConfig)
     writeV038AuthLevelDb(root, Buffer.concat([
       makeChromiumIndexedDbAuthLog(customConfig.apiKey, LEGACY_FIREBASE_APP_NAME, {
-        sequenceLow: 2,
+        sequenceLow: 1,
       }),
       makeChromiumIndexedDbAuthLog(customConfig.apiKey, fnvAppName, {
-        sequenceLow: 1,
+        sequenceLow: 2,
       }),
       makeChromiumIndexedDbAuthLog(customConfig.apiKey, fnvAppName, {
         sequenceLow: 3,
