@@ -95,10 +95,10 @@ The visible UI shows at most three priority cards. A `more` disclosure reveals r
 `evaluateFever` routes recorded temperature conservatively:
 
 - Under 3 months and 38.0°C or higher: urgent same-day/emergency assessment.
-- If birthdate/age is unknown and 38.0°C or higher: the app cannot exclude a young infant and instructs the caregiver to contact a medical service now while confirming age.
+- If birthdate/age is unknown and the recorded temperature is 38.0°C or higher **or below 36.0°C**: the app cannot exclude a young infant/newborn and instructs the caregiver to contact a medical service now while confirming age.
 - 3–6 months and 38.3°C or higher: contact a clinician; 39.0°C or higher is at least an intermediate/high-risk warning for prompt assessment.
-- Older than 6 months: temperature height alone does not determine serious illness; symptoms and red flags drive urgency.
-- Newborn 0–27 days: temperature below 35.5°C, inability to feed, marked lethargy, seizure, grunting, or severe chest indrawing also prompts urgent assessment.
+- Older than 6 months: temperature height alone does not determine serious illness; symptoms and red flags drive emergency urgency. A recorded temperature of 39.4°C or higher may still trigger a neutral `contact a clinician` recommendation from AAP guidance, but it must not be labelled as evidence of serious illness by itself.
+- Newborn 0–27 days: temperature below 36.0°C, inability to feed, marked lethargy, seizure, grunting, or severe chest indrawing also prompts urgent assessment.
 - Any age: pale/blue/mottled colour, difficult or grunting breathing, marked drowsiness or poor response, non-blanching rash, seizure, stiff neck or bulging fontanelle, severe dehydration, or bilious/projectile vomiting prompts emergency help. Korean and Japanese emergency action identifies 119.
 - Fever lasting 5 days or longer needs medical assessment; worsening, caregiver concern, poor drinking, or dehydration warrants earlier advice.
 - Remove tepid sponging. Avoid underdressing or over-wrapping. Offer fluids.

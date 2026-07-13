@@ -95,9 +95,9 @@ Assert:
 
 - `<90 days && >=38.0` routes urgent.
 - age 3–6 calendar months and `>=38.3` prompts clinician contact, while `>=39.0` has the stronger risk classification.
-- after completed calendar month 6, temperature height alone does not mark serious illness.
-- unknown age with `>=38.0` cannot exclude a young infant and prompts immediate medical contact while asking the caregiver to confirm age.
-- newborn 0–27 days with `<35.5`, poor feeding, marked lethargy, grunting, seizure, or severe chest indrawing routes urgent assessment.
+- after completed calendar month 6, temperature height alone does not mark serious illness; `>=39.4` may produce a neutral clinician-contact recommendation but never a serious-illness/emergency classification without symptoms.
+- unknown age with `>=38.0` or `<36.0` cannot exclude a young infant/newborn and prompts immediate medical contact while asking the caregiver to confirm age.
+- newborn 0–27 days with `<36.0`, poor feeding, marked lethargy, grunting, seizure, or severe chest indrawing routes urgent assessment.
 - care steps include fluids and neutral clothing, exclude tepid sponging, exclude unsupported 24-hour/3-day rules, and use the 5-day assessment threshold plus earlier red-flag advice.
 - red flags are structured bilingual arrays.
 
