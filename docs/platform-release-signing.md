@@ -45,6 +45,9 @@ ref로 선택한다. 이 환경에는 `RELEASE_TOKEN`을 저장하지 않는다.
   복사하며, 공백·escape·quote·RDN 구조·속성 순서를 정규화하거나 재정렬하지 않는다.
   Authenticode 검사, electron-builder의 `publisherName`, 설치된
   `app-update.yml.publisherName`은 모두 이 문자열과 ordinal exact equality로 비교한다.
+  electron-builder 26은 updater metadata에 이 값을 정확히 하나의 문자열 배열로
+  기록한다. 검증기는 이 canonical 배열만 허용하며 단일 문자열도 거부한다. 빈 배열,
+  비문자 값, 혼합 배열, 중복·대체 publisher가 하나라도 있으면 모두 실패한다.
 - `WIN_EXPECTED_CERT_SHA256`: 같은 서명 인증서의 SHA-256 thumbprint. separator 없는
   정확히 64자리 16진수로 저장한다. 16진수 대소문자만 동등하게 취급하며 Subject가
   같더라도 이 값이 다른 인증서는 거부한다.

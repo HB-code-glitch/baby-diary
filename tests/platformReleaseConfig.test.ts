@@ -1,9 +1,18 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 const root = resolve(import.meta.dirname, '..')
+const require = createRequire(import.meta.url)
+const { WindowsSignToolManager } = require('app-builder-lib/out/codeSign/windowsSignToolManager') as {
+  WindowsSignToolManager: new (packager: unknown) => {
+    computedPublisherName: { value: Promise<string[]> }
+  }
+}
+const { serializeToYaml } = require('builder-util') as { serializeToYaml: (value: unknown) => string }
+const yaml = require('js-yaml') as { load: (source: string) => unknown }
 const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
 const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
 
@@ -92,6 +101,25 @@ describe('release-only electron-builder trust configuration', () => {
       },
     })
   })
+
+  it('electron-builder 26 generates a canonical one-element publisherName array', async () => {
+    const config = loadReleaseConfig()
+    expect(require('app-builder-lib/package.json').version).toMatch(/^26\./)
+
+    const signingManager = new WindowsSignToolManager({
+      platformSpecificBuildOptions: config.win,
+    })
+    const publisherName = await signingManager.computedPublisherName.value
+    const generatedYaml = serializeToYaml({
+      provider: 'github',
+      publisherName,
+    })
+    const generatedFixture = yaml.load(generatedYaml) as { publisherName?: unknown }
+
+    expect(publisherName).toEqual([expectedPublisher])
+    expect(generatedFixture.publisherName).toEqual([expectedPublisher])
+    expect(generatedYaml).toContain(`publisherName:\n  - ${expectedPublisher}`)
+  })
 })
 
 describe('minimal Electron JIT entitlements', () => {
@@ -146,5 +174,8 @@ describe('release signing operator documentation', () => {
     expect(source).toContain('HashAlgorithmName]::SHA256')
     expect(source).toMatch(/64.*16진수/)
     expect(source).toContain('정규화하거나 재정렬하지 않는다')
+    expect(source).toContain('정확히 하나의 문자열 배열')
+    expect(source).toContain('단일 문자열도 거부')
+    expect(source).toContain('중복·대체 publisher')
   })
 })

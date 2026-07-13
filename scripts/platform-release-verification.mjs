@@ -170,10 +170,11 @@ function normalizedArtifactName(value) {
   return String(value ?? '').replaceAll(' ', '-').replaceAll('\\', '/').split('/').at(-1)
 }
 
-function publisherNames(value) {
-  if (typeof value === 'string') return [value]
-  if (Array.isArray(value)) return value
-  return []
+export function isCanonicalPublisherName(value, expectedPublisher) {
+  return Array.isArray(value)
+    && value.length === 1
+    && typeof value[0] === 'string'
+    && value[0] === expectedPublisher
 }
 
 function validateWindowsUpdaterMetadata({ version, expectedPublisher, setupBytes, latest, appUpdate }) {
@@ -182,8 +183,8 @@ function validateWindowsUpdaterMetadata({ version, expectedPublisher, setupBytes
   const expectedSha512 = createHash('sha512').update(setupBytes).digest('base64')
   const expectedSize = setupBytes.length
 
-  if (!publisherNames(appUpdate?.publisherName).some(name => name === expectedPublisher)) {
-    errors.push('app-update.yml publisherName does not contain the expected publisher')
+  if (!isCanonicalPublisherName(appUpdate?.publisherName, expectedPublisher)) {
+    errors.push('app-update.yml publisherName must be exactly one expected publisher')
   }
 
   const primaryFile = Array.isArray(latest?.files)

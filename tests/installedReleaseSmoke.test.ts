@@ -65,6 +65,8 @@ describe('installed Windows release smoke script', () => {
     expect(script).toContain('WIN_EXPECTED_CERT_SHA256')
     expect(script).toContain('ExpectedCertificateSha256')
     expect(script).toContain('publisherName')
+    expect(script).toContain('m.isCanonicalPublisherName(value, expected)')
+    expect(script).not.toContain('.some(')
     expect(script).toContain('BABYDIARY_E2E_EXECUTABLE')
     expect(script).toContain('BABYDIARY_SYNC_E2E_EXECUTABLE')
     expect(script).toContain("Invoke-NpmScript -Name 'test:e2e'")

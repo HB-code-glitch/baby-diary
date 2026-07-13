@@ -117,7 +117,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Installed application PE architecture validation failed' }
 
   $appUpdatePath = Join-Path $installLocation 'resources\app-update.yml'
-  & node -e "const fs=require('node:fs'); const yaml=require('js-yaml'); const value=yaml.load(fs.readFileSync(process.argv[1],'utf8')).publisherName; const names=Array.isArray(value)?value:[value]; const expected=process.argv[2]; if(!names.some(name => typeof name==='string' && name===expected)) throw new Error('installed app-update.yml publisherName mismatch')" $appUpdatePath $ExpectedPublisher
+  & node -e "const fs=require('node:fs'); const yaml=require('js-yaml'); import('./scripts/platform-release-verification.mjs').then(m => { const value=yaml.load(fs.readFileSync(process.argv[1],'utf8')).publisherName; const expected=process.argv[2]; if(!m.isCanonicalPublisherName(value, expected)) throw new Error('installed app-update.yml publisherName mismatch') })" $appUpdatePath $ExpectedPublisher
   if ($LASTEXITCODE -ne 0) { throw 'Installed updater publisherName validation failed' }
 
   $env:BABYDIARY_E2E_EXECUTABLE = $installedExecutable

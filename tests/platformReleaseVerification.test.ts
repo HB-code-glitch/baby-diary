@@ -24,6 +24,16 @@ const expectedTeamId = 'ABCDEF1234'
 const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
 const expectedCertificateSha256 = 'A'.repeat(64)
 const sameCommonNameDifferentOrganization = 'CN=HB-code-glitch, O="Different, Publisher", C=KR'
+const invalidPublisherNameFixtures: Array<[string, string, unknown]> = [
+  ['scalar exact publisher', expectedPublisher, expectedPublisher],
+  ['empty array', expectedPublisher, []],
+  ['empty string', expectedPublisher, ''],
+  ['duplicate expected publisher', expectedPublisher, [expectedPublisher, expectedPublisher]],
+  ['extra alternate publisher', expectedPublisher, [expectedPublisher, 'CN=Attacker']],
+  ['equivalent but non-identical RDN', 'CN=Acme,OU=Unit', ['CN=Acme+OU=Unit']],
+  ['non-string element', expectedPublisher, [42]],
+  ['mixed expected and non-string elements', expectedPublisher, [expectedPublisher, 42]],
+]
 
 const macCredentials = {
   MAC_CSC_LINK: 'fixture-p12',
@@ -276,25 +286,27 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
     })).rejects.toThrow(/expected publisher/)
   })
 
-  it('rejects a lossy-equivalent app-update.yml publisher Subject', async () => {
-    const verifyWindowsRelease = await api('verifyWindowsRelease')
-    const yaml = windowsYamlFixtures()
-    const exactSubject = 'CN=Acme,OU=Unit'
-    await expect(verifyWindowsRelease({
-      ...windowsVerificationOptions,
-      expectedPublisher: exactSubject,
-    }, {
-      exists: async () => true,
-      inspectExecutable: async (descriptor: { role: string }) => ({
-        ...validWindowsReport(descriptor.role),
-        publisher: exactSubject,
-      }),
-      readBytes: async () => setupBytes(),
-      readYaml: async (path: string) => path.endsWith('latest.yml')
-        ? yaml.latest
-        : { ...yaml.appUpdate, publisherName: ['CN=Acme+OU=Unit'] },
-    })).rejects.toThrow(/app-update\.yml publisherName/)
-  })
+  it.each(invalidPublisherNameFixtures)(
+    'rejects %s in app-update.yml',
+    async (_label, exactSubject, invalidPublisherName) => {
+      const verifyWindowsRelease = await api('verifyWindowsRelease')
+      const yaml = windowsYamlFixtures()
+      await expect(verifyWindowsRelease({
+        ...windowsVerificationOptions,
+        expectedPublisher: exactSubject,
+      }, {
+        exists: async () => true,
+        inspectExecutable: async (descriptor: { role: string }) => ({
+          ...validWindowsReport(descriptor.role),
+          publisher: exactSubject,
+        }),
+        readBytes: async () => setupBytes(),
+        readYaml: async (path: string) => path.endsWith('latest.yml')
+          ? yaml.latest
+          : { ...yaml.appUpdate, publisherName: invalidPublisherName },
+      })).rejects.toThrow(/app-update\.yml publisherName/)
+    },
+  )
 
   it.each([
     ['unsigned', { status: 'NotSigned' }, /valid Authenticode/],
