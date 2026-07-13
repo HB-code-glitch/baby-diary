@@ -455,6 +455,111 @@ async function readRegularFileDescriptorSafe(filePath, {
   }
 }
 
+function isPathWithinRoot(root, candidate) {
+  const normalizedRoot = normalizeFsPath(root)
+  const normalizedCandidate = normalizeFsPath(candidate)
+  return normalizedCandidate === normalizedRoot
+    || normalizedCandidate.startsWith(`${normalizedRoot}${path.sep}`)
+}
+
+async function snapshotSemanticPaths(root, paths, label) {
+  const canonicalRoot = await realpath(root)
+  if (normalizeFsPath(canonicalRoot) !== normalizeFsPath(root)) {
+    throw new Error(`${label} root is not canonical: ${root}`)
+  }
+
+  const snapshots = []
+  for (const candidate of [...new Set(paths.map(value => path.resolve(value)))]) {
+    const stats = await lstat(candidate)
+    if (stats.isSymbolicLink()) {
+      throw new Error(`${label} rejects a link/reparse point: ${candidate}`)
+    }
+    const resolved = await realpath(candidate)
+    if (normalizeFsPath(resolved) !== normalizeFsPath(candidate)
+      || !isPathWithinRoot(canonicalRoot, resolved)) {
+      throw new Error(`${label} path is non-canonical or outside the profile root: ${candidate}`)
+    }
+    snapshots.push({ path: candidate, stats })
+  }
+  return snapshots
+}
+
+async function openSemanticPathGuard(root, paths, label) {
+  let snapshots = await snapshotSemanticPaths(root, paths, `${label} pre-read`)
+  return {
+    async update(nextPaths) {
+      snapshots = await snapshotSemanticPaths(root, nextPaths, `${label} pre-read`)
+    },
+    async verify() {
+      for (const snapshot of snapshots) {
+        await assertStablePathIdentity(snapshot.path, snapshot.stats, `${label} post-read`)
+        const resolved = await realpath(snapshot.path)
+        if (!isPathWithinRoot(root, resolved)) {
+          throw new Error(`${label} path escaped the profile root: ${snapshot.path}`)
+        }
+      }
+    },
+    async close() {},
+  }
+}
+
+async function openStableDirectoryGuard(directory, label) {
+  const absolute = path.resolve(directory)
+  const before = await lstat(absolute)
+  if (before.isSymbolicLink() || !before.isDirectory()) {
+    throw new Error(`${label} must be a real directory, not a link/reparse point: ${absolute}`)
+  }
+  await assertStablePathIdentity(absolute, before, label)
+
+  let descriptor
+  let opened
+  if (process.platform !== 'win32') {
+    const directoryFlag = Number.isInteger(constants.O_DIRECTORY) ? constants.O_DIRECTORY : 0
+    const noFollow = Number.isInteger(constants.O_NOFOLLOW) ? constants.O_NOFOLLOW : 0
+    try {
+      descriptor = await open(absolute, constants.O_RDONLY | directoryFlag | noFollow)
+      opened = await descriptor.stat()
+      if (!opened.isDirectory() || !sameFileIdentity(before, opened)) {
+        throw new Error(`${label} descriptor identity does not match its path: ${absolute}`)
+      }
+    } catch (error) {
+      if (descriptor) await descriptor.close()
+      throw error
+    }
+  }
+
+  return {
+    path: absolute,
+    async verify() {
+      if (descriptor) {
+        const afterDescriptor = await descriptor.stat()
+        if (!afterDescriptor.isDirectory() || !sameFileIdentity(opened, afterDescriptor)) {
+          throw new Error(`${label} directory descriptor changed during semantic projection: ${absolute}`)
+        }
+      }
+      await assertStablePathIdentity(absolute, before, label)
+    },
+    async close() {
+      if (descriptor) await descriptor.close()
+    },
+  }
+}
+
+async function readSemanticFile(root, relativePath, options = {}) {
+  const normalized = normalizeRelativePath(relativePath)
+  const absolute = path.join(root, ...normalized.split('/'))
+  const verified = await readRegularFileDescriptorSafe(absolute, {
+    label: `upgrade semantic file ${normalized}`,
+    expectedStat: options.expectedStat,
+    maxBytes: options.maxBytes ?? DEFAULT_MANIFEST_LIMITS.maxFileBytes,
+    captureBytes: options.captureBytes ?? true,
+    afterOpen: options.afterFileOpen
+      ? () => options.afterFileOpen({ absolutePath: absolute, relativePath: normalized })
+      : undefined,
+  })
+  return verified
+}
+
 /** Recursively hashes regular files without retaining their bytes. */
 export async function createRawManifest(profileRoot, options = {}) {
   const { afterFileOpen, ...limitOverrides } = options
@@ -665,13 +770,12 @@ function expectedJournalRecordsFromLegacy(rawState) {
   return records.map(projectJournalRecord)
 }
 
-async function readJournalBabyInfoState(journalPath) {
+function parseJournalBabyInfoState(content) {
   const mutations = new Map()
   const pending = new Set()
   const acknowledged = new Set()
   const imports = new Set()
   const records = []
-  const content = await readFile(journalPath, 'utf8')
   for (const line of content.split('\n')) {
     if (line.length === 0) continue
     const record = JSON.parse(line)
@@ -739,15 +843,16 @@ function settingsPreservationHash(settings) {
   return sha256(canonicalJson(preserved))
 }
 
-async function projectAuxiliaryFiles(root) {
+async function projectAuxiliaryFiles(root, options = {}) {
   const projected = []
   for (const fixture of V038_AUXILIARY_FILES) {
     const absolute = path.join(root, ...fixture.path.split('/'))
     let verified
     try {
-      verified = await readRegularFileDescriptorSafe(absolute, {
-        label: `upgrade auxiliary file ${fixture.path}`,
+      verified = await readSemanticFile(root, fixture.path, {
         maxBytes: 1024 * 1024,
+        captureBytes: false,
+        afterFileOpen: options.afterFileOpen,
       })
     } catch (error) {
       if (error?.code === 'ENOENT') throw new Error(`upgrade auxiliary/auth file is missing: ${fixture.path}`)
@@ -759,113 +864,182 @@ async function projectAuxiliaryFiles(root) {
 }
 
 /** Deterministic, secret-redacted semantic view of the user-data directory. */
-export async function projectUpgradeSemantics(profileRoot) {
+export async function projectUpgradeSemantics(profileRoot, options = {}) {
   const root = path.resolve(profileRoot)
-  const settings = JSON.parse(await readFile(path.join(root, 'settings.json'), 'utf8'))
-  const identity = projectIdentity(settings)
-  const firebaseHash = settings.firebase === null || settings.firebase === undefined
-    ? null
-    : sha256(canonicalJson(settings.firebase))
-  const settingsOpaqueHash = settingsPreservationHash(settings)
-  const auxiliaryFiles = await projectAuxiliaryFiles(root)
-
   const dataRoot = path.join(root, 'data')
-  const names = (await readdir(dataRoot)).filter(name => /^events-\d{1,4}-\d{2}\.jsonl$/.test(name)).sort(compareUtf8)
-  const eventSources = []
-  const eventDerivatives = []
-  const sourceCanonicalSeen = new Set()
-  const derivativeIds = new Set()
-  const derivativeSources = new Set()
-  const winnerById = new Map()
-  for (const name of names) {
-    const content = await readFile(path.join(dataRoot, name), 'utf8')
-    for (const line of content.split('\n')) {
-      if (line.trim().length === 0) continue
-      const item = JSON.parse(line)
-      if (!isPlainObject(item)
-        || typeof item.id !== 'string'
-        || !Number.isSafeInteger(item.rev)
-        || typeof item.deleted !== 'boolean'
-        || typeof item.updatedAt !== 'string') {
-        throw new Error(`event record is invalid in ${name}`)
-      }
-      const canonical = canonicalJson(item)
-      if (item.migration?.kind === 'legacy-author-v1') {
-        if (typeof item.mutationId !== 'string' || typeof item.migration.sourceContentId !== 'string') {
-          throw new Error('event migration derivative is invalid')
-        }
-        if (derivativeIds.has(item.mutationId)) throw new Error('duplicate mutation derivative in event log')
-        if (derivativeSources.has(item.migration.sourceContentId)) {
-          throw new Error('multiple event derivatives reference the same source mutation')
-        }
-        derivativeIds.add(item.mutationId)
-        derivativeSources.add(item.migration.sourceContentId)
-        eventDerivatives.push({
-          mutationId: item.mutationId,
-          sourceContentId: item.migration.sourceContentId,
-          canonicalHash: sha256(canonical),
-        })
-        continue
-      }
-      if (sourceCanonicalSeen.has(canonical)) throw new Error('duplicate source event mutation in event log')
-      sourceCanonicalSeen.add(canonical)
-      const source = {
-        id: item.id,
-        rev: item.rev,
-        deleted: item.deleted,
-        contentId: eventContentId(item),
-        canonical,
-      }
-      eventSources.push(source)
-      const winner = winnerById.get(item.id)
-      if (!winner || compareEventSources(item, winner.raw) > 0) winnerById.set(item.id, { raw: item, source })
-    }
-  }
-  eventSources.sort((left, right) => compareUtf8(left.canonical, right.canonical))
-  eventDerivatives.sort((left, right) => compareUtf8(left.mutationId, right.mutationId))
-  const sourceContentIds = new Set(eventSources.map(item => item.contentId))
-  for (const derivative of eventDerivatives) {
-    if (!sourceContentIds.has(derivative.sourceContentId)) {
-      throw new Error('event migration derivative references a missing source mutation')
-    }
-  }
-  const eventWinners = [...winnerById.entries()]
-    .map(([id, value]) => ({ id, rev: value.source.rev, deleted: value.source.deleted, contentId: value.source.contentId }))
-    .sort((left, right) => compareUtf8(left.id, right.id))
-
-  let babyInfoState
-  let babyInfoJournal
-  const journalPath = path.join(root, 'baby-info-journal-v1.jsonl')
+  const auxiliaryDirectories = [...new Set(V038_AUXILIARY_FILES.map(fixture => (
+    path.dirname(path.join(root, ...fixture.path.split('/')))
+  )))]
+  const guards = []
+  let semanticPathGuard
   try {
-    const journalStats = await lstat(journalPath)
-    if (journalStats.isSymbolicLink() || !journalStats.isFile()) throw new Error('baby-info journal is a link/reparse point')
-    babyInfoState = await readJournalBabyInfoState(journalPath)
-    babyInfoJournal = {
-      kind: 'journal',
-      records: babyInfoState.records,
-      importSourceIds: babyInfoState.importSourceIds,
+    semanticPathGuard = await openSemanticPathGuard(
+      root,
+      [root, dataRoot, ...auxiliaryDirectories],
+      'upgrade semantic projection',
+    )
+    guards.push(await openStableDirectoryGuard(root, 'upgrade canonical profile'))
+    guards.push(await openStableDirectoryGuard(dataRoot, 'upgrade event data directory'))
+    for (const directory of auxiliaryDirectories) {
+      guards.push(await openStableDirectoryGuard(directory, 'upgrade auxiliary parent directory'))
     }
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
-    babyInfoState = readLegacyBabyInfoState(settings.babyInfoSync)
-    babyInfoJournal = {
-      kind: 'legacy',
-      expectedRecords: expectedJournalRecordsFromLegacy(settings.babyInfoSync),
-      expectedImportSourceId: legacyBabyInfoImportSourceId(settings.babyInfoSync),
-    }
-  }
 
-  return {
-    version: 1,
-    identity,
-    firebaseHash,
-    settingsOpaqueHash,
-    auxiliaryFiles,
-    eventSources,
-    eventDerivatives,
-    eventWinners,
-    babyInfo: finishBabyInfoProjection(babyInfoState),
-    babyInfoJournal,
+    const names = (await readdir(dataRoot))
+      .filter(name => /^events-\d{1,4}-\d{2}\.jsonl$/.test(name))
+      .sort(compareUtf8)
+    const eventEntries = []
+    for (const name of names) {
+      const absolute = path.join(dataRoot, name)
+      const stats = await lstat(absolute)
+      if (stats.isSymbolicLink() || !stats.isFile()) {
+        throw new Error(`upgrade event file is a link/reparse point or non-regular file: ${name}`)
+      }
+      eventEntries.push({ name, absolute, stats })
+    }
+
+    const settingsPath = path.join(root, 'settings.json')
+    const settingsStats = await lstat(settingsPath)
+    if (settingsStats.isSymbolicLink() || !settingsStats.isFile()) {
+      throw new Error('upgrade settings file is a link/reparse point or non-regular file')
+    }
+    const journalPath = path.join(root, 'baby-info-journal-v1.jsonl')
+    let journalStats
+    try {
+      journalStats = await lstat(journalPath)
+      if (journalStats.isSymbolicLink() || !journalStats.isFile()) {
+        throw new Error('baby-info journal is a link/reparse point or non-regular file')
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+
+    const inputPaths = [
+      ...guards.map(guard => guard.path),
+      settingsPath,
+      ...eventEntries.map(entry => entry.absolute),
+      ...V038_AUXILIARY_FILES.map(fixture => path.join(root, ...fixture.path.split('/'))),
+      ...(journalStats ? [journalPath] : []),
+    ]
+    await semanticPathGuard.update(inputPaths)
+
+    const settingsVerified = await readSemanticFile(root, 'settings.json', {
+      expectedStat: settingsStats,
+      afterFileOpen: options.afterFileOpen,
+    })
+    const settings = JSON.parse(settingsVerified.bytes.toString('utf8'))
+    const identity = projectIdentity(settings)
+    const firebaseHash = settings.firebase === null || settings.firebase === undefined
+      ? null
+      : sha256(canonicalJson(settings.firebase))
+    const settingsOpaqueHash = settingsPreservationHash(settings)
+    const auxiliaryFiles = await projectAuxiliaryFiles(root, options)
+
+    const eventSources = []
+    const eventDerivatives = []
+    const sourceCanonicalSeen = new Set()
+    const derivativeIds = new Set()
+    const derivativeSources = new Set()
+    const winnerById = new Map()
+    for (const { name, stats } of eventEntries) {
+      const verified = await readSemanticFile(root, `data/${name}`, {
+        expectedStat: stats,
+        afterFileOpen: options.afterFileOpen,
+      })
+      const content = verified.bytes.toString('utf8')
+      for (const line of content.split('\n')) {
+        if (line.trim().length === 0) continue
+        const item = JSON.parse(line)
+        if (!isPlainObject(item)
+          || typeof item.id !== 'string'
+          || !Number.isSafeInteger(item.rev)
+          || typeof item.deleted !== 'boolean'
+          || typeof item.updatedAt !== 'string') {
+          throw new Error(`event record is invalid in ${name}`)
+        }
+        const canonical = canonicalJson(item)
+        if (item.migration?.kind === 'legacy-author-v1') {
+          if (typeof item.mutationId !== 'string' || typeof item.migration.sourceContentId !== 'string') {
+            throw new Error('event migration derivative is invalid')
+          }
+          if (derivativeIds.has(item.mutationId)) throw new Error('duplicate mutation derivative in event log')
+          if (derivativeSources.has(item.migration.sourceContentId)) {
+            throw new Error('multiple event derivatives reference the same source mutation')
+          }
+          derivativeIds.add(item.mutationId)
+          derivativeSources.add(item.migration.sourceContentId)
+          eventDerivatives.push({
+            mutationId: item.mutationId,
+            sourceContentId: item.migration.sourceContentId,
+            canonicalHash: sha256(canonical),
+          })
+          continue
+        }
+        if (sourceCanonicalSeen.has(canonical)) throw new Error('duplicate source event mutation in event log')
+        sourceCanonicalSeen.add(canonical)
+        const source = {
+          id: item.id,
+          rev: item.rev,
+          deleted: item.deleted,
+          contentId: eventContentId(item),
+          canonical,
+        }
+        eventSources.push(source)
+        const winner = winnerById.get(item.id)
+        if (!winner || compareEventSources(item, winner.raw) > 0) winnerById.set(item.id, { raw: item, source })
+      }
+    }
+    eventSources.sort((left, right) => compareUtf8(left.canonical, right.canonical))
+    eventDerivatives.sort((left, right) => compareUtf8(left.mutationId, right.mutationId))
+    const sourceContentIds = new Set(eventSources.map(item => item.contentId))
+    for (const derivative of eventDerivatives) {
+      if (!sourceContentIds.has(derivative.sourceContentId)) {
+        throw new Error('event migration derivative references a missing source mutation')
+      }
+    }
+    const eventWinners = [...winnerById.entries()]
+      .map(([id, value]) => ({ id, rev: value.source.rev, deleted: value.source.deleted, contentId: value.source.contentId }))
+      .sort((left, right) => compareUtf8(left.id, right.id))
+
+    let babyInfoState
+    let babyInfoJournal
+    if (journalStats) {
+      const journalVerified = await readSemanticFile(root, 'baby-info-journal-v1.jsonl', {
+        expectedStat: journalStats,
+        afterFileOpen: options.afterFileOpen,
+      })
+      babyInfoState = parseJournalBabyInfoState(journalVerified.bytes.toString('utf8'))
+      babyInfoJournal = {
+        kind: 'journal',
+        records: babyInfoState.records,
+        importSourceIds: babyInfoState.importSourceIds,
+      }
+    } else {
+      babyInfoState = readLegacyBabyInfoState(settings.babyInfoSync)
+      babyInfoJournal = {
+        kind: 'legacy',
+        expectedRecords: expectedJournalRecordsFromLegacy(settings.babyInfoSync),
+        expectedImportSourceId: legacyBabyInfoImportSourceId(settings.babyInfoSync),
+      }
+    }
+
+    const projection = {
+      version: 1,
+      identity,
+      firebaseHash,
+      settingsOpaqueHash,
+      auxiliaryFiles,
+      eventSources,
+      eventDerivatives,
+      eventWinners,
+      babyInfo: finishBabyInfoProjection(babyInfoState),
+      babyInfoJournal,
+    }
+    await semanticPathGuard.verify()
+    for (const guard of guards) await guard.verify()
+    return projection
+  } finally {
+    if (semanticPathGuard) await semanticPathGuard.close()
+    for (const guard of [...guards].reverse()) await guard.close()
   }
 }
 

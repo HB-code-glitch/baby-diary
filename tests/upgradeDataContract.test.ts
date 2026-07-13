@@ -269,6 +269,74 @@ describe('v0.3.8 upgrade data contract', () => {
     expect(swapped).toBe(true)
   })
 
+  it('rejects semantic projection through an external data junction or symlink', async () => {
+    const root = tempRoot('semantic-data-link')
+    const externalData = tempRoot('semantic-external-data')
+    await contract.writeV038Fixture(root)
+    copyTree(join(root, 'data'), externalData)
+    rmSync(join(root, 'data'), { recursive: true, force: true })
+    symlinkSync(externalData, join(root, 'data'), process.platform === 'win32' ? 'junction' : 'dir')
+
+    await expect(contract.projectUpgradeSemantics(root)).rejects.toThrow(/data|link|reparse|canonical/i)
+  })
+
+  it('accepts only a real canonical profile root, not a linked alias', async () => {
+    const canonicalRoot = tempRoot('semantic-canonical-root')
+    const aliasContainer = tempRoot('semantic-profile-alias')
+    const linkedRoot = join(aliasContainer, 'profile')
+    await contract.writeV038Fixture(canonicalRoot)
+    symlinkSync(canonicalRoot, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir')
+
+    await expect(contract.projectUpgradeSemantics(linkedRoot)).rejects.toThrow(/canonical|profile|link|reparse/i)
+  })
+
+  it('rejects settings, journal, event, and auxiliary path swaps after descriptor open', async () => {
+    const cases = [
+      { label: 'settings', relativePath: 'settings.json' },
+      { label: 'journal', relativePath: 'baby-info-journal-v1.jsonl', journal: true },
+      { label: 'event', relativePath: 'data/events-2026-07.jsonl' },
+      { label: 'auxiliary', relativePath: 'Local Storage/upgrade-auth-sentinel.json' },
+    ]
+
+    for (const testCase of cases) {
+      const root = tempRoot(`semantic-${testCase.label}-swap`)
+      await contract.writeV038Fixture(root)
+      if (testCase.journal) await contract.materializeMigratedBabyInfoJournal(root)
+      const absolute = join(root, ...testCase.relativePath.split('/'))
+      const originalBytes = readFileSync(absolute)
+      let swapped = false
+
+      await expect(contract.projectUpgradeSemantics(root, {
+        afterFileOpen: async ({ relativePath }: { relativePath: string }) => {
+          if (relativePath !== testCase.relativePath || swapped) return
+          swapped = true
+          renameSync(absolute, `${absolute}.original`)
+          writeFileSync(absolute, originalBytes)
+        },
+      })).rejects.toThrow(/changed|identity|link|reparse|TOCTOU/i)
+      expect(swapped, `${testCase.label} hook was not reached`).toBe(true)
+    }
+  })
+
+  it('rejects a data directory replaced by an external junction after an event descriptor opens', async () => {
+    const root = tempRoot('semantic-dynamic-data-link')
+    const externalData = tempRoot('semantic-dynamic-external')
+    await contract.writeV038Fixture(root)
+    const dataRoot = join(root, 'data')
+    copyTree(dataRoot, externalData)
+    let swapped = false
+
+    await expect(contract.projectUpgradeSemantics(root, {
+      afterFileOpen: async ({ relativePath }: { relativePath: string }) => {
+        if (!relativePath.startsWith('data/events-') || swapped) return
+        swapped = true
+        renameSync(dataRoot, join(root, 'data.original'))
+        symlinkSync(externalData, dataRoot, process.platform === 'win32' ? 'junction' : 'dir')
+      },
+    })).rejects.toThrow(/data|changed|identity|link|reparse|TOCTOU/i)
+    expect(swapped).toBe(true)
+  })
+
   it('normalizes the legacy settings sync state and the migrated journal to the same semantics', async () => {
     const baselineRoot = tempRoot('legacy-sync')
     await contract.writeV038Fixture(baselineRoot)

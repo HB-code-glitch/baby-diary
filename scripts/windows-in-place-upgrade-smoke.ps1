@@ -87,34 +87,454 @@ $script:baselineManifestCreated = $false
 $script:candidateFirstLaunchStarted = $false
 $script:candidateFirstLaunchCompleted = $false
 
-function Get-BoundedProcessTreeIds {
-  param([Parameter(Mandatory = $true)][int]$RootProcessId)
-  $pending = New-Object 'System.Collections.Generic.Stack[int]'
-  $ordered = New-Object 'System.Collections.Generic.List[int]'
-  $pending.Push($RootProcessId)
-  while ($pending.Count -gt 0) {
-    $parentId = $pending.Pop()
-    $ordered.Add($parentId)
-    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $parentId" -ErrorAction SilentlyContinue)
-    foreach ($child in $children) { $pending.Push([int]$child.ProcessId) }
-  }
-  return @($ordered)
-}
+function Initialize-BoundedProcessJobApi {
+  if ('BabyDiary.Upgrade.JobObjectProcess' -as [type]) { return }
+  $source = @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 
-function Stop-BoundedProcessTree {
-  param([Parameter(Mandatory = $true)][int]$RootProcessId)
-  $processIds = @(Get-BoundedProcessTreeIds -RootProcessId $RootProcessId)
-  [array]::Reverse($processIds)
-  foreach ($processId in $processIds) {
-    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-  }
-  $deadline = [DateTime]::UtcNow.AddSeconds($ProcessCleanupTimeoutSeconds)
-  do {
-    $remaining = @($processIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-    if ($remaining.Count -eq 0) { return }
-    Start-Sleep -Milliseconds 100
-  } while ([DateTime]::UtcNow -lt $deadline)
-  throw 'Bounded process tree cleanup did not reap every descendant'
+namespace BabyDiary.Upgrade
+{
+    public sealed class JobProcessResult
+    {
+        public int ExitCode { get; set; }
+        public int ProcessId { get; set; }
+        public bool TimedOut { get; set; }
+        public bool CleanupVerified { get; set; }
+    }
+
+    public static class JobObjectProcess
+    {
+        private const uint CREATE_SUSPENDED = 0x00000004;
+        private const uint CREATE_NO_WINDOW = 0x08000000;
+        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private const int JobObjectBasicAccountingInformation = 1;
+        private const int JobObjectExtendedLimitInformation = 9;
+        private const uint WAIT_OBJECT_0 = 0x00000000;
+        private const uint WAIT_TIMEOUT = 0x00000102;
+        private const uint INFINITE = 0xFFFFFFFF;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public uint cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttribute;
+            public uint dwFlags;
+            public ushort wShowWindow;
+            public ushort cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public uint dwProcessId;
+            public uint dwThreadId;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObjectW(IntPtr jobAttributes, string name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job,
+            int informationClass,
+            IntPtr information,
+            uint informationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr job,
+            int informationClass,
+            out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information,
+            uint informationLength,
+            IntPtr returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateProcessW(
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string currentDirectory,
+            ref STARTUPINFO startupInfo,
+            out PROCESS_INFORMATION processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr thread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        private static Win32Exception LastWin32(string operation)
+        {
+            return new Win32Exception(Marshal.GetLastWin32Error(), operation + " failed");
+        }
+
+        private static string QuoteArgument(string value)
+        {
+            if (value == null) value = String.Empty;
+            if (value.Length > 0 && value.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0)
+            {
+                return value;
+            }
+
+            StringBuilder quoted = new StringBuilder();
+            quoted.Append('"');
+            int backslashes = 0;
+            for (int index = 0; index < value.Length; index += 1)
+            {
+                char current = value[index];
+                if (current == '\\')
+                {
+                    backslashes += 1;
+                    continue;
+                }
+                if (current == '"')
+                {
+                    quoted.Append('\\', (backslashes * 2) + 1);
+                    quoted.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+                quoted.Append('\\', backslashes);
+                quoted.Append(current);
+                backslashes = 0;
+            }
+            quoted.Append('\\', backslashes * 2);
+            quoted.Append('"');
+            return quoted.ToString();
+        }
+
+        private static StringBuilder BuildCommandLine(string filePath, string[] arguments)
+        {
+            StringBuilder commandLine = new StringBuilder(QuoteArgument(filePath));
+            if (arguments != null)
+            {
+                for (int index = 0; index < arguments.Length; index += 1)
+                {
+                    commandLine.Append(' ');
+                    commandLine.Append(QuoteArgument(arguments[index]));
+                }
+            }
+            return commandLine;
+        }
+
+        private static void ConfigureKillOnClose(IntPtr job)
+        {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            int length = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                Marshal.StructureToPtr(limits, buffer, false);
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, buffer, (uint)length))
+                {
+                    throw LastWin32("SetInformationJobObject");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static uint GetActiveProcessCount(IntPtr job)
+        {
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+            uint length = (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+            if (!QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                out accounting,
+                length,
+                IntPtr.Zero))
+            {
+                throw LastWin32("QueryInformationJobObject");
+            }
+            return accounting.ActiveProcesses;
+        }
+
+        private static void WaitForJobEmpty(IntPtr job, int cleanupTimeoutMilliseconds)
+        {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            while (GetActiveProcessCount(job) != 0)
+            {
+                if (elapsed.ElapsedMilliseconds >= cleanupTimeoutMilliseconds)
+                {
+                    throw new TimeoutException("Job Object cleanup did not reach zero active processes");
+                }
+                Thread.Sleep(25);
+            }
+        }
+
+        private static void TerminateAndVerifyJob(IntPtr job, int cleanupTimeoutMilliseconds)
+        {
+            if (GetActiveProcessCount(job) == 0) return;
+            if (!TerminateJobObject(job, 1))
+            {
+                throw LastWin32("TerminateJobObject");
+            }
+            WaitForJobEmpty(job, cleanupTimeoutMilliseconds);
+        }
+
+        private static void RecordCleanupFailure(ref Exception failure, Exception cleanupFailure)
+        {
+            if (failure == null)
+            {
+                failure = cleanupFailure;
+                return;
+            }
+            failure.Data["JobObjectCleanup"] = cleanupFailure.ToString();
+        }
+
+        private static void CloseNativeHandle(IntPtr handle, string label, ref Exception failure)
+        {
+            if (handle == IntPtr.Zero) return;
+            if (!CloseHandle(handle))
+            {
+                RecordCleanupFailure(ref failure, LastWin32("CloseHandle(" + label + ")"));
+            }
+        }
+
+        public static JobProcessResult Run(
+            string filePath,
+            string[] arguments,
+            string workingDirectory,
+            int timeoutMilliseconds,
+            int cleanupTimeoutMilliseconds)
+        {
+            if (String.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("filePath is required");
+            if (timeoutMilliseconds <= 0) throw new ArgumentOutOfRangeException("timeoutMilliseconds");
+            if (cleanupTimeoutMilliseconds <= 0) throw new ArgumentOutOfRangeException("cleanupTimeoutMilliseconds");
+
+            IntPtr job = IntPtr.Zero;
+            PROCESS_INFORMATION process = new PROCESS_INFORMATION();
+            bool processCreated = false;
+            bool processAssigned = false;
+            JobProcessResult result = null;
+            Exception failure = null;
+
+            try
+            {
+                job = CreateJobObjectW(IntPtr.Zero, null);
+                if (job == IntPtr.Zero) throw LastWin32("CreateJobObjectW");
+                ConfigureKillOnClose(job);
+
+                STARTUPINFO startup = new STARTUPINFO();
+                startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+                StringBuilder commandLine = BuildCommandLine(filePath, arguments);
+                string currentDirectory = String.IsNullOrWhiteSpace(workingDirectory)
+                    ? Environment.CurrentDirectory
+                    : workingDirectory;
+                if (!CreateProcessW(
+                    filePath,
+                    commandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    false,
+                    CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                    IntPtr.Zero,
+                    currentDirectory,
+                    ref startup,
+                    out process))
+                {
+                    throw LastWin32("CreateProcessW");
+                }
+                processCreated = true;
+
+                if (!AssignProcessToJobObject(job, process.hProcess))
+                {
+                    throw LastWin32("AssignProcessToJobObject");
+                }
+                processAssigned = true;
+                if (ResumeThread(process.hThread) == UInt32.MaxValue)
+                {
+                    throw LastWin32("ResumeThread");
+                }
+
+                Stopwatch elapsed = Stopwatch.StartNew();
+                bool timedOut = false;
+                while (GetActiveProcessCount(job) != 0)
+                {
+                    long remaining = timeoutMilliseconds - elapsed.ElapsedMilliseconds;
+                    if (remaining <= 0)
+                    {
+                        timedOut = true;
+                        break;
+                    }
+                    uint wait = (uint)Math.Min(50L, remaining);
+                    uint waitResult = WaitForSingleObject(process.hProcess, wait);
+                    if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_TIMEOUT)
+                    {
+                        throw LastWin32("WaitForSingleObject");
+                    }
+                }
+
+                if (timedOut)
+                {
+                    TerminateAndVerifyJob(job, cleanupTimeoutMilliseconds);
+                    result = new JobProcessResult
+                    {
+                        ExitCode = -1,
+                        ProcessId = unchecked((int)process.dwProcessId),
+                        TimedOut = true,
+                        CleanupVerified = true
+                    };
+                }
+                else
+                {
+                    uint exitCode;
+                    if (!GetExitCodeProcess(process.hProcess, out exitCode))
+                    {
+                        throw LastWin32("GetExitCodeProcess");
+                    }
+                    result = new JobProcessResult
+                    {
+                        ExitCode = unchecked((int)exitCode),
+                        ProcessId = unchecked((int)process.dwProcessId),
+                        TimedOut = false,
+                        CleanupVerified = true
+                    };
+                }
+            }
+            catch (Exception error)
+            {
+                failure = error;
+            }
+            finally
+            {
+                if (processAssigned && job != IntPtr.Zero)
+                {
+                    try
+                    {
+                        TerminateAndVerifyJob(job, cleanupTimeoutMilliseconds);
+                    }
+                    catch (Exception cleanupError)
+                    {
+                        RecordCleanupFailure(ref failure, cleanupError);
+                    }
+                }
+                else if (processCreated && process.hProcess != IntPtr.Zero)
+                {
+                    try
+                    {
+                        if (WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT)
+                        {
+                            if (!TerminateProcess(process.hProcess, 1))
+                            {
+                                throw LastWin32("TerminateProcess");
+                            }
+                            if (WaitForSingleObject(process.hProcess, (uint)cleanupTimeoutMilliseconds) == WAIT_TIMEOUT)
+                            {
+                                throw new TimeoutException("Unassigned suspended process cleanup timed out");
+                            }
+                        }
+                    }
+                    catch (Exception cleanupError)
+                    {
+                        RecordCleanupFailure(ref failure, cleanupError);
+                    }
+                }
+
+                CloseNativeHandle(process.hThread, "thread", ref failure);
+                CloseNativeHandle(process.hProcess, "process", ref failure);
+                CloseNativeHandle(job, "job", ref failure);
+            }
+
+            if (failure != null) throw failure;
+            return result;
+        }
+    }
+}
+'@
+  Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
 }
 
 function Invoke-BoundedProcess {
@@ -127,33 +547,32 @@ function Invoke-BoundedProcess {
     [switch]$AllowNonZero
   )
   if ($TimeoutSeconds -le 0) { throw 'Bounded process timeout must be positive' }
-  $start = @{
-    FilePath = $FilePath
-    ArgumentList = $Arguments
-    PassThru = $true
-    WindowStyle = 'Hidden'
+  if ($ProcessCleanupTimeoutSeconds -le 0) { throw 'Job Object cleanup timeout must be positive' }
+  Initialize-BoundedProcessJobApi
+  $command = Get-Command -Name $FilePath -CommandType Application -ErrorAction Stop
+  $resolvedFilePath = [IO.Path]::GetFullPath($command.Source)
+  if ([IO.Path]::GetExtension($resolvedFilePath) -in @('.cmd', '.bat')) {
+    throw 'Invoke-BoundedProcess requires a native executable root process'
   }
-  if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
-    $start.WorkingDirectory = $WorkingDirectory
+  $result = [BabyDiary.Upgrade.JobObjectProcess]::Run(
+    $resolvedFilePath,
+    [string[]]@($Arguments),
+    $WorkingDirectory,
+    $TimeoutSeconds * 1000,
+    $ProcessCleanupTimeoutSeconds * 1000
+  )
+  if (-not $result.CleanupVerified) {
+    throw "$Label Job Object cleanup was not verified"
   }
-  $process = Start-Process @start
-  try {
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-      Stop-BoundedProcessTree -RootProcessId $process.Id
-      $exception = [TimeoutException]::new("$Label exceeded its bounded timeout")
-      $exception.Data['FailureKind'] = 'timeout'
-      throw $exception
-    }
-    $process.Refresh()
-    $result = [pscustomobject]@{ ExitCode = $process.ExitCode; ProcessId = $process.Id }
-    if (-not $AllowNonZero -and $result.ExitCode -ne 0) {
-      throw "$Label failed with exit code $($result.ExitCode)"
-    }
-    return $result
+  if ($result.TimedOut) {
+    $exception = [TimeoutException]::new("$Label exceeded its bounded timeout")
+    $exception.Data['FailureKind'] = 'timeout'
+    throw $exception
   }
-  finally {
-    $process.Dispose()
+  if (-not $AllowNonZero -and $result.ExitCode -ne 0) {
+    throw "$Label failed with exit code $($result.ExitCode)"
   }
+  return [pscustomobject]@{ ExitCode = $result.ExitCode; ProcessId = $result.ProcessId }
 }
 
 function Resolve-RegularFile {
@@ -648,7 +1067,17 @@ function Invoke-UpgradePhase {
   if (-not [string]::IsNullOrWhiteSpace($originalCanonicalData)) {
     $arguments += @('--forbidden-root', $originalCanonicalData)
   }
-  Invoke-Node -Arguments $arguments
+  $allowMissingProfile = $Mode -eq 'baseline-initialize'
+  Assert-CanonicalProfileTreeWithoutReparsePoints -AllowMissing:$allowMissingProfile
+  $phaseCompleted = $false
+  try {
+    Invoke-Node -Arguments $arguments
+    $phaseCompleted = $true
+  }
+  finally {
+    $allowMissingAfterFailure = $allowMissingProfile -and -not $phaseCompleted
+    Assert-CanonicalProfileTreeWithoutReparsePoints -AllowMissing:$allowMissingAfterFailure
+  }
 }
 
 function New-BaselineManifest {
@@ -775,7 +1204,18 @@ function Assert-ExactShortcut {
 function Invoke-NpmScript {
   param([Parameter(Mandatory = $true)][string]$Name)
   $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
-  $result = Invoke-BoundedProcess -FilePath $npm -Arguments @('run', $Name) `
+  $json = ConvertTo-Json -Compress -InputObject @('run', $Name)
+  $encodedArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+  $npmLiteral = $npm.Replace("'", "''")
+  $childCommand = @"
+`$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedArguments'))
+`$arguments = @(`$json | ConvertFrom-Json)
+& '$npmLiteral' @arguments
+exit `$LASTEXITCODE
+"@
+  $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
+  $result = Invoke-BoundedProcess -FilePath 'powershell.exe' `
+    -Arguments @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
     -TimeoutSeconds $NpmTimeoutSeconds -Label "npm run $Name" -WorkingDirectory $repoRoot -AllowNonZero
   if ($result.ExitCode -ne 0) { throw "npm run $Name failed with exit code $($result.ExitCode)" }
 }
@@ -878,13 +1318,30 @@ function Test-RunOwnedTreeWithoutReparsePoints {
   if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
   if (-not $item.PSIsContainer) { return $true }
   try {
-    foreach ($child in Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop) {
-      if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push([IO.Path]::GetFullPath($Path))
+    while ($pending.Count -gt 0) {
+      $current = $pending.Pop()
+      foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) {
+        if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        if ($child.PSIsContainer) { $pending.Push($child.FullName) }
+      }
     }
     return $true
   }
   catch {
     return $false
+  }
+}
+
+function Assert-CanonicalProfileTreeWithoutReparsePoints {
+  param([switch]$AllowMissing)
+  if (-not (Test-Path -LiteralPath $canonicalProfile)) {
+    if ($AllowMissing) { return }
+    throw 'Canonical upgrade profile is unavailable for native reparse-point verification'
+  }
+  if (-not (Test-RunOwnedTreeWithoutReparsePoints -Path $canonicalProfile)) {
+    throw 'Canonical upgrade profile contains a reparse point or escaped the isolated run root'
   }
 }
 

@@ -183,19 +183,35 @@ describe('Windows v0.3.8 -> v0.3.9 in-place upgrade wrapper', () => {
     expect(script).toContain('Remove-RunOwnedTempRoot')
   })
 
-  it('bounds setup, driver, npm, and uninstall processes and reaps their process trees on timeout', () => {
+  it('runs setup, driver, npm, and uninstall inside one kill-on-close Job Object', () => {
     expect(script).toContain('$SetupTimeoutSeconds')
     expect(script).toContain('$DriverTimeoutSeconds')
     expect(script).toContain('$NpmTimeoutSeconds')
     expect(script).toContain('$UninstallTimeoutSeconds')
     expect(script).toContain('Invoke-BoundedProcess')
-    expect(script).toContain('Stop-BoundedProcessTree')
-    expect(script).toContain('.WaitForExit(')
-    expect(script).toContain('Get-CimInstance Win32_Process')
-    expect(script).toContain('Stop-Process -Id')
+    expect(script).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE')
+    expect(script).toContain('CREATE_SUSPENDED')
+    expect(script).toContain('CreateProcessW')
+    expect(script).toContain('AssignProcessToJobObject')
+    expect(script).toContain('ResumeThread')
+    expect(script).toContain('QueryInformationJobObject')
+    expect(script).toContain('CloseHandle')
+    expect(script).not.toContain('Get-CimInstance Win32_Process')
+    expect(script).not.toContain('Stop-BoundedProcessTree')
     expect(script).toContain('[TimeoutException]')
-    expect(script).toMatch(/process tree cleanup/i)
+    expect(script).toMatch(/job object cleanup/i)
     expect(script).toMatch(/FailureKind.*timeout/i)
+  })
+
+  it('natively guards the canonical profile tree before and after every upgrade phase', () => {
+    const phaseStart = script.indexOf('function Invoke-UpgradePhase')
+    const phaseEnd = script.indexOf('function New-BaselineManifest')
+    const phase = script.slice(phaseStart, phaseEnd)
+    expect(phaseStart).toBeGreaterThanOrEqual(0)
+    expect(phaseEnd).toBeGreaterThan(phaseStart)
+    expect(phase.match(/Assert-CanonicalProfileTreeWithoutReparsePoints/g) ?? []).toHaveLength(2)
+    expect(script).toContain('[IO.FileAttributes]::ReparsePoint')
+    expect(script).not.toMatch(/Get-ChildItem[^\r\n]*-Recurse/i)
   })
 
   it.runIf(process.platform === 'win32')('parses as valid PowerShell', () => {
@@ -236,6 +252,104 @@ describe('Windows v0.3.8 -> v0.3.9 in-place upgrade wrapper', () => {
       timeout: 10_000,
     })
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+  })
+
+  it.runIf(process.platform === 'win32')('closes native Job Object handles after repeated normal exits', () => {
+    const quote = (value: string) => value.replaceAll("'", "''")
+    const command = [
+      '$tokens=$null',
+      '$errors=$null',
+      `$ast=[System.Management.Automation.Language.Parser]::ParseFile('${quote(scriptPath)}',[ref]$tokens,[ref]$errors)`,
+      '$functions=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true)',
+      'Invoke-Expression (($functions | ForEach-Object { $_.Extent.Text }) -join "`n")',
+      '$ProcessCleanupTimeoutSeconds=2',
+      'Initialize-BoundedProcessJobApi',
+      '[GC]::Collect()',
+      '[GC]::WaitForPendingFinalizers()',
+      '$before=(Get-Process -Id $PID).HandleCount',
+      'for($index=0;$index -lt 8;$index+=1){',
+      "  $result=Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @('-NoProfile','-NonInteractive','-Command','exit 0') -TimeoutSeconds 5 -Label 'normal exit'",
+      '  if($result.ExitCode -ne 0){exit 2}',
+      '}',
+      '[GC]::Collect()',
+      '[GC]::WaitForPendingFinalizers()',
+      '$after=(Get-Process -Id $PID).HandleCount',
+      'if(($after-$before) -gt 4){Write-Error "Native handle count grew from $before to $after";exit 3}',
+      'exit 0',
+    ].join('\n')
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 30_000,
+    })
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+  })
+
+  it.runIf(process.platform === 'win32')('kills a grandchild after its intermediate parent exits before timeout', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'baby-diary-job-object-'))
+    const grandchildScript = join(fixtureRoot, 'grandchild.ps1')
+    const intermediateScript = join(fixtureRoot, 'intermediate.ps1')
+    const rootScript = join(fixtureRoot, 'root.ps1')
+    const grandchildPidPath = join(fixtureRoot, 'grandchild.pid')
+    const quote = (value: string) => value.replaceAll("'", "''")
+    try {
+      writeFileSync(grandchildScript, '\uFEFFStart-Sleep -Seconds 30\n')
+      writeFileSync(intermediateScript, `\uFEFF${[
+        `$grandchild = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','"${quote(grandchildScript)}"') -PassThru -WindowStyle Hidden`,
+        `Set-Content -LiteralPath '${quote(grandchildPidPath)}' -Value $grandchild.Id -NoNewline`,
+        '$grandchild.Dispose()',
+        'exit 0',
+      ].join('\n')}`)
+      writeFileSync(rootScript, `\uFEFF${[
+        `$intermediate = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','"${quote(intermediateScript)}"') -PassThru -WindowStyle Hidden`,
+        '$intermediate.WaitForExit()',
+        '$intermediate.Dispose()',
+        'Start-Sleep -Seconds 30',
+      ].join('\n')}`)
+
+      const command = [
+        '$tokens=$null',
+        '$errors=$null',
+        `$ast=[System.Management.Automation.Language.Parser]::ParseFile('${quote(scriptPath)}',[ref]$tokens,[ref]$errors)`,
+        '$functions=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true)',
+        'Invoke-Expression (($functions | ForEach-Object { $_.Extent.Text }) -join "`n")',
+        '$ProcessCleanupTimeoutSeconds=3',
+        '$caught=$false',
+        'try {',
+        `  Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','${quote(rootScript)}') -TimeoutSeconds 5 -Label 'dead intermediate parent' | Out-Null`,
+        '}',
+        'catch [TimeoutException] {',
+        "  if ($_.Exception.Data['FailureKind'] -ne 'timeout') { exit 5 }",
+        '  $caught=$true',
+        '}',
+        'if(-not $caught){exit 2}',
+        `if(-not (Test-Path -LiteralPath '${quote(grandchildPidPath)}' -PathType Leaf)){exit 3}`,
+        `$grandchildId=[int](Get-Content -LiteralPath '${quote(grandchildPidPath)}' -Raw)`,
+        '$deadline=[DateTime]::UtcNow.AddSeconds(3)',
+        'while((Get-Process -Id $grandchildId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 50}',
+        'if(Get-Process -Id $grandchildId -ErrorAction SilentlyContinue){exit 4}',
+        'exit 0',
+      ].join('\n')
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 20_000,
+      })
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+    } finally {
+      if (existsSync(grandchildPidPath)) {
+        const grandchildId = Number.parseInt(readFileSync(grandchildPidPath, 'utf8'), 10)
+        if (Number.isSafeInteger(grandchildId)) {
+          spawnSync('powershell.exe', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `Stop-Process -Id ${grandchildId} -Force -ErrorAction SilentlyContinue`,
+          ])
+        }
+      }
+      rmSync(fixtureRoot, { recursive: true, force: true })
+    }
   })
 
   it.runIf(process.platform === 'win32')('retries one ordinary replacement failure and applies the invariant to ordinary and injected failures', () => {
