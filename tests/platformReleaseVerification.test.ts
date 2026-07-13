@@ -22,7 +22,7 @@ const releaseDir = '/fixture/release'
 const expectedIdentity = 'Developer ID Application: HB-code-glitch (ABCDEF1234)'
 const expectedTeamId = 'ABCDEF1234'
 const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
-const reorderedExpectedPublisher = 'C=KR, O=Expected\\, Publisher, CN=HB-code-glitch'
+const expectedCertificateSha256 = 'A'.repeat(64)
 const sameCommonNameDifferentOrganization = 'CN=HB-code-glitch, O="Different, Publisher", C=KR'
 
 const macCredentials = {
@@ -39,6 +39,14 @@ const windowsCredentials = {
   WIN_CSC_LINK: 'fixture-pfx',
   WIN_CSC_KEY_PASSWORD: 'fixture-password',
   WIN_EXPECTED_PUBLISHER: expectedPublisher,
+  WIN_EXPECTED_CERT_SHA256: expectedCertificateSha256,
+}
+
+const windowsVerificationOptions = {
+  version,
+  releaseDir,
+  expectedPublisher,
+  expectedCertificateSha256,
 }
 
 function validMacReport(expectedArchitectures: string[]) {
@@ -64,6 +72,7 @@ function validWindowsReport(role: string) {
   return {
     status: 'Valid',
     publisher: expectedPublisher,
+    certificateSha256: expectedCertificateSha256,
     timestamped: true,
     machine: role === 'installed-main' ? 'x64' : 'x86',
   }
@@ -129,6 +138,26 @@ describe('release credential fail-closed gate', () => {
       ...windowsCredentials,
       WIN_EXPECTED_PUBLISHER: 'HB-code-glitch',
     })).toContain('WIN_EXPECTED_PUBLISHER must be a full Subject DN containing CN')
+  })
+
+  it('requires a well-formed SHA-256 certificate thumbprint before packaging', async () => {
+    const requiredCredentialErrors = await api('requiredCredentialErrors')
+    expect(requiredCredentialErrors('windows', {
+      ...windowsCredentials,
+      WIN_EXPECTED_CERT_SHA256: undefined,
+    })).toContain('missing required release credential: WIN_EXPECTED_CERT_SHA256')
+    expect(requiredCredentialErrors('windows', {
+      ...windowsCredentials,
+      WIN_EXPECTED_CERT_SHA256: 'not-a-sha256-thumbprint',
+    })).toContain('WIN_EXPECTED_CERT_SHA256 must be a 64-character hexadecimal SHA-256 certificate thumbprint')
+    expect(requiredCredentialErrors('windows', {
+      ...windowsCredentials,
+      WIN_EXPECTED_CERT_SHA256: expectedCertificateSha256.toLowerCase(),
+    })).toEqual([])
+    expect(requiredCredentialErrors('windows', {
+      ...windowsCredentials,
+      WIN_EXPECTED_CERT_SHA256: ` ${expectedCertificateSha256}`,
+    })).toContain('WIN_EXPECTED_CERT_SHA256 must be a 64-character hexadecimal SHA-256 certificate thumbprint')
   })
 
   it('rejects an ad-hoc, development, or malformed Mac identity before packaging', async () => {
@@ -209,11 +238,7 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
     const verifyWindowsRelease = await api('verifyWindowsRelease')
     const yaml = windowsYamlFixtures()
     const calls: string[] = []
-    const result = await verifyWindowsRelease({
-      version,
-      releaseDir,
-      expectedPublisher,
-    }, {
+    const result = await verifyWindowsRelease(windowsVerificationOptions, {
       exists: async () => true,
       inspectExecutable: async (descriptor: { path: string; role: string }) => {
         calls.push(descriptor.role)
@@ -227,20 +252,48 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
     expect(calls).toEqual(['setup', 'portable', 'installed-main', 'elevate'])
   })
 
-  it('normalizes full Subject DN attribute order for executables and updater metadata', async () => {
+  it.each([
+    ['escaped leading space', 'CN=Acme', 'CN=\\ Acme'],
+    ['escaped trailing space', 'CN=Acme', 'CN=Acme\\ '],
+    ['multi-valued RDN', 'CN=Acme,OU=Unit', 'CN=Acme+OU=Unit'],
+    ['embedded quotes', 'CN=Acme', 'CN=A"c"me'],
+  ])('rejects a non-identical %s Subject instead of normalizing it to the expected identity', async (_label, exactSubject, bypassSubject) => {
     const verifyWindowsRelease = await api('verifyWindowsRelease')
     const yaml = windowsYamlFixtures()
-    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, {
+    await expect(verifyWindowsRelease({
+      ...windowsVerificationOptions,
+      expectedPublisher: exactSubject,
+    }, {
       exists: async () => true,
       inspectExecutable: async (descriptor: { role: string }) => ({
         ...validWindowsReport(descriptor.role),
-        publisher: reorderedExpectedPublisher,
+        publisher: bypassSubject,
       }),
       readBytes: async () => setupBytes(),
       readYaml: async (path: string) => path.endsWith('latest.yml')
         ? yaml.latest
-        : { ...yaml.appUpdate, publisherName: [reorderedExpectedPublisher] },
-    })).resolves.toEqual({ executableCount: 4 })
+        : { ...yaml.appUpdate, publisherName: [exactSubject] },
+    })).rejects.toThrow(/expected publisher/)
+  })
+
+  it('rejects a lossy-equivalent app-update.yml publisher Subject', async () => {
+    const verifyWindowsRelease = await api('verifyWindowsRelease')
+    const yaml = windowsYamlFixtures()
+    const exactSubject = 'CN=Acme,OU=Unit'
+    await expect(verifyWindowsRelease({
+      ...windowsVerificationOptions,
+      expectedPublisher: exactSubject,
+    }, {
+      exists: async () => true,
+      inspectExecutable: async (descriptor: { role: string }) => ({
+        ...validWindowsReport(descriptor.role),
+        publisher: exactSubject,
+      }),
+      readBytes: async () => setupBytes(),
+      readYaml: async (path: string) => path.endsWith('latest.yml')
+        ? yaml.latest
+        : { ...yaml.appUpdate, publisherName: ['CN=Acme+OU=Unit'] },
+    })).rejects.toThrow(/app-update\.yml publisherName/)
   })
 
   it.each([
@@ -251,7 +304,7 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
   ])('rejects a %s executable', async (_label, mutation, message) => {
     const verifyWindowsRelease = await api('verifyWindowsRelease')
     const yaml = windowsYamlFixtures()
-    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, {
+    await expect(verifyWindowsRelease(windowsVerificationOptions, {
       exists: async () => true,
       inspectExecutable: async (descriptor: { role: string }) => ({
         ...validWindowsReport(descriptor.role),
@@ -262,10 +315,27 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
     })).rejects.toThrow(message as RegExp)
   })
 
+  it.each(['setup', 'portable', 'installed-main', 'elevate'])(
+    'rejects a different %s signing certificate even when its full Subject matches exactly',
+    async mismatchedRole => {
+      const verifyWindowsRelease = await api('verifyWindowsRelease')
+      const yaml = windowsYamlFixtures()
+      await expect(verifyWindowsRelease(windowsVerificationOptions, {
+        exists: async () => true,
+        inspectExecutable: async (descriptor: { role: string }) => ({
+          ...validWindowsReport(descriptor.role),
+          ...(descriptor.role === mismatchedRole ? { certificateSha256: 'B'.repeat(64) } : {}),
+        }),
+        readBytes: async () => setupBytes(),
+        readYaml: async (path: string) => path.endsWith('latest.yml') ? yaml.latest : yaml.appUpdate,
+      })).rejects.toThrow(/certificate SHA-256 thumbprint/)
+    },
+  )
+
   it('rejects a non-x64 installed app while allowing x86 NSIS wrappers', async () => {
     const verifyWindowsRelease = await api('verifyWindowsRelease')
     const yaml = windowsYamlFixtures()
-    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, {
+    await expect(verifyWindowsRelease(windowsVerificationOptions, {
       exists: async () => true,
       inspectExecutable: async (descriptor: { role: string }) => ({
         ...validWindowsReport(descriptor.role),
@@ -286,12 +356,12 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
       readYaml: async (path: string) => path.endsWith('latest.yml') ? latest : appUpdate,
     })
 
-    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, dependencies({
+    await expect(verifyWindowsRelease(windowsVerificationOptions, dependencies({
       ...yaml.appUpdate,
       publisherName: undefined,
     }))).rejects.toThrow(/publisherName/)
 
-    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, dependencies(
+    await expect(verifyWindowsRelease(windowsVerificationOptions, dependencies(
       yaml.appUpdate,
       { ...yaml.latest, sha512: Buffer.alloc(64).toString('base64') },
     ))).rejects.toThrow(/latest\.yml.*signed Setup bytes/)
@@ -300,7 +370,7 @@ describe('Windows Authenticode, publisher, architecture, and updater verificatio
   it('fails before signature inspection when an expected executable is missing', async () => {
     const verifyWindowsRelease = await api('verifyWindowsRelease')
     const yaml = windowsYamlFixtures()
-    await expect(verifyWindowsRelease({ version, releaseDir, expectedPublisher }, {
+    await expect(verifyWindowsRelease(windowsVerificationOptions, {
       exists: async (path: string) => !path.endsWith('elevate.exe'),
       inspectExecutable: async (descriptor: { role: string }) => validWindowsReport(descriptor.role),
       readBytes: async () => setupBytes(),

@@ -147,7 +147,12 @@ function workflowErrors(candidate: Workflow): string[] {
     'MAC_CSC_LINK', 'MAC_CSC_KEY_PASSWORD', 'MAC_CSC_NAME', 'MAC_EXPECTED_TEAM_ID',
     'APPLE_API_KEY', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER',
   ]
-  const winEnvNames = ['WIN_CSC_LINK', 'WIN_CSC_KEY_PASSWORD', 'WIN_EXPECTED_PUBLISHER']
+  const winEnvNames = [
+    'WIN_CSC_LINK',
+    'WIN_CSC_KEY_PASSWORD',
+    'WIN_EXPECTED_PUBLISHER',
+    'WIN_EXPECTED_CERT_SHA256',
+  ]
   const macCredential = namedStep(macPackage, 'Fail closed on missing Mac release credentials')
   const winCredential = namedStep(winPackage, 'Fail closed on missing Windows release credentials')
   for (const name of macEnvNames) {
@@ -158,6 +163,28 @@ function workflowErrors(candidate: Workflow): string[] {
   }
   if (!macCredential?.run?.includes('--platform mac --credentials-only')) errors.push('package-mac needs the credential-only gate')
   if (!winCredential?.run?.includes('--platform windows --credentials-only')) errors.push('package-win needs the credential-only gate')
+
+  const winBuilder = namedStep(winPackage, 'Build signed Windows packages once')
+  const winVerification = namedStep(winPackage, 'Hard-verify final signed Windows package bytes')
+  for (const name of winEnvNames) {
+    if (winVerification?.env?.[name] !== `\${{ secrets.${name} }}`) {
+      errors.push(`package-win artifact verifier must map ${name}`)
+    }
+  }
+  if (winBuilder?.env?.WIN_EXPECTED_CERT_SHA256 !== undefined) {
+    errors.push('Windows builder must not receive the verification-only certificate thumbprint')
+  }
+
+  const smokeWin = candidate.jobs['smoke-win']
+  const smokeWinStep = namedStep(smokeWin, 'Silent-install, exercise, and uninstall the signed Setup')
+  for (const name of ['WIN_EXPECTED_PUBLISHER', 'WIN_EXPECTED_CERT_SHA256']) {
+    if (smokeWinStep?.env?.[name] !== `\${{ secrets.${name} }}`) {
+      errors.push(`smoke-win must map ${name}`)
+    }
+  }
+  if (!smokeWinStep?.run?.includes('-ExpectedCertificateSha256 "${env:WIN_EXPECTED_CERT_SHA256}"')) {
+    errors.push('smoke-win must pass the expected SHA-256 certificate thumbprint')
+  }
 
   const macRuns = commands(macPackage)
   const winRuns = commands(winPackage)

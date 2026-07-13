@@ -20,6 +20,7 @@ const WINDOWS_CREDENTIALS = [
   'WIN_CSC_LINK',
   'WIN_CSC_KEY_PASSWORD',
   'WIN_EXPECTED_PUBLISHER',
+  'WIN_EXPECTED_CERT_SHA256',
 ]
 
 const REQUIRED_MAC_ENTITLEMENTS = [
@@ -31,75 +32,16 @@ function present(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-function parsePublisherSubject(value) {
-  if (typeof value !== 'string' || value.trim().length === 0) return null
-  const source = value.trim()
-  const entries = []
-  let key = ''
-  let token = ''
-  let readingValue = false
-  let quoted = false
-
-  function appendEntry() {
-    const normalizedKey = key.trim().toUpperCase()
-    const normalizedValue = token.trim().normalize('NFC')
-    if (!/^(?:[A-Z][A-Z0-9.-]*|\d+(?:\.\d+)+)$/.test(normalizedKey) || normalizedValue.length === 0) {
-      return false
-    }
-    entries.push([normalizedKey, normalizedValue])
-    key = ''
-    token = ''
-    readingValue = false
-    return true
-  }
-
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]
-    if (character === '\\') {
-      if (index + 1 >= source.length) return null
-      const hexadecimal = source.slice(index + 1, index + 3)
-      const decoded = /^[0-9a-f]{2}$/i.test(hexadecimal)
-        ? String.fromCharCode(Number.parseInt(hexadecimal, 16))
-        : source[index + 1]
-      if (readingValue) token += decoded
-      else key += decoded
-      index += /^[0-9a-f]{2}$/i.test(hexadecimal) ? 2 : 1
-      continue
-    }
-    if (character === '"') {
-      quoted = !quoted
-      continue
-    }
-    if (!quoted && !readingValue && character === '=') {
-      readingValue = true
-      continue
-    }
-    if (!quoted && readingValue && [',', ';', '+'].includes(character)) {
-      if (!appendEntry()) return null
-      continue
-    }
-    if (readingValue) token += character
-    else key += character
-  }
-
-  if (quoted || !readingValue || !appendEntry()) return null
-  return entries
+function isFullPublisherSubject(value) {
+  if (typeof value !== 'string' || value.length === 0 || /[\0\r\n]/.test(value)) return false
+  if (!/^(?:[A-Z][A-Z0-9.-]*|\d+(?:\.\d+)+)=/.test(value)) return false
+  return /(?:^|,\s*)CN=(?!,|$)./.test(value)
 }
 
-export function normalizePublisherSubject(value) {
-  const entries = parsePublisherSubject(value)
-  if (entries == null || !entries.some(([key]) => key === 'CN')) return null
-  entries.sort(([leftKey, leftValue], [rightKey, rightValue]) => {
-    if (leftKey !== rightKey) return leftKey < rightKey ? -1 : 1
-    if (leftValue === rightValue) return 0
-    return leftValue < rightValue ? -1 : 1
-  })
-  return JSON.stringify(entries)
-}
-
-function publisherSubjectsEqual(actual, expected) {
-  const normalizedExpected = normalizePublisherSubject(expected)
-  return normalizedExpected !== null && normalizePublisherSubject(actual) === normalizedExpected
+function canonicalCertificateSha256(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
+    ? value.toUpperCase()
+    : null
 }
 
 export function requiredCredentialErrors(platform, env) {
@@ -117,8 +59,13 @@ export function requiredCredentialErrors(platform, env) {
   }
   if (platform === 'windows'
     && present(env.WIN_EXPECTED_PUBLISHER)
-    && normalizePublisherSubject(env.WIN_EXPECTED_PUBLISHER) === null) {
+    && !isFullPublisherSubject(env.WIN_EXPECTED_PUBLISHER)) {
     errors.push('WIN_EXPECTED_PUBLISHER must be a full Subject DN containing CN')
+  }
+  if (platform === 'windows'
+    && present(env.WIN_EXPECTED_CERT_SHA256)
+    && canonicalCertificateSha256(env.WIN_EXPECTED_CERT_SHA256) === null) {
+    errors.push('WIN_EXPECTED_CERT_SHA256 must be a 64-character hexadecimal SHA-256 certificate thumbprint')
   }
 
   return errors
@@ -202,12 +149,15 @@ export async function verifyMacRelease(options, dependencies) {
   return { packageCount: descriptors.length }
 }
 
-function validateWindowsReport(descriptor, report, expectedPublisher) {
+function validateWindowsReport(descriptor, report, options) {
   const errors = []
   const label = descriptor.path
   if (report.status !== 'Valid') errors.push(`${label}: expected valid Authenticode status`)
-  if (!publisherSubjectsEqual(report.publisher, expectedPublisher)) {
+  if (report.publisher !== options.expectedPublisher) {
     errors.push(`${label}: expected publisher does not match`)
+  }
+  if (canonicalCertificateSha256(report.certificateSha256) !== options.expectedCertificateSha256) {
+    errors.push(`${label}: certificate SHA-256 thumbprint does not match`)
   }
   if (report.timestamped !== true) errors.push(`${label}: trusted timestamp is missing`)
   if (descriptor.role === 'installed-main' && report.machine !== 'x64') {
@@ -232,7 +182,7 @@ function validateWindowsUpdaterMetadata({ version, expectedPublisher, setupBytes
   const expectedSha512 = createHash('sha512').update(setupBytes).digest('base64')
   const expectedSize = setupBytes.length
 
-  if (!publisherNames(appUpdate?.publisherName).some(name => publisherSubjectsEqual(name, expectedPublisher))) {
+  if (!publisherNames(appUpdate?.publisherName).some(name => name === expectedPublisher)) {
     errors.push('app-update.yml publisherName does not contain the expected publisher')
   }
 
@@ -252,6 +202,13 @@ function validateWindowsUpdaterMetadata({ version, expectedPublisher, setupBytes
 }
 
 export async function verifyWindowsRelease(options, dependencies) {
+  if (!isFullPublisherSubject(options.expectedPublisher)) {
+    throw new Error('expected Windows publisher must be a full Subject DN containing CN')
+  }
+  const expectedCertificateSha256 = canonicalCertificateSha256(options.expectedCertificateSha256)
+  if (expectedCertificateSha256 === null) {
+    throw new Error('expected Windows certificate SHA-256 thumbprint must be 64 hexadecimal characters')
+  }
   const descriptors = [
     { role: 'setup', path: join(options.releaseDir, `Baby Diary Setup ${options.version}.exe`) },
     { role: 'portable', path: join(options.releaseDir, `Baby Diary ${options.version}.exe`) },
@@ -266,7 +223,10 @@ export async function verifyWindowsRelease(options, dependencies) {
       continue
     }
     const report = await dependencies.inspectExecutable(descriptor)
-    errors.push(...validateWindowsReport(descriptor, report, options.expectedPublisher))
+    errors.push(...validateWindowsReport(descriptor, report, {
+      expectedPublisher: options.expectedPublisher,
+      expectedCertificateSha256,
+    }))
   }
 
   const setupPath = descriptors[0].path
@@ -455,9 +415,13 @@ const AUTHENTICODE_SCRIPT = `& {
   $publisher = if ($null -ne $signature.SignerCertificate) {
     $signature.SignerCertificate.Subject
   } else { $null }
+  $certificateSha256 = if ($null -ne $signature.SignerCertificate) {
+    $signature.SignerCertificate.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+  } else { $null }
   [pscustomobject]@{
     status = $signature.Status.ToString()
     publisher = $publisher
+    certificateSha256 = $certificateSha256
     timestamped = ($null -ne $signature.TimeStamperCertificate)
   } | ConvertTo-Json -Compress
 }`
@@ -484,6 +448,7 @@ export async function inspectWindowsExecutableWithRunner(descriptor, runtime) {
   return {
     status: signature.status,
     publisher: signature.publisher,
+    certificateSha256: signature.certificateSha256,
     timestamped: signature.timestamped === true,
     machine: readPeMachine(bytes),
   }
@@ -611,7 +576,8 @@ export async function runPlatformReleaseCli(argv, env, runtime = {}) {
   return await verifyWindowsRelease({
     version: options.version,
     releaseDir: options.releasedir,
-    expectedPublisher: env.WIN_EXPECTED_PUBLISHER.trim(),
+    expectedPublisher: env.WIN_EXPECTED_PUBLISHER,
+    expectedCertificateSha256: env.WIN_EXPECTED_CERT_SHA256,
   }, dependencies)
 }
 

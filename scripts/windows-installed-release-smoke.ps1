@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$SetupPath,
-  [string]$ExpectedPublisher = $env:WIN_EXPECTED_PUBLISHER
+  [string]$ExpectedPublisher = $env:WIN_EXPECTED_PUBLISHER,
+  [string]$ExpectedCertificateSha256 = $env:WIN_EXPECTED_CERT_SHA256
 )
 
 Set-StrictMode -Version Latest
@@ -29,10 +30,25 @@ function Assert-TrustedSignature {
   if ($null -eq $signature.TimeStamperCertificate) {
     throw "Trusted timestamp is missing: $Path"
   }
-  $publisher = $signature.SignerCertificate.Subject
-  & node -e "import('./scripts/platform-release-verification.mjs').then(m => { const actual=m.normalizePublisherSubject(process.argv[1]); const expected=m.normalizePublisherSubject(process.argv[2]); if(expected===null || actual!==expected) throw new Error('Authenticode publisher Subject DN mismatch') })" $publisher $ExpectedPublisher
-  if ($LASTEXITCODE -ne 0) {
+  if ($null -eq $signature.SignerCertificate) {
+    throw "Authenticode signer certificate is missing: $Path"
+  }
+  if (-not [string]::Equals(
+      $signature.SignerCertificate.Subject,
+      $ExpectedPublisher,
+      [System.StringComparison]::Ordinal
+    )) {
     throw "Authenticode publisher does not match WIN_EXPECTED_PUBLISHER: $Path"
+  }
+  $certificateSha256 = $signature.SignerCertificate.GetCertHashString(
+    [System.Security.Cryptography.HashAlgorithmName]::SHA256
+  )
+  if (-not [string]::Equals(
+      $certificateSha256,
+      $ExpectedCertificateSha256,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Authenticode certificate SHA-256 does not match WIN_EXPECTED_CERT_SHA256: $Path"
   }
 }
 
@@ -57,6 +73,9 @@ function Get-UninstallerPath {
 
 if ([string]::IsNullOrWhiteSpace($ExpectedPublisher)) {
   throw 'WIN_EXPECTED_PUBLISHER is required'
+}
+if ($ExpectedCertificateSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+  throw 'WIN_EXPECTED_CERT_SHA256 must be exactly 64 hexadecimal characters'
 }
 $SetupPath = (Resolve-Path -LiteralPath $SetupPath).Path
 $existing = @(Get-BabyDiaryInstall)
@@ -98,7 +117,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Installed application PE architecture validation failed' }
 
   $appUpdatePath = Join-Path $installLocation 'resources\app-update.yml'
-  & node -e "const fs=require('node:fs'); const yaml=require('js-yaml'); import('./scripts/platform-release-verification.mjs').then(m => { const value=yaml.load(fs.readFileSync(process.argv[1],'utf8')).publisherName; const names=Array.isArray(value)?value:[value]; const expected=m.normalizePublisherSubject(process.argv[2]); if(expected===null || !names.some(name => m.normalizePublisherSubject(name)===expected)) throw new Error('installed app-update.yml publisherName mismatch') })" $appUpdatePath $ExpectedPublisher
+  & node -e "const fs=require('node:fs'); const yaml=require('js-yaml'); const value=yaml.load(fs.readFileSync(process.argv[1],'utf8')).publisherName; const names=Array.isArray(value)?value:[value]; const expected=process.argv[2]; if(!names.some(name => typeof name==='string' && name===expected)) throw new Error('installed app-update.yml publisherName mismatch')" $appUpdatePath $ExpectedPublisher
   if ($LASTEXITCODE -ne 0) { throw 'Installed updater publisherName validation failed' }
 
   $env:BABYDIARY_E2E_EXECUTABLE = $installedExecutable

@@ -302,6 +302,7 @@ jobs:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
       - name: Build signed Windows packages once
         run: npm run build && npx electron-builder --config electron-builder.release.cjs --win --publish never
         env:
@@ -316,6 +317,7 @@ jobs:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
       - uses: actions/upload-artifact@v4
         with:
           name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
@@ -405,9 +407,11 @@ jobs:
           ./scripts/windows-installed-release-smoke.ps1
           -SetupPath "release/Baby Diary Setup ${{ needs.release-context.outputs.version }}.exe"
           -ExpectedPublisher "${env:WIN_EXPECTED_PUBLISHER}"
+          -ExpectedCertificateSha256 "${env:WIN_EXPECTED_CERT_SHA256}"
         timeout-minutes: 20
         env:
           WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
 
   manifest-mac:
     needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win]

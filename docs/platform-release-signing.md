@@ -41,8 +41,25 @@ ref로 선택한다. 이 환경에는 `RELEASE_TOKEN`을 저장하지 않는다.
 - `WIN_CSC_KEY_PASSWORD`: 위 PFX의 암호
 - `WIN_EXPECTED_PUBLISHER`: 인증서의 전체 Subject DN. 예:
   `CN=HB-code-glitch, O=Example Company, C=KR`. bare CN(`HB-code-glitch`)만 넣지
-  않는다. Authenticode 검사와 electron-builder의 `app-update.yml.publisherName`은
-  속성 순서를 정규화한 뒤 이 전체 DN이 정확히 같은지 확인한다.
+  않는다. PowerShell/X509의 `SignerCertificate.Subject`가 출력한 문자열을 그대로
+  복사하며, 공백·escape·quote·RDN 구조·속성 순서를 정규화하거나 재정렬하지 않는다.
+  Authenticode 검사, electron-builder의 `publisherName`, 설치된
+  `app-update.yml.publisherName`은 모두 이 문자열과 ordinal exact equality로 비교한다.
+- `WIN_EXPECTED_CERT_SHA256`: 같은 서명 인증서의 SHA-256 thumbprint. separator 없는
+  정확히 64자리 16진수로 저장한다. 16진수 대소문자만 동등하게 취급하며 Subject가
+  같더라도 이 값이 다른 인증서는 거부한다.
+
+Windows 인증서를 `$certificate`에 불러온 뒤 아래 두 출력값을 각각 secret에
+복사한다. 첫 줄은 문자열을 손대지 않고 `WIN_EXPECTED_PUBLISHER`에, 둘째 줄은
+`WIN_EXPECTED_CERT_SHA256`에 넣는다.
+
+```powershell
+$certificate.Subject
+$certificate.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+```
+
+Setup, portable, unpacked main executable, `elevate.exe`, 설치 smoke의 Setup/main은
+전체 Subject DN과 SHA-256 thumbprint가 모두 일치해야 통과한다.
 
 ### GitHub 릴리스
 

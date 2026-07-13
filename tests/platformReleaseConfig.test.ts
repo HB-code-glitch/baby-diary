@@ -23,6 +23,7 @@ function loadReleaseConfig() {
       WIN_CSC_LINK: 'fixture-win-link',
       WIN_CSC_KEY_PASSWORD: 'fixture-win-password',
       WIN_EXPECTED_PUBLISHER: expectedPublisher,
+      WIN_EXPECTED_CERT_SHA256: 'A'.repeat(64),
     },
   })
   expect(result.status, result.stderr).toBe(0)
@@ -121,6 +122,7 @@ describe('release signing operator documentation', () => {
       'WIN_CSC_LINK',
       'WIN_CSC_KEY_PASSWORD',
       'WIN_EXPECTED_PUBLISHER',
+      'WIN_EXPECTED_CERT_SHA256',
       'RELEASE_TOKEN',
     ]) {
       expect(source).toContain(name)
@@ -139,5 +141,10 @@ describe('release signing operator documentation', () => {
     expect(source).toContain('`v*` 태그')
     expect(source).toContain('전체 Subject DN')
     expect(source).toContain('CN=')
+    expect(source).toContain('SignerCertificate.Subject')
+    expect(source).toContain('GetCertHashString')
+    expect(source).toContain('HashAlgorithmName]::SHA256')
+    expect(source).toMatch(/64.*16진수/)
+    expect(source).toContain('정규화하거나 재정렬하지 않는다')
   })
 })

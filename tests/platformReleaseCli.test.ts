@@ -27,6 +27,7 @@ const macCredentials = {
 }
 
 const expectedPublisher = 'CN=HB-code-glitch, O="Expected, Publisher", C=KR'
+const expectedCertificateSha256 = 'A'.repeat(64)
 
 function minimalPe(machine = 0x8664) {
   const bytes = Buffer.alloc(256)
@@ -165,7 +166,12 @@ describe('native platform inspection adapters', () => {
       run: async (command: string, args: string[], options?: { env?: Record<string, string> }) => {
         calls.push([command, args, options])
         return {
-          stdout: JSON.stringify({ status: 'Valid', publisher: expectedPublisher, timestamped: true }),
+          stdout: JSON.stringify({
+            status: 'Valid',
+            publisher: expectedPublisher,
+            certificateSha256: expectedCertificateSha256,
+            timestamped: true,
+          }),
           stderr: '',
         }
       },
@@ -174,12 +180,15 @@ describe('native platform inspection adapters', () => {
     expect(report).toEqual({
       status: 'Valid',
       publisher: expectedPublisher,
+      certificateSha256: expectedCertificateSha256,
       timestamped: true,
       machine: 'x64',
     })
     expect(calls[0][0]).toMatch(/powershell(?:\.exe)?$/i)
     expect(calls[0][1].join(' ')).not.toContain('Baby Diary.exe')
     expect(calls[0][1].join(' ')).toContain('$signature.SignerCertificate.Subject')
+    expect(calls[0][1].join(' ')).toContain('GetCertHashString')
+    expect(calls[0][1].join(' ')).toContain('HashAlgorithmName]::SHA256')
     expect(calls[0][1].join(' ')).not.toContain('GetNameInfo')
     expect(calls[0][2]?.env).toEqual({
       BABYDIARY_AUTHENTICODE_PATH: 'C:\\release\\Baby Diary.exe',
@@ -205,5 +214,41 @@ describe('platform release CLI fail-closed mode', () => {
       APPLE_API_KEY_ID: ' ',
     }, { createDependencies })).rejects.toThrow(/missing required release credential: APPLE_API_KEY_ID/)
     expect(createDependencies).not.toHaveBeenCalled()
+  })
+
+  it('passes the exact untrimmed Windows Subject and SHA-256 pin to artifact verification', async () => {
+    const runCli = await api('runPlatformReleaseCli')
+    const exactPublisher = 'CN=Acme\\ '
+    const setupBytes = Buffer.from('signed-setup-fixture')
+    const sha512 = (await import('node:crypto')).createHash('sha512').update(setupBytes).digest('base64')
+    const createDependencies = vi.fn(() => ({
+      exists: async () => true,
+      inspectExecutable: async (descriptor: { role: string }) => ({
+        status: 'Valid',
+        publisher: exactPublisher,
+        certificateSha256: expectedCertificateSha256,
+        timestamped: true,
+        machine: descriptor.role === 'installed-main' ? 'x64' : 'x86',
+      }),
+      readBytes: async () => setupBytes,
+      readYaml: async (path: string) => path.endsWith('latest.yml')
+        ? {
+            version: '0.3.9',
+            path: 'Baby-Diary-Setup-0.3.9.exe',
+            sha512,
+            files: [{ url: 'Baby-Diary-Setup-0.3.9.exe', sha512, size: setupBytes.length }],
+          }
+        : { publisherName: [exactPublisher] },
+    }))
+
+    await expect(runCli([
+      '--platform', 'windows', '--release-dir', 'release', '--version', '0.3.9',
+    ], {
+      WIN_CSC_LINK: 'fixture-pfx',
+      WIN_CSC_KEY_PASSWORD: 'fixture-password',
+      WIN_EXPECTED_PUBLISHER: exactPublisher,
+      WIN_EXPECTED_CERT_SHA256: expectedCertificateSha256,
+    }, { createDependencies })).resolves.toEqual({ executableCount: 4 })
+    expect(createDependencies).toHaveBeenCalledWith('windows')
   })
 })
