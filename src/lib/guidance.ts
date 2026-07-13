@@ -4,12 +4,9 @@
  * Fixed-day feeding/calendar claims and legacy marker cards are retired.
  */
 import {
-  differenceInCalendarDays,
-  differenceInMonths,
-  isValid,
-  parseISO,
-  startOfDay,
-} from 'date-fns'
+  calculateAgeInCompletedDays,
+  calculateCompletedCalendarMonths,
+} from './ageGuidance'
 import {
   HEALTH_EVIDENCE_SOURCES,
   getEvidenceSources,
@@ -190,18 +187,20 @@ export interface FeverAgeContext {
   completedMonths: number
 }
 
+const ISO_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
 export function getFeverAgeContext(
   birthdate: string | null,
   measuredAt: string | Date = new Date(),
 ): FeverAgeContext | null {
   if (!birthdate) return null
-  const birth = startOfDay(parseISO(birthdate))
-  const measuredDate = typeof measuredAt === 'string' ? new Date(measuredAt) : measuredAt
-  const measured = startOfDay(measuredDate)
-  if (!isValid(birth) || !isValid(measured)) return null
-  const ageDays = differenceInCalendarDays(measured, birth)
-  if (ageDays < 0) return null
-  return { ageDays, completedMonths: differenceInMonths(measured, birth) }
+  const measuredDate = typeof measuredAt === 'string' && !ISO_DATE_ONLY.test(measuredAt)
+    ? new Date(measuredAt)
+    : measuredAt
+  const ageDays = calculateAgeInCompletedDays(birthdate, measuredDate)
+  const completedMonths = calculateCompletedCalendarMonths(birthdate, measuredDate)
+  if (ageDays === null || completedMonths === null) return null
+  return { ageDays, completedMonths }
 }
 
 export function evaluateFever({
@@ -222,7 +221,7 @@ export function evaluateFever({
   if ((isNewborn || age == null) && celsius < 36) return 'emergency'
   if (celsius < 38) return null
   if (age == null) return 'emergency'
-  if (age.ageDays < 90) return 'emergency'
+  if (age.ageDays < 90 || age.completedMonths < 3) return 'emergency'
 
   if (age.completedMonths >= 3 && age.completedMonths < 6) {
     if (celsius >= 39) return 'danger'

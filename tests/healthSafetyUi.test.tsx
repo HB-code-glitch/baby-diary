@@ -32,6 +32,8 @@ describe('Korean/Japanese health copy parity', () => {
     expect(ja.popover.riskIntro).toContain('いずれか一つでも')
     expect(ko.feverModal.unknownAgeNote).toMatch(/36(?:\.0)?°C.*38(?:\.0)?°C|38(?:\.0)?°C.*36(?:\.0)?°C/)
     expect(ja.feverModal.unknownAgeNote).toMatch(/36(?:\.0)?°C.*38(?:\.0)?°C|38(?:\.0)?°C.*36(?:\.0)?°C/)
+    expect(ko.feverModal.emergencyBody).toMatch(/3개월 미만.*90일 미만|90일 미만.*3개월 미만/)
+    expect(ja.feverModal.emergencyBody).toMatch(/3か月未満.*90日未満|90日未満.*3か月未満/)
 
     const exposedCopy = JSON.stringify({
       ko: { home: ko.home, popover: ko.popover, feedingTip: ko.feedingTip, feverModal: ko.feverModal },

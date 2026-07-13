@@ -252,6 +252,8 @@ describe('AGE_GUIDANCE_ITEMS', () => {
 
   it('shows the 3–5 month fever thresholds without mixing them into older stages', () => {
     const fever = AGE_GUIDANCE_ITEMS.find(item => item.id === 'three-five-fever')!
+    expect(fever.actionsKo.join(' ')).toMatch(/90일 미만.*38(?:\.0)?°C 이상/)
+    expect(fever.actionsJa.join(' ')).toMatch(/90日未満.*38(?:\.0)?°C以上/)
     expect(fever.actionsKo.join(' ')).toContain('38.3°C 이상')
     expect(fever.actionsKo.join(' ')).toContain('39.0°C 이상')
     expect(fever.actionsJa.join(' ')).toContain('38.3°C以上')

@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { HEALTH_EVIDENCE_SOURCES, getEvidenceSources } from '../src/lib/healthEvidence'
 import {
@@ -13,6 +15,7 @@ import {
   getCalendarGuidance,
   getCurrentFormulaGuidance,
   getFeedingBand,
+  getFeverAgeContext,
   getGuidanceForAge,
   getGuidanceForDay,
 } from '../src/lib/guidance'
@@ -72,7 +75,7 @@ describe('evaluateFever safety routing', () => {
     })).toBe('emergency')
   })
 
-  it('uses completed calendar months after the under-90-day rule', () => {
+  it('uses completed calendar months after both young-infant boundaries are crossed', () => {
     const base = {
       birthdate: '2026-01-31',
       measuredAt: '2026-05-01T12:00:00+09:00',
@@ -81,14 +84,110 @@ describe('evaluateFever safety routing', () => {
     expect(evaluateFever({ ...base, celsius: 39 })).toBe('danger')
   })
 
-  it('does not approximate the three-month boundary from 90 days', () => {
+  it('keeps a 90-day-old baby urgent until the three-calendar-month boundary', () => {
     const base = { birthdate: '2026-03-01', measuredAt: '2026-05-30T12:00:00+09:00' }
-    expect(evaluateFever({ ...base, celsius: 39 })).toBe('caution')
+    expect(getFeverAgeContext(base.birthdate, base.measuredAt)).toEqual({
+      ageDays: 90,
+      completedMonths: 2,
+    })
+    expect(evaluateFever({ ...base, celsius: 39 })).toBe('emergency')
     expect(evaluateFever({
       ...base,
       celsius: 39,
       measuredAt: '2026-06-01T12:00:00+09:00',
     })).toBe('danger')
+  })
+
+  it.each([
+    ['28-day birth', '2026-01-28', '2026-04-27', '2026-04-28', '2026-04-28'],
+    ['30-day birth', '2026-01-30', '2026-04-29', '2026-04-30', '2026-04-30'],
+    ['31-day birth', '2026-01-31', '2026-04-29', '2026-04-30', '2026-05-01'],
+    ['February 28 birth', '2026-02-28', '2026-05-27', '2026-05-28', '2026-05-29'],
+    ['leap-day birth', '2024-02-29', '2024-05-28', '2024-05-29', '2024-05-29'],
+    ['March 31 birth', '2026-03-31', '2026-06-29', '2026-06-30', '2026-06-30'],
+  ])(
+    'requires both 90 days and three completed calendar months for a %s',
+    (_label, birthdate, dayBeforeThreeMonths, threeMonthDate, firstDatePastBoth) => {
+      const before = getFeverAgeContext(birthdate, dayBeforeThreeMonths)
+      const atThreeMonths = getFeverAgeContext(birthdate, threeMonthDate)
+      const pastBoth = getFeverAgeContext(birthdate, firstDatePastBoth)
+
+      expect(before?.completedMonths).toBe(2)
+      expect(atThreeMonths?.completedMonths).toBe(3)
+      expect(pastBoth?.ageDays).toBeGreaterThanOrEqual(90)
+      expect(pastBoth?.completedMonths).toBeGreaterThanOrEqual(3)
+      expect(evaluateFever({ celsius: 39, birthdate, measuredAt: dayBeforeThreeMonths })).toBe('emergency')
+      expect(evaluateFever({ celsius: 39, birthdate, measuredAt: threeMonthDate })).toBe(
+        atThreeMonths!.ageDays < 90 ? 'emergency' : 'danger'
+      )
+      expect(evaluateFever({ celsius: 39, birthdate, measuredAt: firstDatePastBoth })).toBe('danger')
+    }
+  )
+
+  it.each(['UTC', 'Asia/Tokyo', 'America/New_York'])(
+    'keeps date-only fever boundaries as local civil dates in %s',
+    timeZone => {
+      const root = process.cwd()
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(root, 'node_modules', 'vite-node', 'vite-node.mjs'),
+          join(root, 'tests', 'fixtures', 'feverAgeTimezoneProbe.ts'),
+        ],
+        {
+          cwd: root,
+          env: { ...process.env, TZ: timeZone },
+          encoding: 'utf8',
+        }
+      )
+
+      expect(result.status, result.stderr).toBe(0)
+      const output = JSON.parse(result.stdout)
+      expect(output.timeZone).toBe(timeZone)
+      expect(output.dateOnly).toEqual({
+        day89: { ageDays: 89, completedMonths: 2 },
+        day90BeforeThreeMonths: { ageDays: 90, completedMonths: 2 },
+        threeMonthsBefore90Days: { ageDays: 89, completedMonths: 3 },
+        pastBoth: { ageDays: 90, completedMonths: 3 },
+        beforeSixMonths: { ageDays: 181, completedMonths: 5 },
+        sixMonths: { ageDays: 182, completedMonths: 6 },
+      })
+      expect(output.levels).toEqual({
+        day89: 'emergency',
+        day90BeforeThreeMonths: 'emergency',
+        threeMonthsBefore90Days: 'emergency',
+        pastBoth: 'danger',
+        beforeSixMonths: 'danger',
+        sixMonths: 'warning',
+      })
+      expect(output.dateObject).toEqual(output.timestamp)
+      expect(output.timestamp.ageDays).toBe(timeZone === 'America/New_York' ? 89 : 90)
+    }
+  )
+
+  it('keeps invalid age inputs conservative', () => {
+    expect(getFeverAgeContext('not-a-date', '2026-07-14')).toBeNull()
+    expect(getFeverAgeContext('2026-04-15', 'not-a-date')).toBeNull()
+    expect(getFeverAgeContext('2026-04-15', '2026-02-30')).toBeNull()
+    expect(getFeverAgeContext('2026-04-15', new Date(Number.NaN))).toBeNull()
+    expect(evaluateFever({
+      celsius: 38,
+      birthdate: '2026-04-15',
+      measuredAt: 'not-a-date',
+    })).toBe('emergency')
+  })
+
+  it('keeps the newborn boundary on exact completed days', () => {
+    expect(evaluateFever({
+      celsius: 35.9,
+      birthdate: '2026-01-01',
+      measuredAt: '2026-01-28',
+    })).toBe('emergency')
+    expect(evaluateFever({
+      celsius: 35.9,
+      birthdate: '2026-01-01',
+      measuredAt: '2026-01-29',
+    })).toBeNull()
   })
 
   it('uses clinician contact without a serious-diagnosis label at 39.4°C after six months', () => {
