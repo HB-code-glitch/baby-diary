@@ -28,6 +28,7 @@ import {
   type HomeMetricKey,
 } from '../lib/progressiveDisclosure'
 import { isTutorialShortcutBlocked } from '../lib/tutorial'
+import { latestValidEvent } from '../lib/eventTime'
 
 // ---------------------------------------------------------------------------
 // Milestone dismiss persistence
@@ -203,8 +204,7 @@ function InsightsPanel({
   // Last temp (recent)
   const recentTemp: DiaryEvent | null = useAppStore(s => {
     const temps = s.events.filter(e => !e.deleted && e.type === 'temp')
-    if (temps.length === 0) return null
-    return temps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    return latestValidEvent(temps)
   })
 
   const tempLabel = recentTemp
@@ -374,8 +374,8 @@ function StatCards() {
   // Most recent temp
   const lastTemp = React.useMemo(() => {
     const todayTemps = events.filter(e => !e.deleted && e.type === 'temp' && isToday(parseISO(e.at)))
-    if (todayTemps.length === 0) return null
-    const last = todayTemps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(todayTemps)
+    if (!last) return null
     return (last.data as TempData).celsius
   }, [events])
 
@@ -1406,22 +1406,22 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const lastFormulaMl = React.useMemo(() => {
     const formulas = events.filter(e => !e.deleted && e.type === 'formula')
-    if (formulas.length === 0) return 120
-    const last = formulas.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(formulas)
+    if (!last) return 120
     return (last.data as FormulaData).ml ?? 120
   }, [events])
 
   const lastTemp = React.useMemo(() => {
     const temps = events.filter(e => !e.deleted && e.type === 'temp')
-    if (temps.length === 0) return 36.5
-    const last = temps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(temps)
+    if (!last) return 36.5
     return (last.data as { celsius: number }).celsius ?? 36.5
   }, [events])
 
   const lastBreastSide = React.useMemo((): 'L' | 'R' | 'both' | null => {
     const breasts = events.filter(e => !e.deleted && e.type === 'breast')
-    if (breasts.length === 0) return null
-    const last = breasts.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(breasts)
+    if (!last) return null
     return (last.data as BreastData).side ?? null
   }, [events])
 

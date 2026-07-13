@@ -8,6 +8,7 @@ import { useToast } from '../components/Toast'
 import { DiaryEvent, MessageData } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
+import { sortValidEventsNewestFirst } from '../lib/eventTime'
 
 // ---------------------------------------------------------------------------
 // Message composer
@@ -116,9 +117,7 @@ export function MessagesPage() {
   const babyName = settings?.baby?.name || t('sidebar.defaultBabyName')
 
   const messageEvents = useMemo(() =>
-    events
-      .filter(e => !e.deleted && e.type === 'message')
-      .sort((a, b) => b.at.localeCompare(a.at)),
+    sortValidEventsNewestFirst(events.filter(e => !e.deleted && e.type === 'message')),
     [events]
   )
 

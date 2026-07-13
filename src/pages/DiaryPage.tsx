@@ -8,6 +8,7 @@ import { useToast } from '../components/Toast'
 import { DiaryEvent, DiaryData } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
+import { sortValidEventsNewestFirst } from '../lib/eventTime'
 
 // ---------------------------------------------------------------------------
 // Diary entry editor
@@ -115,9 +116,7 @@ export function DiaryPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   const diaryEvents = useMemo(() =>
-    events
-      .filter(e => !e.deleted && e.type === 'diary')
-      .sort((a, b) => b.at.localeCompare(a.at)),
+    sortValidEventsNewestFirst(events.filter(e => !e.deleted && e.type === 'diary')),
     [events]
   )
 

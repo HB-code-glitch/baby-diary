@@ -5,6 +5,7 @@ import { enqueue } from '../sync/syncEngine'
 import { v4 as uuidv4 } from 'uuid'
 import { format, isToday, parseISO, startOfDay, isSameDay } from 'date-fns'
 import i18n from '../i18n'
+import { isEventAtOrBefore, sortEventsNewestFirst } from '../lib/eventTime'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -157,23 +158,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   // at write time in the user's local timezone) and group by that field instead.
   // ─────────────────────────────────────────────────────────────────────────
   todayEvents: () => {
-    return get().events
-      .filter(e => !e.deleted && isToday(parseISO(e.at)))
-      .sort((a, b) => b.at.localeCompare(a.at))
+    return sortEventsNewestFirst(
+      get().events.filter(e => !e.deleted && isToday(parseISO(e.at))),
+    )
   },
 
   eventsForDay: (date: Date) => {
     const day = startOfDay(date)
-    return get().events
-      .filter(e => !e.deleted && isSameDay(parseISO(e.at), day))
-      .sort((a, b) => b.at.localeCompare(a.at))
+    return sortEventsNewestFirst(
+      get().events.filter(e => !e.deleted && isSameDay(parseISO(e.at), day)),
+    )
   },
 
   lastFeeding: () => {
-    const nowIso = new Date().toISOString()
-    const feedings = get().events
-      .filter(e => !e.deleted && (e.type === 'breast' || e.type === 'formula') && e.at <= nowIso)
-      .sort((a, b) => b.at.localeCompare(a.at))
+    const feedings = sortEventsNewestFirst(get().events.filter(e =>
+      !e.deleted
+      && (e.type === 'breast' || e.type === 'formula')
+      && isEventAtOrBefore(e.at, Date.now()),
+    ))
     return feedings[0] ?? null
   },
 

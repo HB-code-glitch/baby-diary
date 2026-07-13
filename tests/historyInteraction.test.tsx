@@ -165,12 +165,12 @@ describe('History interactions', () => {
   })
 
   it('keeps month and week selections in place and exposes a newest-three preview', async () => {
-    const selected = new Date(2026, 6, 12, 12, 0, 0)
+    const selected = new Date(2026, 6, 13, 12, 0, 0)
     const events = [
-      makeEvent('pee', selected, 8),
-      makeEvent('formula', selected, 10),
-      makeEvent('sleep', selected, 12),
-      makeEvent('growth', selected, 14),
+      { ...makeEvent('pee', selected, 8), at: '2026-07-13T10:00:00+09:00' },
+      { ...makeEvent('formula', selected, 10), at: '2026-07-13T02:00:00Z' },
+      { ...makeEvent('sleep', selected, 12), at: '2026-07-13T11:30:00+09:00' },
+      { ...makeEvent('growth', selected, 14), at: '2026-07-13T03:00:00Z' },
     ]
     useAppStore.setState({ events })
     await act(async () => root.render(<HistoryPage />))
@@ -200,7 +200,7 @@ describe('History interactions', () => {
       }
     })
     const expectedPreviewOrder = [...events]
-      .sort((a, b) => b.at.localeCompare(a.at))
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
       .slice(0, 3)
       .map(event => ({ id: event.id, displayedTime: formatTime(event.at) }))
     expect(renderedPreviewOrder).toEqual(expectedPreviewOrder)
@@ -273,7 +273,11 @@ describe('History interactions', () => {
     })
     const localBoundary = makeEvent('pee', new Date(2026, 6, 13, 0, 5, 0), 0, 'local-boundary')
     const invalidDate = { ...makeEvent('poop', NOW, 1, 'invalid-date'), at: 'not-a-date' }
-    const input = [invalidDate, localBoundary, ...events]
+    const impossibleDate = {
+      ...makeEvent('poop', NOW, 1, 'impossible-date'),
+      at: '2026-02-30T10:00:00+09:00',
+    }
+    const input = [invalidDate, impossibleDate, localBoundary, ...events]
     const originalOrder = input.map(event => event.id)
 
     const grouped = groupEventsByLocalDay(input)
@@ -282,10 +286,12 @@ describe('History interactions', () => {
     expect(grouped.size).toBe(31)
     expect(grouped.get('2026-07-13')?.some(event => event.id === 'local-boundary')).toBe(true)
     expect(Array.from(grouped.values()).flat()).toHaveLength(4_501)
-    expect(Array.from(grouped.values()).flat().some(event => event.id === 'invalid-date' || event.deleted)).toBe(false)
+    expect(Array.from(grouped.values()).flat().some(event => (
+      event.id === 'invalid-date' || event.id === 'impossible-date' || event.deleted
+    ))).toBe(false)
     for (const bucket of grouped.values()) {
       for (let index = 1; index < bucket.length; index += 1) {
-        expect(bucket[index - 1].at.localeCompare(bucket[index].at)).toBeGreaterThanOrEqual(0)
+        expect(Date.parse(bucket[index - 1].at)).toBeGreaterThanOrEqual(Date.parse(bucket[index].at))
       }
     }
   })

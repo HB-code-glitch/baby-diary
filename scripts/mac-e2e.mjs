@@ -777,7 +777,7 @@ async function main() {
       }
     })
     const expectedPreviewOrder = [...todayEvents]
-      .sort((a, b) => b.at.localeCompare(a.at))
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || a.id.localeCompare(b.id))
       .slice(0, 3)
       .map(event => ({ id: event.id, displayedTime: toDisplayedTime(event.at) }))
     assert(

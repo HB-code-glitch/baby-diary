@@ -12,7 +12,6 @@ import {
   isSameDay,
   isSameMonth,
   isToday,
-  isValid,
   parseISO,
   startOfMonth,
   startOfWeek,
@@ -28,6 +27,7 @@ import { GUIDANCE_DISCLAIMER_JA, GUIDANCE_DISCLAIMER_KO, GUIDANCE_ITEMS, type Gu
 import { getMilestones, type Milestone } from '../lib/milestones'
 import { useAppStore } from '../store/useAppStore'
 import type { DiaryEvent, EventType } from '../../shared/types'
+import { compareEventsNewestFirst, eventTimestampMs } from '../lib/eventTime'
 
 type CalendarView = 'month' | 'week' | 'day'
 type Translate = ReturnType<typeof useTranslation>['t']
@@ -66,15 +66,15 @@ export function groupEventsByLocalDay(events: readonly DiaryEvent[]): EventsByLo
 
   events.forEach(event => {
     if (event.deleted) return
-    const parsedAt = parseISO(event.at)
-    if (!isValid(parsedAt)) return
-    const dayKey = format(parsedAt, 'yyyy-MM-dd')
+    const epoch = eventTimestampMs(event.at)
+    if (epoch === null) return
+    const dayKey = format(new Date(epoch), 'yyyy-MM-dd')
     const bucket = grouped.get(dayKey)
     if (bucket) bucket.push(event)
     else grouped.set(dayKey, [event])
   })
 
-  grouped.forEach(bucket => bucket.sort((a, b) => b.at.localeCompare(a.at)))
+  grouped.forEach(bucket => bucket.sort(compareEventsNewestFirst))
   return grouped
 }
 
