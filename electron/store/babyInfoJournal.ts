@@ -5,6 +5,7 @@ import type {
   BabyInfoMutation,
   BabyInfoPendingPage,
   BabyInfoSyncState,
+  BabyInfoUnlinkedArchive,
 } from '../../shared/types'
 import {
   canonicalBabyInfoMutationJson,
@@ -12,9 +13,16 @@ import {
   getBabyInfoMutationKey,
   isValidBabyInfoMutationKey,
   normalizeBabyInfoSyncState,
+  makeBabyInfoUnlinkedArchive,
+  validateBabyInfoUnlinkedArchive,
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
-import { appendDurableFileSync, truncateDurableFileSync } from './durableFs'
+import {
+  appendDurableFileSync,
+  truncateDurableFileSync,
+  type DurableFileOps,
+  type DurableWriteOptions,
+} from './durableFs'
 import { OrderedStringSet } from './orderedStringSet'
 
 export const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
@@ -41,7 +49,13 @@ interface ImportRecord {
   sourceId: string
 }
 
-type JournalRecord = MutationRecord | AcknowledgementRecord | ImportRecord
+interface UnlinkedArchiveRecord {
+  version: 1
+  type: 'unlinked-archive'
+  archive: BabyInfoUnlinkedArchive
+}
+
+type JournalRecord = MutationRecord | AcknowledgementRecord | ImportRecord | UnlinkedArchiveRecord
 
 interface FamilyIndex {
   mutationCount: number
@@ -76,23 +90,56 @@ export class BabyInfoJournal {
   private readonly families = new Map<string, FamilyIndex>()
   private readonly acknowledgedKeys = new Set<string>()
   private readonly completedImports = new Set<string>()
+  private readonly unlinkedArchivesById = new Map<string, BabyInfoUnlinkedArchive>()
   private totalPendingCount = 0
   private tornOffset: number | undefined
   private needsSeparator = false
   private readonly strictReplay: boolean
+  private readonly readOnlyBuffer: boolean
+  private readonly durableOptions: DurableWriteOptions
 
-  constructor(userDataPath: string, options: { strict?: boolean } = {}) {
+  constructor(
+    userDataPath: string,
+    options: {
+      strict?: boolean
+      sourceBuffer?: Uint8Array
+      durableFs?: DurableFileOps
+      platform?: NodeJS.Platform
+    } = {},
+  ) {
     this.journalPath = path.join(userDataPath, BABY_INFO_JOURNAL_FILE)
     this.strictReplay = options.strict ?? false
+    this.readOnlyBuffer = options.sourceBuffer !== undefined
+    this.durableOptions = { fs: options.durableFs, platform: options.platform }
+    if (options.sourceBuffer !== undefined) {
+      this.load(Buffer.from(options.sourceBuffer))
+      return
+    }
     if (!fs.existsSync(this.journalPath)) {
-      appendDurableFileSync(this.journalPath, Buffer.alloc(0))
+      appendDurableFileSync(this.journalPath, Buffer.alloc(0), this.durableOptions)
     }
     this.load()
   }
 
-  private load(): void {
-    if (!fs.existsSync(this.journalPath)) return
-    const content = fs.readFileSync(this.journalPath)
+  private resetIndexes(): void {
+    this.mutationsByKey.clear()
+    this.families.clear()
+    this.acknowledgedKeys.clear()
+    this.completedImports.clear()
+    this.unlinkedArchivesById.clear()
+    this.totalPendingCount = 0
+    this.tornOffset = undefined
+    this.needsSeparator = false
+  }
+
+  private reloadDurablePrefix(): void {
+    this.resetIndexes()
+    this.load()
+  }
+
+  private load(sourceBuffer?: Buffer): void {
+    if (sourceBuffer === undefined && !fs.existsSync(this.journalPath)) return
+    const content = sourceBuffer ?? fs.readFileSync(this.journalPath)
     let offset = 0
     while (offset < content.byteLength) {
       const newline = content.indexOf(0x0a, offset)
@@ -158,6 +205,13 @@ export class BabyInfoJournal {
       }
       return { version: 1, type: 'import', sourceId: value.sourceId }
     }
+    if (value.type === 'unlinked-archive') {
+      if (!exactKeys(value, ['version', 'type', 'archive'])
+        || !validateBabyInfoUnlinkedArchive(value.archive)) {
+        throw new Error('invalid unlinked archive record')
+      }
+      return { version: 1, type: 'unlinked-archive', archive: value.archive }
+    }
     throw new Error('unknown record type')
   }
 
@@ -202,26 +256,56 @@ export class BabyInfoJournal {
       }
       return
     }
-    this.completedImports.add(record.sourceId)
+    if (record.type === 'import') {
+      this.completedImports.add(record.sourceId)
+      return
+    }
+    const existing = this.unlinkedArchivesById.get(record.archive.archiveId)
+    if (existing) {
+      if (existing.babyName !== record.archive.babyName
+        || existing.babyBirthdate !== record.archive.babyBirthdate
+        || existing.source !== record.archive.source) {
+        throw new Error('unlinked archive identity collision')
+      }
+      return
+    }
+    this.unlinkedArchivesById.set(record.archive.archiveId, record.archive)
   }
 
   private repairTornTail(): void {
     if (this.tornOffset !== undefined) {
-      truncateDurableFileSync(this.journalPath, this.tornOffset)
+      truncateDurableFileSync(this.journalPath, this.tornOffset, this.durableOptions)
       this.tornOffset = undefined
       return
     }
     if (this.needsSeparator) {
-      appendDurableFileSync(this.journalPath, Buffer.from('\n', 'utf8'))
+      appendDurableFileSync(this.journalPath, Buffer.from('\n', 'utf8'), this.durableOptions)
       this.needsSeparator = false
     }
   }
 
   private appendRecords(records: readonly JournalRecord[]): void {
     if (records.length === 0) return
+    if (this.readOnlyBuffer) throw new Error('buffer-backed baby info journal is read-only')
     this.repairTornTail()
     const payload = Buffer.from(records.map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8')
-    appendDurableFileSync(this.journalPath, payload)
+    try {
+      appendDurableFileSync(this.journalPath, payload, this.durableOptions)
+    } catch (error) {
+      // A short write/fsync failure can still have published complete records.
+      // Rebuild from the exact durable prefix so memory never rolls back bytes
+      // that reached disk, while a partial final record remains repairable.
+      try {
+        this.reloadDurablePrefix()
+      } catch (reloadError) {
+        const prefixError = new Error(
+          `baby info journal append failed and durable prefix reload failed: ${reloadError instanceof Error ? reloadError.message : String(reloadError)}`,
+        )
+        Object.assign(prefixError, { cause: error })
+        throw prefixError
+      }
+      throw error
+    }
     for (const record of records) this.applyRecord(record)
   }
 
@@ -232,20 +316,20 @@ export class BabyInfoJournal {
   ): BabyInfoJournalSummary {
     const familyId = assertFamilyId(familyIdValue)
     const records: JournalRecord[] = []
-    const available = new Map(this.mutationsByKey)
+    const appendedMutations = new Map<string, BabyInfoMutation>()
 
     for (const mutation of mutations) {
       canonicalBabyInfoMutationJson(mutation)
       if (mutation.familyId !== familyId) throw new Error('baby info mutation family mismatch')
       const key = getBabyInfoMutationKey(mutation)
-      const existing = available.get(key)
+      const existing = appendedMutations.get(key) ?? this.mutationsByKey.get(key)
       if (existing) {
         if (canonicalBabyInfoMutationJson(existing) !== canonicalBabyInfoMutationJson(mutation)) {
           throw new Error('content-bound mutation collision')
         }
         continue
       }
-      available.set(key, mutation)
+      appendedMutations.set(key, mutation)
       records.push({ version: 1, type: 'mutation', key, mutation })
     }
 
@@ -253,7 +337,7 @@ export class BabyInfoJournal {
     for (const key of exactAcknowledgedMutationKeys) {
       if (acknowledgementSeen.has(key)) continue
       acknowledgementSeen.add(key)
-      const mutation = available.get(key)
+      const mutation = appendedMutations.get(key) ?? this.mutationsByKey.get(key)
       if (!mutation) throw new Error('acknowledgement references unknown mutation')
       if (mutation.familyId !== familyId) throw new Error('acknowledgement family mismatch')
       if (!this.acknowledgedKeys.has(key)) {
@@ -289,11 +373,31 @@ export class BabyInfoJournal {
     return this.completedImports.has(sourceId)
   }
 
+  archiveUnlinkedPair(
+    babyName: string,
+    babyBirthdate: string,
+    archivedAt = new Date().toISOString(),
+  ): BabyInfoUnlinkedArchive | undefined {
+    const archive = makeBabyInfoUnlinkedArchive(babyName, babyBirthdate, archivedAt)
+    if (!archive) return undefined
+    const existing = this.unlinkedArchivesById.get(archive.archiveId)
+    if (existing) return existing
+    this.appendRecords([{ version: 1, type: 'unlinked-archive', archive }])
+    return archive
+  }
+
+  listUnlinkedArchives(): BabyInfoUnlinkedArchive[] {
+    return Array.from(this.unlinkedArchivesById.values(), archive => ({ ...archive }))
+      .sort((left, right) => left.archivedAt.localeCompare(right.archivedAt)
+        || left.archiveId.localeCompare(right.archiveId))
+  }
+
   /** True for any durable mutation, acknowledgement, or completed import marker. */
   hasAnyRecords(): boolean {
     return this.mutationsByKey.size > 0
       || this.acknowledgedKeys.size > 0
       || this.completedImports.size > 0
+      || this.unlinkedArchivesById.size > 0
   }
 
   getSummary(familyIdValue: string): BabyInfoJournalSummary {
@@ -342,4 +446,9 @@ export class BabyInfoJournal {
     const mutation = this.mutationsByKey.get(key)
     return mutation?.familyId === familyId ? mutation : undefined
   }
+}
+
+/** Strictly replays exactly the bytes supplied by a verified snapshot reader. */
+export function parseBabyInfoJournalBuffer(bytes: Uint8Array): BabyInfoJournal {
+  return new BabyInfoJournal('', { strict: true, sourceBuffer: bytes })
 }

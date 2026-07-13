@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { BabyInfoJournal } from '../electron/store/babyInfoJournal'
+import {
+  BabyInfoJournal,
+  parseBabyInfoJournalBuffer,
+} from '../electron/store/babyInfoJournal'
 import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
 import type { AppSettings, BabyInfoMutation } from '../shared/types'
 
@@ -115,5 +118,34 @@ describe('BackupManager verified snapshot set', () => {
     await expect(manager.backup()).rejects.toMatchObject({
       code: 'BACKUP_ALL_DESTINATIONS_FAILED',
     })
+  })
+
+  it('keeps unlinked baby-info archives replayable in the verified backup journal', async () => {
+    const journal = new BabyInfoJournal(tmpDir)
+    journal.archiveUnlinkedPair('Former family baby', '2025-04-03', '2026-07-13T10:20:30.000Z')
+    const settings: AppSettings = {
+      baby: { name: '', birthdate: '' },
+      profile: { uid: 'user-1', name: 'Parent', role: 'mom' },
+      familyId: '',
+      firebase: null,
+      babyInfoJournal: { version: 1, projectedFamilyId: '' },
+      babyInfoRevision: 1,
+    }
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify(settings))
+
+    const { BackupManager } = await import('../electron/store/backup')
+    const manager = new BackupManager(tmpDir)
+    await manager.backup()
+    const snapshot = path.join(manager.getBackupDir(), fs.readdirSync(manager.getBackupDir())[0])
+    const replayed = parseBabyInfoJournalBuffer(
+      fs.readFileSync(path.join(snapshot, 'baby-info-journal-v1.jsonl')),
+    )
+
+    expect(replayed.listUnlinkedArchives()).toEqual([
+      expect.objectContaining({
+        babyName: 'Former family baby',
+        babyBirthdate: '2025-04-03',
+      }),
+    ])
   })
 })

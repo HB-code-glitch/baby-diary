@@ -125,8 +125,11 @@ async function _authOps(): Promise<AuthOps> {
 
 export type SyncStatus =
   | 'off'         // Firebase 미설정
+  | 'detached'    // 로컬 리스너는 즉시 분리됨; 원격 작업과 독립
   | 'no-config'   // 설정 없음
+  | 'signing-out' // Firebase Auth 로그아웃 완료 대기 중
   | 'signed-out'  // 설정은 있으나 미로그인
+  | 'superseded'  // 더 최신 lifecycle lease가 이전 작업을 대체함
   | 'connecting'  // 연결 중 / reconcile 중
   | 'online'      // 정상 동기화 중
   | 'error'       // 오류 발생
@@ -193,9 +196,11 @@ export const DETAIL_FAMILY_ACCESS_UNCERTAIN = 'FAMILY_ACCESS_UNCERTAIN'
 /** Local listeners detach immediately, while persisted Firebase logout is bounded. */
 export const SIGN_OUT_TIMEOUT_MS = 10_000
 export const DETAIL_SIGN_OUT_INCOMPLETE = 'SIGN_OUT_INCOMPLETE'
+export const DETAIL_SIGN_OUT_TIMEOUT = 'SIGN_OUT_TIMEOUT'
+export const DETAIL_SIGN_OUT_FAILED = 'SIGN_OUT_FAILED'
 
 export class SyncLifecycleError extends Error {
-  readonly code: 'SIGN_OUT_TIMEOUT' | 'SIGN_OUT_FAILED'
+  readonly code: 'SIGN_OUT_TIMEOUT' | 'SIGN_OUT_FAILED' | 'SIGN_OUT_SUPERSEDED'
 
   constructor(code: SyncLifecycleError['code'], message: string, cause?: unknown) {
     super(message)
@@ -270,7 +275,13 @@ let _state: SyncState = { status: 'no-config', detail: '', pendingCount: 0 }
  * _unsubAuth if the current generation still matches — preventing a stale
  * in-flight then() from overwriting a newer auth listener. */
 let _generation = 0
-let _lifecycleTail: Promise<void> = Promise.resolve()
+
+interface ActiveSignOut {
+  generation: number
+  supersede: () => void
+}
+
+let _activeSignOut: ActiveSignOut | null = null
 
 interface SyncContext {
   generation: number
@@ -292,12 +303,6 @@ class StaleSyncOperationError extends Error {
   }
 }
 
-function enqueueLifecycle(operation: () => Promise<void>): Promise<void> {
-  const result = _lifecycleTail.then(operation, operation)
-  _lifecycleTail = result.catch(() => undefined)
-  return result
-}
-
 /** Network work must never occupy the lifecycle lane used by stop/restart. */
 function runDetached(operation: () => Promise<void>, label: string): void {
   void Promise.resolve()
@@ -308,24 +313,16 @@ function runDetached(operation: () => Promise<void>, label: string): void {
     })
 }
 
-function boundedOperation<T>(
-  operation: Promise<T>,
-  timeoutMs: number,
-  timeoutError: Error,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(timeoutError), timeoutMs)
-    operation.then(
-      value => {
-        clearTimeout(timer)
-        resolve(value)
-      },
-      error => {
-        clearTimeout(timer)
-        reject(error)
-      },
-    )
+function supersedeActiveSignOut(): void {
+  const active = _activeSignOut
+  if (!active) return
+  _activeSignOut = null
+  setState({
+    status: 'superseded',
+    detail: 'sign-out superseded by a newer lifecycle lease',
+    pendingCount: totalPendingCount(),
   })
+  active.supersede()
 }
 
 function contextIsCurrent(context: SyncContext): boolean {
@@ -604,15 +601,14 @@ async function configureInternal(
   setState({ status: 'signed-out', detail: 'not signed in', pendingCount: totalPendingCount() })
 }
 
-/** Serialize direct configuration with teardown; callers may safely await it. */
+/** Configure without allowing network initialization to block a newer lease. */
 export function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
+  supersedeActiveSignOut()
   const generation = ++_generation
   invalidateConfiguredRuntime(false)
-  return enqueueLifecycle(async () => {
-    await stopRuntime(generation, false)
-    if (generation !== _generation) return
-    await configureInternal(cfg, familyId, generation)
-  })
+  setState({ status: 'detached', detail: 'reconfiguring sync', pendingCount: totalPendingCount() })
+  void stopRuntime(generation, false)
+  return configureInternal(cfg, familyId, generation)
 }
 
 /** 회원가입 (신규 사용자) */
@@ -629,42 +625,72 @@ export async function signIn(email: string, password: string, keepLoggedIn = tru
   return cred.user
 }
 
-/** 로그아웃 */
-export async function signOutSync(): Promise<void> {
+/** 로그아웃. Local detach is immediate; success is published only after Auth confirms it. */
+export function signOutSync(): Promise<void> {
+  supersedeActiveSignOut()
   const generation = ++_generation
   const auth = _auth
   const shouldRemainStarted = _started
   // Invalidate captured callbacks synchronously, before the Firebase promise.
   suspendRuntimeWork()
   _currentUser = null
-  setState({ status: 'signed-out', detail: 'signed out', pendingCount: totalPendingCount() })
-  return enqueueLifecycle(async () => {
-    if (generation !== _generation) return
-    try {
-      if (auth) {
-        await boundedOperation(
-          Promise.resolve().then(() => fbSignOut(auth)),
-          SIGN_OUT_TIMEOUT_MS,
-          new SyncLifecycleError('SIGN_OUT_TIMEOUT', 'Firebase sign-out timed out'),
-        )
-      }
-    } catch (error) {
-      const structured = error instanceof SyncLifecycleError
-        ? error
-        : new SyncLifecycleError('SIGN_OUT_FAILED', 'Firebase sign-out failed', error)
-      if (generation === _generation) {
+  setState({ status: 'signing-out', detail: 'signing out', pendingCount: totalPendingCount() })
+
+  const remoteOperation = auth
+    ? Promise.resolve().then(() => fbSignOut(auth))
+    : Promise.resolve()
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return false
+      settled = true
+      clearTimeout(timer)
+      if (_activeSignOut?.generation === generation) _activeSignOut = null
+      return true
+    }
+    const fail = (error: SyncLifecycleError) => {
+      if (!finish()) return
+      if (generation === _generation && error.code !== 'SIGN_OUT_SUPERSEDED') {
         setState({
           status: 'error',
-          detail: DETAIL_SIGN_OUT_INCOMPLETE,
+          detail: error.code === 'SIGN_OUT_TIMEOUT'
+            ? DETAIL_SIGN_OUT_TIMEOUT
+            : DETAIL_SIGN_OUT_FAILED,
           pendingCount: totalPendingCount(),
         })
       }
-      throw structured
+      reject(error)
     }
-    if (generation !== _generation) return
-    if (shouldRemainStarted && _auth && _config) {
-      await startInternal(generation)
+    const timer = setTimeout(() => {
+      fail(new SyncLifecycleError('SIGN_OUT_TIMEOUT', 'Firebase sign-out timed out'))
+    }, SIGN_OUT_TIMEOUT_MS)
+
+    _activeSignOut = {
+      generation,
+      supersede: () => fail(new SyncLifecycleError(
+        'SIGN_OUT_SUPERSEDED',
+        'Firebase sign-out was superseded before completion',
+      )),
     }
+
+    remoteOperation.then(
+      () => {
+        if (!finish()) return
+        if (generation !== _generation) {
+          reject(new SyncLifecycleError(
+            'SIGN_OUT_SUPERSEDED',
+            'Firebase sign-out was superseded before completion',
+          ))
+          return
+        }
+        setState({ status: 'signed-out', detail: 'signed out', pendingCount: totalPendingCount() })
+        if (shouldRemainStarted && _auth && _config) {
+          runDetached(() => startInternal(generation), 'post-sign-out auth listener')
+        }
+        resolve()
+      },
+      error => fail(new SyncLifecycleError('SIGN_OUT_FAILED', 'Firebase sign-out failed', error)),
+    )
   })
 }
 
@@ -921,7 +947,7 @@ function invalidateConfiguredRuntime(publishState: boolean): void {
   _connectionRetryAttempts = 0
   _connectionNextRetry = 0
   if (publishState) {
-    setState({ status: 'off', detail: 'sync stopped', pendingCount: totalPendingCount() })
+    setState({ status: 'detached', detail: 'sync detached', pendingCount: totalPendingCount() })
   }
 }
 
@@ -960,7 +986,7 @@ async function startInternal(generation: number): Promise<void> {
 /** 동기화 시작 (앱 기동 시 호출) */
 export function start(): Promise<void> {
   const generation = _generation
-  return enqueueLifecycle(() => startInternal(generation))
+  return startInternal(generation)
 }
 
 async function stopRuntime(generation: number, publishState = true): Promise<void> {
@@ -975,29 +1001,33 @@ async function stopRuntime(generation: number, publishState = true): Promise<voi
   }
   if (generation !== _generation) return
   if (publishState) {
-    setState({ status: 'off', detail: 'sync stopped', pendingCount: totalPendingCount() })
+    setState({ status: 'detached', detail: 'sync detached', pendingCount: totalPendingCount() })
   }
 }
 
 /** 동기화 중단. Generation is invalidated synchronously. */
 export function stop(): Promise<void> {
-  const generation = ++_generation
-  invalidateConfiguredRuntime(true)
-  return enqueueLifecycle(() => stopRuntime(generation))
-}
-
-/** Latest queued restart owns Firebase and every installed listener. */
-export function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
+  supersedeActiveSignOut()
   const generation = ++_generation
   invalidateConfiguredRuntime(false)
-  return enqueueLifecycle(async () => {
-    if (generation !== _generation) return
-    await stopRuntime(generation, false)
+  setState({ status: 'detached', detail: 'sync detached', pendingCount: totalPendingCount() })
+  void stopRuntime(generation, false)
+  return Promise.resolve()
+}
+
+/** Latest restart owns Firebase/listeners without awaiting any older network work. */
+export function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
+  supersedeActiveSignOut()
+  const generation = ++_generation
+  invalidateConfiguredRuntime(false)
+  setState({ status: 'detached', detail: 'sync restart detached', pendingCount: totalPendingCount() })
+  void stopRuntime(generation, false)
+  return (async () => {
     if (generation !== _generation) return
     await configureInternal(cfg, familyId, generation)
     if (generation !== _generation) return
     await startInternal(generation)
-  })
+  })()
 }
 
 /** 현재 동기화 상태 반환 */

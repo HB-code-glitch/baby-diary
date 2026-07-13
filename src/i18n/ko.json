@@ -368,7 +368,9 @@
     "restoredFromDisk": "저장된 정보를 다시 불러왔어요",
     "toastSaveFail": "설정 저장에 실패했습니다",
     "babyInfoSavePending": "아기 정보가 이 기기에 저장되었으며 연결되면 동기화됩니다.",
-    "babyInfoSharedHint": "아기 정보는 가족 전체에 공유돼요"
+    "babyInfoSharedHint": "아기 정보는 가족 전체에 공유돼요",
+    "unlinkedArchiveReview": "가족에 연결되지 않았던 아기 정보가 보관되어 있어요: {{name}} · {{birthdate}}. 적용해도 저장 전에는 공유되지 않아요.",
+    "unlinkedArchiveApply": "보관된 아기 정보 적용"
   },
   "sync": {
     "noConfigTitle": "Firebase 설정",

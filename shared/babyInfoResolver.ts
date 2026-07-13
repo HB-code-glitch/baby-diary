@@ -3,12 +3,14 @@ import type {
   BabyInfoMutation,
   BabyInfoMutationOrigin,
   BabyInfoSyncState,
+  BabyInfoUnlinkedArchive,
 } from './types'
 import { isValidMutationId } from './eventResolver'
 import { isValidFamilyId } from './familyId'
 
 const BABY_INFO_CONTENT_NAMESPACE = '6ba7b814-9dad-11d1-80b4-00c04fd430c8'
 const BABY_INFO_LEGACY_NAMESPACE = '6ba7b815-9dad-11d1-80b4-00c04fd430c8'
+const BABY_INFO_UNLINKED_ARCHIVE_NAMESPACE = '6ba7b816-9dad-11d1-80b4-00c04fd430c8'
 const EXPLICIT_ZONE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
 const MUTATION_FIELDS = [
   'authorId',
@@ -205,6 +207,45 @@ export function makeLegacyCloudBabyInfoMutation(
   babyBirthdate: string,
 ): BabyInfoMutation | undefined {
   return makeLegacyBabyInfoMutation(familyId, babyName, babyBirthdate, 'legacy-cloud')
+}
+
+export function getBabyInfoUnlinkedArchiveId(babyName: string, babyBirthdate: string): string {
+  if (!isSafeText(babyName, 2_048) || !isSafeText(babyBirthdate, 128)) {
+    throw new Error('invalid unlinked baby info archive values')
+  }
+  return uuidv5(
+    `baby-diary:baby-info-unlinked:${JSON.stringify({ babyName, babyBirthdate })}`,
+    BABY_INFO_UNLINKED_ARCHIVE_NAMESPACE,
+  )
+}
+
+export function makeBabyInfoUnlinkedArchive(
+  babyName: string,
+  babyBirthdate: string,
+  archivedAt = new Date().toISOString(),
+): BabyInfoUnlinkedArchive | undefined {
+  if (babyName === '' && babyBirthdate === '') return undefined
+  if (!isExplicitZoneTimestamp(archivedAt)) throw new Error('invalid archive timestamp')
+  return {
+    archiveId: getBabyInfoUnlinkedArchiveId(babyName, babyBirthdate),
+    babyName,
+    babyBirthdate,
+    archivedAt,
+    source: 'legacy-unscoped',
+  }
+}
+
+export function validateBabyInfoUnlinkedArchive(value: unknown): value is BabyInfoUnlinkedArchive {
+  if (!isPlainRecord(value)) return false
+  const keys = Object.keys(value).sort()
+  const expected = ['archiveId', 'archivedAt', 'babyBirthdate', 'babyName', 'source']
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return false
+  if (!isValidMutationId(value.archiveId)
+    || !isSafeText(value.babyName, 2_048)
+    || !isSafeText(value.babyBirthdate, 128)
+    || !isExplicitZoneTimestamp(value.archivedAt)
+    || value.source !== 'legacy-unscoped') return false
+  return value.archiveId === getBabyInfoUnlinkedArchiveId(value.babyName, value.babyBirthdate)
 }
 
 /**

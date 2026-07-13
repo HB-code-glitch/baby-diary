@@ -59,6 +59,13 @@ const getSettings = vi.fn(async () => clone(mainStore.get()))
 const commitBabyInfo = vi.fn(async (
   operation: BabyInfoSettingsCommitOperation,
 ): Promise<BabyInfoCommitIpcResponse> => commitOnMain(operation))
+const listUnlinkedBabyInfoArchives = vi.fn(async () => ([{
+  archiveId: 'legacy-archive-1',
+  babyName: '보관된 아기',
+  babyBirthdate: '2025-12-31',
+  archivedAt: '2026-07-13T00:00:00.000Z',
+  source: 'legacy-unscoped' as const,
+}]))
 
 const bridge: Window['babyDiary'] = {
   getFirebaseEmulator: async () => null,
@@ -71,6 +78,7 @@ const bridge: Window['babyDiary'] = {
   commitBabyInfo,
   listPendingBabyInfo: async request => clone(mainStore.listPendingBabyInfo(request)),
   getBabyInfoSummary: async familyId => clone(mainStore.getBabyInfoSummary(familyId)),
+  listUnlinkedBabyInfoArchives,
   exportData: async () => undefined,
   openBackupFolder: async () => undefined,
   getDataInfo: async () => ({
@@ -154,6 +162,7 @@ describe('SettingsPage baby info durable save', () => {
       return clone(mainStore.save(next))
     })
     commitBabyInfo.mockReset().mockImplementation(commitOnMain)
+    listUnlinkedBabyInfoArchives.mockClear()
     Object.defineProperty(window, 'babyDiary', { configurable: true, value: bridge })
     useAppStore.setState({ settings: clone(mainStore.get()), dataInfo: null, error: null })
     container = document.createElement('div')
@@ -203,6 +212,30 @@ describe('SettingsPage baby info durable save', () => {
     expect(mainStore.getBabyInfoSummary('family-1').pendingCount).toBe(1)
     expect(container.textContent).toContain('연결되면 동기화')
     expect(container.textContent).not.toContain(i18n.t('settings.toastSaved'))
+  })
+
+  it('applies an archived unlinked pair only to dirty fields and creates a mutation only after Save', async () => {
+    const apply = Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent?.includes('보관된 아기 정보 적용')
+    ))
+    expect(apply).toBeInstanceOf(HTMLButtonElement)
+
+    await act(async () => (apply as HTMLButtonElement).click())
+
+    expect(inputByLabel(container, i18n.t('settings.babyName')).value).toBe('보관된 아기')
+    expect(inputByLabel(container, i18n.t('settings.birthdate')).value).toBe('2025-12-31')
+    expect(commitBabyInfo).not.toHaveBeenCalled()
+
+    await act(async () => saveButton(container).click())
+    await flush()
+
+    expect(commitBabyInfo).toHaveBeenCalledOnce()
+    expect(commitBabyInfo).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'user-edit',
+      familyId: 'family-1',
+      babyName: '보관된 아기',
+      babyBirthdate: '2025-12-31',
+    }))
   })
 
   it('keeps a newer edit dirty when the prior dedicated save resolves, then commits it', async () => {

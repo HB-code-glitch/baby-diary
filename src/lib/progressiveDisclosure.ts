@@ -5,7 +5,16 @@ export type HomeMetricKey = 'formula' | 'pee' | 'poop' | 'feeding' | 'temperatur
 export type HomeInsightKey = 'lastFeeding' | 'diaper' | 'temperature' | 'sleep' | 'nextSide'
 export type StatsSectionKey = 'sleep' | 'formula' | 'feeding' | 'diaper' | 'temperature'
 export type StatsPageSectionKey = StatsSectionKey | 'growthWeight' | 'growthHeight'
-export type SyncDisclosureStatus = 'off' | 'no-config' | 'signed-out' | 'connecting' | 'online' | 'error'
+export type SyncDisclosureStatus =
+  | 'off'
+  | 'detached'
+  | 'no-config'
+  | 'signing-out'
+  | 'signed-out'
+  | 'superseded'
+  | 'connecting'
+  | 'online'
+  | 'error'
 export type SyncDisclosureSummary = 'ready' | 'connecting' | 'attention'
 
 export interface StatsVisibility {

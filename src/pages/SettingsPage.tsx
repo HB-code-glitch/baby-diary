@@ -14,7 +14,7 @@ import { useToast } from '../components/Toast'
 import { ipc } from '../lib/ipc'
 import { SyncSettingsSlot } from '../components/SyncSettingsSlot'
 import { DisclosureSection } from '../components/DisclosureSection'
-import { AppSettings } from '../../shared/types'
+import type { AppSettings, BabyInfoUnlinkedArchive } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
@@ -77,6 +77,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false)
   const [deletingAll, setDeletingAll] = useState(false)
   const [pdfSaving, setPdfSaving] = useState(false)
+  const [unlinkedArchives, setUnlinkedArchives] = useState<BabyInfoUnlinkedArchive[]>([])
 
   // Hydrate form from a settings object
   const hydrateForm = useCallback((s: AppSettings, forceBabyInfo = false) => {
@@ -115,6 +116,25 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   useEffect(() => {
     loadDataInfo()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    ipc.listUnlinkedBabyInfoArchives().then(archives => {
+      if (!cancelled) setUnlinkedArchives(archives)
+    }).catch(() => {
+      if (!cancelled) setUnlinkedArchives([])
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const applyUnlinkedArchive = (archive: BabyInfoUnlinkedArchive) => {
+    babyNameDirtyRef.current = true
+    birthdateDirtyRef.current = true
+    babyNameEditGenerationRef.current += 1
+    birthdateEditGenerationRef.current += 1
+    setBabyName(archive.babyName)
+    setBirthdate(archive.babyBirthdate)
+  }
 
   const handleSave = async () => {
     // Capture both values and ownership before the first await. Edits made
@@ -395,6 +415,30 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
               {settings?.familyId && (
                 <div style={{ fontSize: 11, color: 'var(--stone-400)', lineHeight: 1.5, marginBottom: -4 }}>
                   {t('settings.babyInfoSharedHint')}
+                </div>
+              )}
+              {settings?.familyId && unlinkedArchives.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {[...unlinkedArchives].reverse().map(archive => (
+                    <div
+                      key={archive.archiveId}
+                      style={{ padding: 10, border: '1px solid var(--stone-200)', borderRadius: 8 }}
+                    >
+                      <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 8 }}>
+                        {t('settings.unlinkedArchiveReview', {
+                          name: archive.babyName || '—',
+                          birthdate: archive.babyBirthdate || '—',
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => applyUnlinkedArchive(archive)}
+                      >
+                        {t('settings.unlinkedArchiveApply')}
+                      </button>
+                    </div>
+                  ))}
                 </div>
               )}
               <div>

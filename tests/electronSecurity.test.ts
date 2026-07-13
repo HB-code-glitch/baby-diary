@@ -268,6 +268,7 @@ describe('Electron BrowserWindow security boundary', () => {
       })
     })
     const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
 
     await import('../electron/main')
     await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
@@ -276,12 +277,40 @@ describe('Electron BrowserWindow security boundary', () => {
       'Baby Diary recovery required',
       expect.stringContaining('verified backup'),
     )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringContaining('could not be confirmed'),
+    )
     expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.stringContaining('C:\\private'),
     )
     expect(electron.app.exit).toHaveBeenCalledWith(1)
     expect(MockBrowserWindow.instances).toHaveLength(0)
+  })
+
+  it('claims original preservation only when recovery reports a confirmed durable forensic archive', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        originalsPreserved: true,
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringContaining('durable forensic archive'),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('could not be confirmed'),
+    )
   })
 
   it('exposes bounded baby-info delta handlers and broadcasts authoritative settings after successful writes', async () => {

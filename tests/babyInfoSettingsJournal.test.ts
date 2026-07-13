@@ -294,12 +294,22 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     expect(new SettingsStore(tmpDir).getBabyInfoSummary('family-A').mutationCount).toBe(1)
   })
 
-  it('adopts a pre-family local pair only through create, never through join', () => {
+  it('archives an unscoped legacy pair once and never adopts it through create or join', () => {
     writeSettings(tmpDir, baseSettings({
       familyId: '',
       baby: { name: 'Local draft', birthdate: '2026-05-05', gender: 'girl' },
     }))
     const createStore = new SettingsStore(tmpDir)
+
+    expect(createStore.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(createStore.listUnlinkedBabyInfoArchives()).toEqual([
+      expect.objectContaining({
+        babyName: 'Local draft',
+        babyBirthdate: '2026-05-05',
+        source: 'legacy-unscoped',
+      }),
+    ])
+    expect(new SettingsStore(tmpDir).listUnlinkedBabyInfoArchives()).toHaveLength(1)
 
     const created = commit(createStore, {
       kind: 'family-transition',
@@ -307,12 +317,11 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
       mode: 'create',
     })
 
-    expect(created.settings.baby).toMatchObject({
-      name: 'Local draft',
-      birthdate: '2026-05-05',
-    })
-    expect(created.activePendingCount).toBe(1)
-    expect(createStore.getBabyInfoSummary('family-created').winner?.origin).toBe('legacy-local')
+    expect(created.settings.baby).toMatchObject({ name: '', birthdate: '' })
+    expect(created.activePendingCount).toBe(0)
+    expect(created.mutation).toBeUndefined()
+    expect(createStore.getBabyInfoSummary('family-created').mutationCount).toBe(0)
+    expect(createStore.listUnlinkedBabyInfoArchives()).toHaveLength(1)
 
     const joinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-settings-join-'))
     try {
@@ -321,6 +330,8 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
         baby: { name: 'Must not join', birthdate: '2025-01-01', gender: 'boy' },
       }))
       const joinStore = new SettingsStore(joinDir)
+      expect(joinStore.get().baby).toMatchObject({ name: '', birthdate: '' })
+      expect(joinStore.listUnlinkedBabyInfoArchives()).toHaveLength(1)
       const joined = commit(joinStore, {
         kind: 'family-transition',
         familyId: 'family-existing',
@@ -330,12 +341,60 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
       expect(joined.settings.baby).toMatchObject({ name: '', birthdate: '' })
       expect(joined.activePendingCount).toBe(0)
       expect(joinStore.getBabyInfoSummary('family-existing').mutationCount).toBe(0)
+      expect(joinStore.listUnlinkedBabyInfoArchives()).toHaveLength(1)
     } finally {
       fs.rmSync(joinDir, { recursive: true, force: true })
     }
   })
 
-  it('recovers a create transition that crashed after the destination mutation journal fsync', () => {
+  it('does not create an archive or cloud pending record for a blank unscoped pair', () => {
+    writeSettings(tmpDir, baseSettings({
+      familyId: '',
+      baby: { name: '', birthdate: '', gender: 'girl' },
+    }))
+
+    const store = new SettingsStore(tmpDir)
+    expect(store.listUnlinkedBabyInfoArchives()).toEqual([])
+
+    const created = commit(store, {
+      kind: 'family-transition',
+      familyId: 'family-created',
+      mode: 'create',
+    })
+    expect(created).toMatchObject({ activePendingCount: 0, pendingCount: 0 })
+    expect(store.getBabyInfoSummary('family-created').mutationCount).toBe(0)
+  })
+
+  it('archives an old-family pair after familyId is lost and keeps destination C blank', () => {
+    writeSettings(tmpDir, baseSettings())
+    const linked = new SettingsStore(tmpDir)
+    expect(linked.getBabyInfoSummary('family-A').mutationCount).toBe(1)
+
+    const unscoped = linked.get()
+    writeSettings(tmpDir, {
+      ...unscoped,
+      familyId: '',
+      babyInfoJournal: undefined,
+      baby: { ...unscoped.baby, name: 'Former A', birthdate: '2026-01-01' },
+    })
+
+    const upgraded = new SettingsStore(tmpDir)
+    expect(upgraded.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(upgraded.listUnlinkedBabyInfoArchives()).toEqual([
+      expect.objectContaining({ babyName: 'Former A', babyBirthdate: '2026-01-01' }),
+    ])
+
+    const created = commit(upgraded, {
+      kind: 'family-transition',
+      familyId: 'family-C',
+      mode: 'create',
+    })
+    expect(created.settings.baby).toMatchObject({ name: '', birthdate: '' })
+    expect(created.activePendingCount).toBe(0)
+    expect(upgraded.getBabyInfoSummary('family-C').mutationCount).toBe(0)
+  })
+
+  it('retains the unlinked archive when a create projection write crashes', () => {
     const initial = baseSettings({
       familyId: '',
       baby: { name: 'Crash-safe local', birthdate: '2026-06-06', gender: 'girl' },
@@ -357,10 +416,13 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     writeSettings(tmpDir, before)
     const restarted = new SettingsStore(tmpDir)
     const recovered = restarted.merge({ familyId: 'family-created' })
-    expect(recovered.baby).toMatchObject({
-      name: 'Crash-safe local',
-      birthdate: '2026-06-06',
-    })
-    expect(restarted.getBabyInfoSummary('family-created').mutationCount).toBe(1)
+    expect(recovered.baby).toMatchObject({ name: '', birthdate: '' })
+    expect(restarted.getBabyInfoSummary('family-created').mutationCount).toBe(0)
+    expect(restarted.listUnlinkedBabyInfoArchives()).toEqual([
+      expect.objectContaining({
+        babyName: 'Crash-safe local',
+        babyBirthdate: '2026-06-06',
+      }),
+    ])
   })
 })

@@ -18,6 +18,7 @@ const firebase = vi.hoisted(() => {
     getApps: vi.fn(() => [] as Array<{ name: string }>),
     deleteApp: vi.fn(async () => undefined),
     initializeFirestore: vi.fn(() => db),
+    getFirestore: vi.fn(() => db),
     persistentLocalCache: vi.fn((options: unknown) => options),
     persistentMultipleTabManager: vi.fn(() => ({ type: 'multi-tab' })),
     connectFirestoreEmulator: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock('firebase/app', () => ({
 }))
 
 vi.mock('firebase/firestore', () => ({
+  getFirestore: firebase.getFirestore,
   initializeFirestore: firebase.initializeFirestore,
   persistentLocalCache: firebase.persistentLocalCache,
   persistentMultipleTabManager: firebase.persistentMultipleTabManager,
@@ -83,6 +85,9 @@ describe('Firebase emulator connection', () => {
     firebase.connectFirestoreEmulator.mockImplementation(() => undefined)
     firebase.connectAuthEmulator.mockImplementation(() => undefined)
     firebase.setPersistence.mockResolvedValue(undefined)
+    for (const symbol of Object.getOwnPropertySymbols(firebase.app)) {
+      delete (firebase.app as Record<symbol, unknown>)[symbol]
+    }
     exposeBridge(bridge)
   })
 
@@ -147,7 +152,7 @@ describe('Firebase emulator connection', () => {
     expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
-  it('connects each emulator once per app lifecycle', async () => {
+  it('connects each emulator once per stable app identity across runtime teardown', async () => {
     const { initFirebase, teardownFirebase } = await import('../src/sync/firebase')
 
     await initFirebase(demoConfig)
@@ -157,7 +162,7 @@ describe('Firebase emulator connection', () => {
 
     await teardownFirebase()
     await initFirebase(demoConfig)
-    expect(firebase.connectAuthEmulator).toHaveBeenCalledTimes(2)
-    expect(firebase.connectFirestoreEmulator).toHaveBeenCalledTimes(2)
+    expect(firebase.connectAuthEmulator).toHaveBeenCalledOnce()
+    expect(firebase.connectFirestoreEmulator).toHaveBeenCalledOnce()
   })
 })

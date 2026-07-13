@@ -4,12 +4,17 @@ import type { AppSettings } from '../shared/types'
 interface Deferred<T> {
   promise: Promise<T>
   resolve: (value: T) => void
+  reject: (reason?: unknown) => void
 }
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(ok => { resolve = ok })
-  return { promise, resolve }
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok
+    reject = fail
+  })
+  return { promise, resolve, reject }
 }
 
 async function flushMicrotasks(turns = 8): Promise<void> {
@@ -202,6 +207,46 @@ describe('serialized sync lifecycle', () => {
     expect(harness.authListeners.size).toBe(1)
   })
 
+  it('starts replacement initialization while the previous Firebase init is still held', async () => {
+    const firstInit = deferred<{ db: object; auth: object }>()
+    harness.initFirebase.mockReturnValueOnce(firstInit.promise)
+    const engine = await import('../src/sync/syncEngine')
+    const a = engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(1))
+
+    const b = engine.restartSync(config('project-B'), 'family-B')
+    try {
+      await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(2), { timeout: 250 })
+      expect(harness.initFirebase.mock.calls.at(-1)?.[0]).toMatchObject({ projectId: 'project-B' })
+      await b
+      expect(harness.authListeners.size).toBe(1)
+    } finally {
+      firstInit.resolve({ db: { projectId: 'project-A' }, auth: { projectId: 'project-A' } })
+      await Promise.allSettled([a, b])
+    }
+  })
+
+  it('finishes local stop while Firebase initialization is still held', async () => {
+    const firstInit = deferred<{ db: object; auth: object }>()
+    harness.initFirebase.mockReturnValueOnce(firstInit.promise)
+    const engine = await import('../src/sync/syncEngine')
+    const restarting = engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(1))
+
+    let stopped = false
+    const stopping = engine.stop().then(() => { stopped = true })
+    try {
+      await flushMicrotasks()
+      expect(stopped).toBe(true)
+      expect(engine.getStatus().status).toBe('detached')
+      expect(harness.authListeners.size).toBe(0)
+      await stopping
+    } finally {
+      firstInit.resolve({ db: { projectId: 'project-A' }, auth: { projectId: 'project-A' } })
+      await Promise.allSettled([restarting, stopping])
+    }
+  })
+
   it('suppresses a stale auth callback after a replacement restart', async () => {
     const engine = await import('../src/sync/syncEngine')
     await engine.restartSync(config('project-A'), 'family-A')
@@ -231,6 +276,7 @@ describe('serialized sync lifecycle', () => {
     staleCallback({ uid: 'user-1', email: 'parent@example.test' })
     await Promise.resolve()
     expect(harness.getDoc).not.toHaveBeenCalled()
+    expect(engine.getStatus().status).toBe('signing-out')
 
     signOut.resolve()
     await signingOut
@@ -258,7 +304,7 @@ describe('serialized sync lifecycle', () => {
     const stopping = engine.stop()
     expect(harness.authListeners.size).toBe(0)
     expect(harness.snapshots.size).toBe(0)
-    expect(engine.getStatus().status).toBe('off')
+    expect(engine.getStatus().status).toBe('detached')
     await stopping
   })
 
@@ -275,8 +321,9 @@ describe('serialized sync lifecycle', () => {
     const signingOut = engine.signOutSync()
     expect(harness.authListeners.size).toBe(0)
     expect(harness.snapshots.size).toBe(0)
-    expect(engine.getStatus().status).toBe('signed-out')
+    expect(engine.getStatus().status).toBe('signing-out')
     await signingOut
+    expect(engine.getStatus().status).toBe('signed-out')
     await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
   })
 
@@ -307,7 +354,7 @@ describe('serialized sync lifecycle', () => {
     let settled = false
     const stopping = engine.stop().then(() => { settled = true })
     expect(harness.authListeners.size).toBe(0)
-    expect(engine.getStatus().status).toBe('off')
+    expect(engine.getStatus().status).toBe('detached')
     await flushMicrotasks()
 
     expect(settled).toBe(true)
@@ -338,15 +385,58 @@ describe('serialized sync lifecycle', () => {
     const signingOut = engine.signOutSync()
     const rejected = expect(signingOut).rejects.toMatchObject({ code: 'SIGN_OUT_TIMEOUT' })
     expect(harness.authListeners.size).toBe(0)
-    expect(engine.getStatus().status).toBe('signed-out')
+    expect(engine.getStatus().status).toBe('signing-out')
     await flushMicrotasks()
     await vi.advanceTimersByTimeAsync(engine.SIGN_OUT_TIMEOUT_MS)
 
     await rejected
     expect(engine.getStatus()).toMatchObject({
       status: 'error',
-      detail: engine.DETAIL_SIGN_OUT_INCOMPLETE,
+      detail: engine.DETAIL_SIGN_OUT_TIMEOUT,
     })
     expect(harness.authListeners.size).toBe(0)
+  })
+
+  it('rejects a held sign-out as superseded while the newest restart installs its listener', async () => {
+    const engine = await import('../src/sync/syncEngine')
+    await engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
+    const remoteSignOut = deferred<void>()
+    harness.fbSignOut.mockReturnValueOnce(remoteSignOut.promise)
+    const observed: string[] = []
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    const unsubscribe = engine.subscribeStatus(state => observed.push(state.status))
+
+    const signingOut = engine.signOutSync()
+    expect(engine.getStatus().status).toBe('signing-out')
+    const restarting = engine.restartSync(config('project-B'), 'family-B')
+    try {
+      await expect(signingOut).rejects.toMatchObject({ code: 'SIGN_OUT_SUPERSEDED' })
+      await restarting
+      await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
+      expect(observed).toContain('superseded')
+      expect(harness.initFirebase.mock.calls.at(-1)?.[0]).toMatchObject({ projectId: 'project-B' })
+    } finally {
+      unsubscribe()
+      remoteSignOut.reject(new Error('late remote sign-out rejection'))
+      await flushMicrotasks()
+      process.off('unhandledRejection', unhandled)
+    }
+    expect(unhandled).not.toHaveBeenCalled()
+  })
+
+  it('reports an active remote sign-out rejection as failure without claiming signed-out', async () => {
+    const engine = await import('../src/sync/syncEngine')
+    await engine.restartSync(config('project-A'), 'family-A')
+    harness.fbSignOut.mockRejectedValueOnce(new Error('remote auth unavailable'))
+
+    const signingOut = engine.signOutSync()
+    expect(engine.getStatus().status).toBe('signing-out')
+    await expect(signingOut).rejects.toMatchObject({ code: 'SIGN_OUT_FAILED' })
+    expect(engine.getStatus()).toMatchObject({
+      status: 'error',
+      detail: engine.DETAIL_SIGN_OUT_FAILED,
+    })
   })
 })

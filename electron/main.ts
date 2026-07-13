@@ -160,6 +160,10 @@ function setupIPC(): void {
     return settingsStore.getBabyInfoMutation(familyId, key)
   })
 
+  ipcMain.handle('babyInfo:listUnlinkedArchives', async () => {
+    return settingsStore.listUnlinkedBabyInfoArchives()
+  })
+
   ipcMain.handle('settings:commitBabyInfo', async (
     _,
     operation: BabyInfoSettingsCommitOperation,
@@ -354,9 +358,11 @@ app.whenReady().then(() => {
   syncE2EGuard?.installSessionGuard(session.defaultSession, rendererResourceRoot)
   const userDataPath = app.getPath('userData')
 
-  eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })
-  settingsStore = new SettingsStore(userDataPath)
   backupManager = new BackupManager(userDataPath)
+  eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })
+  settingsStore = new SettingsStore(userDataPath, {
+    documentsBackupDir: backupManager.getDocumentsBackupDir(),
+  })
 
   // P20: Explicit startup scan so index is warm before any IPC arrives.
   // After this, getAll() is used for 'events:list' (no re-scan per call).
@@ -382,10 +388,14 @@ app.whenReady().then(() => {
   const recoveryRequired = error instanceof SettingsRecoveryError
     || (error && typeof error === 'object'
       && (error as { code?: unknown }).code === 'SETTINGS_RECOVERY_REQUIRED')
+  const originalsPreserved = recoveryRequired
+    && Boolean((error as { originalsPreserved?: unknown } | undefined)?.originalsPreserved)
   dialog.showErrorBox(
     recoveryRequired ? 'Baby Diary recovery required' : 'Baby Diary startup failed',
     recoveryRequired
-      ? 'Settings and baby journal could not be verified or restored from a verified backup. The originals were preserved for support recovery.'
+      ? originalsPreserved
+        ? 'Settings and baby journal could not be verified or restored from a verified backup. A durable forensic archive of the originals was confirmed for support recovery.'
+        : 'Settings and baby journal could not be verified or restored from a verified backup. Recovery stopped before overwrite, but durable preservation of the originals could not be confirmed.'
       : 'Baby Diary could not start. No local data was modified after the startup failure.',
   )
   app.exit(1)

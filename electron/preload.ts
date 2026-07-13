@@ -7,6 +7,7 @@ import type {
   BabyInfoMutation,
   BabyInfoPendingPage,
   BabyInfoPendingPageRequest,
+  BabyInfoUnlinkedArchive,
   DataInfo,
   DiaryEvent,
   ExportFormat,
@@ -56,6 +57,9 @@ const babyDiaryAPI = {
 
   getBabyInfoMutation: (familyId: string, key: string): Promise<BabyInfoMutation | undefined> =>
     ipcRenderer.invoke('babyInfo:getMutation', familyId, key),
+
+  listUnlinkedBabyInfoArchives: (): Promise<BabyInfoUnlinkedArchive[]> =>
+    ipcRenderer.invoke('babyInfo:listUnlinkedArchives'),
 
   exportData: (format: ExportFormat): Promise<void> =>
     ipcRenderer.invoke('data:export', format),

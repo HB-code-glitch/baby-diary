@@ -680,10 +680,21 @@ export function SyncSettingsSlot() {
       break
 
     case 'connecting':
+    case 'superseded':
       content = (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--stone-500)', fontSize: 13 }}>
           <Cloud size={16} style={{ color: 'var(--stone-400)', animation: 'spin 1.2s linear infinite' }} />
           {t('sync.connecting')}
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )
+      break
+
+    case 'signing-out':
+      content = (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--stone-500)', fontSize: 13 }}>
+          <RefreshCw size={16} style={{ color: 'var(--stone-400)', animation: 'spin 1.2s linear infinite' }} />
+          {t('sync.signingOut')}
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )
@@ -702,6 +713,7 @@ export function SyncSettingsSlot() {
       break
 
     case 'off':
+    case 'detached':
     default:
       // 'off' means sync was explicitly stopped or Firebase not configured yet
       if (!settings?.firebase) {

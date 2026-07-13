@@ -114,7 +114,7 @@ describe('SettingsStore', () => {
 
   // ── Corrupt settings + backup restore ──────────────────────────────────────
 
-  it('corrupt settings.json: writes .bak and fails closed when no verified backup exists', () => {
+  it('corrupt settings.json: writes a forensic archive and fails closed when no verified backup exists', () => {
     // Write garbage JSON
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), '{ not valid json !!!', 'utf-8')
 
@@ -122,9 +122,14 @@ describe('SettingsStore', () => {
       code: 'SETTINGS_RECOVERY_REQUIRED',
     }))
 
-    // A .bak file should have been created
-    const baks = fs.readdirSync(tmpDir).filter(f => f.includes('.corrupt-') && f.endsWith('.bak'))
-    expect(baks.length).toBe(2)
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    const archives = fs.readdirSync(forensicRoot)
+    expect(archives).toHaveLength(1)
+    const manifest = JSON.parse(fs.readFileSync(
+      path.join(forensicRoot, archives[0], 'manifest.json'),
+      'utf8',
+    ))
+    expect(manifest).toMatchObject({ source: 'baby-diary-recovery' })
   })
 
   it('corrupt settings.json: restores from newest backup snapshot', () => {
@@ -136,7 +141,7 @@ describe('SettingsStore', () => {
     }
 
     // Create backups/2025-01-01T00-00-00/settings.json
-    const backupDir = path.join(tmpDir, 'backups', '2025-01-01T00-00-00')
+    const backupDir = path.join(tmpDir, 'backups', '2025-01-01_00-00-00')
     fs.mkdirSync(backupDir, { recursive: true })
     fs.writeFileSync(path.join(backupDir, 'settings.json'), JSON.stringify(goodSettings, null, 2), 'utf-8')
 
@@ -164,12 +169,12 @@ describe('SettingsStore', () => {
     }
 
     // Older backup
-    const oldDir = path.join(tmpDir, 'backups', '2024-06-01T00-00-00')
+    const oldDir = path.join(tmpDir, 'backups', '2024-06-01_00-00-00')
     fs.mkdirSync(oldDir, { recursive: true })
     fs.writeFileSync(path.join(oldDir, 'settings.json'), JSON.stringify(oldSettings, null, 2), 'utf-8')
 
     // Newer backup (sorts after old lexicographically)
-    const newDir = path.join(tmpDir, 'backups', '2025-06-01T00-00-00')
+    const newDir = path.join(tmpDir, 'backups', '2025-06-01_00-00-00')
     fs.mkdirSync(newDir, { recursive: true })
     fs.writeFileSync(path.join(newDir, 'settings.json'), JSON.stringify(newSettings, null, 2), 'utf-8')
 

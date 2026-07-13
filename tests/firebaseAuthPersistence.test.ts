@@ -20,6 +20,7 @@ const firebase = vi.hoisted(() => {
     getApps: vi.fn(() => [] as Array<{ name: string }>),
     deleteApp: vi.fn(async () => undefined),
     initializeFirestore: vi.fn(() => db),
+    getFirestore: vi.fn(() => db),
     persistentLocalCache: vi.fn((options: unknown) => options),
     persistentMultipleTabManager: vi.fn(() => ({ type: 'multi-tab' })),
     connectFirestoreEmulator: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock('firebase/app', () => ({
 }))
 
 vi.mock('firebase/firestore', () => ({
+  getFirestore: firebase.getFirestore,
   initializeFirestore: firebase.initializeFirestore,
   persistentLocalCache: firebase.persistentLocalCache,
   persistentMultipleTabManager: firebase.persistentMultipleTabManager,
@@ -113,6 +115,50 @@ describe('Firebase auth persistence', () => {
     finishDelete()
     await tearingDown
     expect(getFirebaseAuth()).toBe(firebase.auth)
+  })
+
+  it('uses one deterministic app identity for the same config across owners and module reloads', async () => {
+    let module = await import('../src/sync/firebase')
+    await module.initFirebase(config, 'owner-a')
+    const firstName = firebase.initializeApp.mock.calls[0]?.[1]
+    await module.teardownFirebase()
+
+    vi.resetModules()
+    module = await import('../src/sync/firebase')
+    await module.initFirebase(config, 'owner-b')
+    const secondName = firebase.initializeApp.mock.calls.at(-1)?.[1]
+
+    expect(firstName).toMatch(/^baby-diary-[a-f0-9]{16}$/)
+    expect(secondName).toBe(firstName)
+    expect(String(firstName)).not.toContain('owner')
+  })
+
+  it('reuses stable services across module reset and bounds A -> B -> A to two app names', async () => {
+    const apps: Array<{ name: string; options: typeof config }> = []
+    firebase.getApps.mockImplementation(() => apps)
+    firebase.initializeApp.mockImplementation((options: typeof config, name: string) => {
+      const app = { name, options }
+      apps.push(app)
+      return app as typeof firebase.app
+    })
+
+    let module = await import('../src/sync/firebase')
+    await module.initFirebase(config, 'lease-a1')
+    const firstAuth = module.getFirebaseAuth()
+
+    vi.resetModules()
+    module = await import('../src/sync/firebase')
+    await module.initFirebase({ ...config }, 'lease-a2')
+    expect(module.getFirebaseAuth()).toBe(firstAuth)
+
+    await module.teardownFirebase()
+    await module.initFirebase({ ...config, projectId: 'project-b' }, 'lease-b')
+    await module.teardownFirebase()
+    await module.initFirebase(config, 'lease-a3')
+
+    expect(firebase.initializeApp).toHaveBeenCalledTimes(2)
+    expect(new Set(apps.map(app => app.name)).size).toBe(2)
+    expect(firebase.getFirestore).toHaveBeenCalled()
   })
 
   it('keeps omitted keepLoggedIn as a local-persistence sign-in', async () => {

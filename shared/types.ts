@@ -89,6 +89,16 @@ export interface BabyInfoMutation {
   origin: BabyInfoMutationOrigin
 }
 
+/** Familyless legacy values retained locally until a user explicitly reviews them. */
+export interface BabyInfoUnlinkedArchive {
+  /** Deterministic content identity used to deduplicate repeated upgrade attempts. */
+  archiveId: string
+  babyName: string
+  babyBirthdate: string
+  archivedAt: string
+  source: 'legacy-unscoped'
+}
+
 export interface BabyInfoSyncState {
   version: 1
   mutations: BabyInfoMutation[]
@@ -119,7 +129,7 @@ export interface BabyInfoFamilyTransitionCommit {
   kind: 'family-transition'
   /** The non-empty destination family whose projection becomes visible. */
   familyId: string
-  /** Only creation may adopt an unlinked local pair into the new family. */
+  /** Creation and joining both select destination history or a blank projection. */
   mode: 'create' | 'join'
 }
 

@@ -13,6 +13,7 @@ import {
   BABY_INFO_JOURNAL_FILE,
   BabyInfoJournal,
 } from '../electron/store/babyInfoJournal'
+import type { DurableFileOps } from '../electron/store/durableFs'
 
 function uuid(index: number): string {
   return `10000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`
@@ -239,4 +240,108 @@ describe('main-process baby-info append-only journal', () => {
       totalPendingCount: 0,
     })
   }, 20_000)
+
+  it('drains 10,025 pending records in 500-record pages without iterating the full mutation Map per page', () => {
+    const journal = new BabyInfoJournal(tmpDir)
+    const total = 10_025
+    const items = Array.from(
+      { length: total },
+      (_, index) => mutation(index + 40_000, 'family-linear', 'linear'),
+    )
+    journal.ingest('family-linear', items, [])
+
+    const originalIterator = Map.prototype[Symbol.iterator]
+    let mutationMapVisits = 0
+    Object.defineProperty(Map.prototype, Symbol.iterator, {
+      configurable: true,
+      writable: true,
+      value: function (this: Map<unknown, unknown>) {
+        const iterator = originalIterator.call(this)
+        return {
+          next() {
+            const result = iterator.next()
+            if (!result.done
+              && Array.isArray(result.value)
+              && typeof result.value[0] === 'string'
+              && result.value[0].startsWith('baby-info:')) {
+              mutationMapVisits += 1
+            }
+            return result
+          },
+          [Symbol.iterator]() { return this },
+        }
+      },
+    })
+    try {
+      let afterKey: string | undefined
+      for (;;) {
+        const page = journal.listPending('family-linear', { limit: 500, afterKey })
+        if (page.items.length === 0) break
+        const keys = page.items.map(getBabyInfoMutationKey)
+        journal.ingest('family-linear', [], keys)
+        afterKey = keys.at(-1)
+      }
+    } finally {
+      Object.defineProperty(Map.prototype, Symbol.iterator, {
+        configurable: true,
+        writable: true,
+        value: originalIterator,
+      })
+    }
+
+    expect(journal.getSummary('family-linear').pendingCount).toBe(0)
+    expect(mutationMapVisits).toBeLessThan(total * 2)
+  }, 20_000)
+
+  it('reloads and applies the exact complete durable prefix after a partial append failure', () => {
+    const targets = new Map<number, string>()
+    const realOpen = fs.openSync.bind(fs)
+    let injectFailure = false
+    let prefixWritten = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, String(target))
+        return fd
+      },
+      writeSync(fd, buffer, offset, length, position) {
+        if (injectFailure && targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          if (prefixWritten) throw new Error('injected partial append failure')
+          const newline = Buffer.from(buffer).indexOf(0x0a, offset)
+          const prefixLength = newline - offset + 1
+          prefixWritten = true
+          return fs.writeSync(fd, buffer, offset, Math.min(length, prefixLength), position)
+        }
+        return fs.writeSync(fd, buffer, offset, length, position)
+      },
+      closeSync(fd) {
+        targets.delete(fd)
+        fs.closeSync(fd)
+      },
+    }
+    const journal = new (BabyInfoJournal as unknown as new (
+      root: string,
+      options: { durableFs: DurableFileOps },
+    ) => BabyInfoJournal)(tmpDir, { durableFs })
+    const first = mutation(70_001, 'family-prefix')
+    const second = mutation(70_002, 'family-prefix')
+
+    injectFailure = true
+    expect(() => journal.ingest('family-prefix', [first, second], []))
+      .toThrow(/partial append failure/)
+    injectFailure = false
+
+    expect(journal.getSummary('family-prefix')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: first,
+    })
+    journal.ingest('family-prefix', [first, second], [])
+    expect(new BabyInfoJournal(tmpDir).getSummary('family-prefix')).toMatchObject({
+      mutationCount: 2,
+      pendingCount: 2,
+      winner: second,
+    })
+  })
 })

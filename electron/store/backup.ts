@@ -1,7 +1,12 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { app } from 'electron'
-import { stageVerifiedBackupSnapshot } from './backupSnapshot'
+import {
+  selectVerifiedBackupsToPrune,
+  stageVerifiedBackupSnapshot,
+} from './backupSnapshot'
+
+export { selectVerifiedBackupsToPrune } from './backupSnapshot'
 
 export type BackupDestination = 'userData' | 'documents'
 
@@ -175,13 +180,12 @@ export class BackupManager {
     }
   }
 
-  private pruneUserDataBackups(): void {
+  private pruneVerifiedBackups(root: string): void {
     try {
-      if (fs.existsSync(this.userDataBackupDir)) {
-        const entries = fs.readdirSync(this.userDataBackupDir)
-        const toPrune = selectBackupsToPrune(entries, new Date())
+      if (fs.existsSync(root)) {
+        const toPrune = selectVerifiedBackupsToPrune(root, new Date())
         for (const name of toPrune) {
-          const fullPath = path.join(this.userDataBackupDir, name)
+          const fullPath = path.join(root, name)
           try {
             fs.rmSync(fullPath, { recursive: true, force: true })
             console.log(`[Backup] Pruned old backup: ${name}`)
@@ -222,9 +226,10 @@ export class BackupManager {
     }
 
     this.lastBackupTime = now.toISOString()
-    // Prune only after a new userData snapshot is durable. A Documents-only
-    // success must never remove the last known-good local backup.
-    if (succeeded.includes('userData')) this.pruneUserDataBackups()
+    // Each destination is retained independently, and only fully verified
+    // snapshots may occupy the recent/monthly keep slots.
+    if (succeeded.includes('userData')) this.pruneVerifiedBackups(this.userDataBackupDir)
+    if (succeeded.includes('documents')) this.pruneVerifiedBackups(this.documentsBackupDir)
     return { timestamp: this.lastBackupTime, succeeded, failed }
   }
 

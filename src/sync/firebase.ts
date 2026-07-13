@@ -18,16 +18,63 @@ import type {
 import { AppSettings } from '../../shared/types'
 import { ipc } from '../lib/ipc'
 
-const APP_NAME = 'baby-diary'
-const OWNED_APP_SESSION = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+const APP_NAME_PREFIX = 'baby-diary'
+const EMULATOR_CONNECTED = Symbol.for('baby-diary.firebase.emulator-connected')
 
 let _app: FirebaseApp | null = null
 let _db: Firestore | null = null
 let _auth: Auth | null = null
 let _ownerToken: string | null = null
+let _configIdentity: string | null = null
 let _requestVersion = 0
 
 export type FirebaseConfig = NonNullable<AppSettings['firebase']>
+
+const FIREBASE_CONFIG_FIELDS = [
+  'apiKey',
+  'authDomain',
+  'projectId',
+  'storageBucket',
+  'messagingSenderId',
+  'appId',
+] as const
+
+export function canonicalFirebaseConfig(config: FirebaseConfig): string {
+  return JSON.stringify(Object.fromEntries(
+    FIREBASE_CONFIG_FIELDS.map(field => [field, config[field]]),
+  ))
+}
+
+function fnv1a32(value: string, seed: number): string {
+  let hash = seed >>> 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+/** Stable inputs used by the installed Auth and Firestore persistence-key schemes. */
+export function getFirebasePersistenceIdentity(config: FirebaseConfig): {
+  appName: string
+  authUserKey: string
+  firestorePersistenceKey: string
+} {
+  const canonical = canonicalFirebaseConfig(config)
+  const digest = fnv1a32(canonical, 0x811c9dc5)
+    + fnv1a32([...canonical].reverse().join(''), 0x9e3779b9)
+  const appName = `${APP_NAME_PREFIX}-${digest}`
+  return {
+    appName,
+    authUserKey: `firebase:authUser:${config.apiKey}:${appName}`,
+    firestorePersistenceKey: appName,
+  }
+}
+
+function existingAppMatchesConfig(app: FirebaseApp, config: FirebaseConfig): boolean {
+  const options = app.options as Partial<Record<(typeof FIREBASE_CONFIG_FIELDS)[number], unknown>>
+  return FIREBASE_CONFIG_FIELDS.every(field => options[field] === config[field])
+}
 
 /**
  * 설정이 있으면 Firebase 앱을 초기화하고 { db, auth }를 반환.
@@ -49,15 +96,17 @@ export async function initFirebase(
     throw new Error('invalid Firebase owner token')
   }
 
-  // 이미 동일 projectId로 초기화되어 있으면 재사용
-  if (_app && _db && _auth && _ownerToken === ownerToken) {
+  const identity = getFirebasePersistenceIdentity(config)
+  const canonicalConfig = canonicalFirebaseConfig(config)
+
+  // Ownership is a lease only. Persistence services are keyed solely by config.
+  if (_app && _db && _auth && _configIdentity === canonicalConfig) {
+    _ownerToken = ownerToken
     return { db: _db, auth: _auth }
   }
 
   const requestVersion = ++_requestVersion
-  const appName = ownerToken === 'default'
-    ? APP_NAME
-    : `${APP_NAME}-${OWNED_APP_SESSION}-${ownerToken}`
+  const appName = identity.appName
 
   // The main process exposes emulator endpoints only for an explicitly
   // isolated E2E profile. Validate before initializeApp so a malformed test
@@ -76,6 +125,7 @@ export async function initFirebase(
   // Dynamic imports — firebase chunk is loaded on demand
   const { initializeApp, getApps, deleteApp } = await import('firebase/app')
   const {
+    getFirestore,
     initializeFirestore,
     persistentLocalCache,
     persistentMultipleTabManager,
@@ -87,22 +137,20 @@ export async function initFirebase(
   } = await import('firebase/auth')
   if (requestVersion !== _requestVersion) return null
 
-  // 기존 앱이 있으면 삭제 후 재생성 (설정 변경 시)
   const existing = getApps().find(a => a.name === appName)
-  if (existing) {
-    await deleteApp(existing)
-    if (requestVersion !== _requestVersion) return null
+  if (existing && !existingAppMatchesConfig(existing, config)) {
+    throw new Error('deterministic Firebase app-name collision')
   }
 
-  const app = initializeApp(config, appName)
-
-  // Electron renderer에서는 IndexedDB 기반 persistentLocalCache 사용
-  // 오프라인에서도 캐시된 데이터 읽기/쓰기 가능
-  const db = initializeFirestore(app, {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager(),
-    }),
-  })
+  const app = existing ?? initializeApp(config, appName)
+  const created = existing === undefined
+  const db = created
+    ? initializeFirestore(app, {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      })
+    : getFirestore(app)
 
   const auth = getAuth(app)
 
@@ -111,7 +159,7 @@ export async function initFirebase(
   // app behind. Auth persistence is selected only immediately before a new
   // sign-in/sign-up, preserving any session Firebase restored here.
   try {
-    if (emulator?.enabled) {
+    if (emulator?.enabled && !(app as FirebaseApp & { [EMULATOR_CONNECTED]?: boolean })[EMULATOR_CONNECTED]) {
       connectAuthEmulator(
         auth,
         `http://${emulator.authHost}:${emulator.authPort}`,
@@ -122,25 +170,22 @@ export async function initFirebase(
         emulator.firestoreHost,
         emulator.firestorePort,
       )
+      ;(app as FirebaseApp & { [EMULATOR_CONNECTED]?: boolean })[EMULATOR_CONNECTED] = true
     }
   } catch (error) {
-    await deleteApp(app).catch(() => undefined)
+    if (created) await deleteApp(app).catch(() => undefined)
     throw error
   }
 
   if (requestVersion !== _requestVersion) {
-    void deleteApp(app).catch(() => undefined)
     return null
   }
 
-  const previousApp = _app
   _app = app
   _db = db
   _auth = auth
   _ownerToken = ownerToken
-  if (previousApp && previousApp !== app) {
-    void deleteApp(previousApp).catch(() => undefined)
-  }
+  _configIdentity = canonicalConfig
 
   return { db: _db, auth: _auth }
 }
@@ -209,8 +254,8 @@ export async function teardownFirebase(): Promise<void> {
   _db = null
   _auth = null
   _ownerToken = null
-  if (app) {
-    const { deleteApp } = await import('firebase/app')
-    await deleteApp(app)
-  }
+  _configIdentity = null
+  // Stable Firebase apps own IndexedDB/Auth persistence. Runtime stop releases
+  // only the active lease; deterministic apps are reused on the next start.
+  void app
 }

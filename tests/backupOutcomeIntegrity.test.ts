@@ -59,6 +59,17 @@ function precreateCollision(directory: string, stamp: string, value: string) {
   return final
 }
 
+function writeLegacyRetentionSnapshot(root: string, name: string, valid = true): void {
+  const snapshot = path.join(root, name)
+  fs.mkdirSync(snapshot, { recursive: true })
+  fs.writeFileSync(path.join(snapshot, 'settings.json'), JSON.stringify({
+    baby: { name: valid ? name : 42, birthdate: '2025-01-01' },
+    profile: { uid: 'legacy', name: 'Parent', role: 'mom' },
+    familyId: 'legacy-family',
+    firebase: null,
+  }))
+}
+
 describe('BackupManager destination outcomes and durability state', () => {
   let tempRoot: string
   let userData: string
@@ -169,5 +180,27 @@ describe('BackupManager destination outcomes and durability state', () => {
 
     expect(second).toBe(first)
     await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+  })
+
+  it('applies verified-only monthly retention independently to userData and Documents roots', async () => {
+    const paths = resolveBackupDirectories(userData, documents, process.platform)
+    const old = '2025-01-01_00-00-00'
+    const newestValid = '2025-01-15_00-00-00'
+    const corruptNewest = '2025-01-31_00-00-00'
+    for (const root of [paths.userDataBackupDir, paths.documentsBackupDir]) {
+      writeLegacyRetentionSnapshot(root, old)
+      writeLegacyRetentionSnapshot(root, newestValid)
+      writeLegacyRetentionSnapshot(root, corruptNewest, false)
+    }
+
+    const manager = new BackupManager(userData, { documentsPath: documents })
+    await manager.backup()
+
+    for (const root of [paths.userDataBackupDir, paths.documentsBackupDir]) {
+      expect(fs.existsSync(path.join(root, old))).toBe(false)
+      expect(fs.existsSync(path.join(root, newestValid))).toBe(true)
+      expect(fs.existsSync(path.join(root, corruptNewest))).toBe(true)
+      expect(fs.existsSync(path.join(root, FIRST_STAMP))).toBe(true)
+    }
   })
 })

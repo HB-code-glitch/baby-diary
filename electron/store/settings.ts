@@ -10,6 +10,7 @@ import type {
   BabyInfoPendingPage,
   BabyInfoPendingPageRequest,
   BabyInfoSettingsCommitResult,
+  BabyInfoUnlinkedArchive,
 } from '../../shared/types'
 import {
   applyManagedSettingsMerge,
@@ -30,7 +31,11 @@ import {
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
 import { BabyInfoJournal } from './babyInfoJournal'
-import { recoverSettingsAndJournalPair, SettingsRecoveryError } from './backupSnapshot'
+import {
+  recoverSettingsAndJournalPair,
+  SettingsRecoveryError,
+  type RecoveryOptions,
+} from './backupSnapshot'
 import { atomicReplaceFileSync } from './durableFs'
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -93,9 +98,9 @@ export class SettingsStore {
   private settings: AppSettings = { ...DEFAULT_SETTINGS }
   private readonly journal: BabyInfoJournal
 
-  constructor(userDataPath: string) {
+  constructor(userDataPath: string, options: RecoveryOptions = {}) {
     this.settingsPath = path.join(userDataPath, 'settings.json')
-    recoverSettingsAndJournalPair(userDataPath)
+    recoverSettingsAndJournalPair(userDataPath, options)
     this.load()
     this.journal = new BabyInfoJournal(userDataPath)
     this.recoverJournalProjection()
@@ -202,6 +207,10 @@ export class SettingsStore {
       sourceRemoved = true
     }
 
+    if (!current.familyId && (current.baby.name !== '' || current.baby.birthdate !== '')) {
+      this.journal.archiveUnlinkedPair(current.baby.name, current.baby.birthdate)
+    }
+
     let winner: BabyInfoMutation | undefined
     if (current.familyId) {
       assertFamilyId(current.familyId)
@@ -221,8 +230,8 @@ export class SettingsStore {
     }
 
     const metadata = this.projectionMetadata(current.familyId, winner)
-    const desiredName = winner?.babyName ?? (current.familyId ? '' : current.baby.name)
-    const desiredBirthdate = winner?.babyBirthdate ?? (current.familyId ? '' : current.baby.birthdate)
+    const desiredName = winner?.babyName ?? ''
+    const desiredBirthdate = winner?.babyBirthdate ?? ''
     const pairChanged = current.baby.name !== desiredName
       || current.baby.birthdate !== desiredBirthdate
     const metadataChanged = !sameValue(current.babyInfoJournal, metadata)
@@ -274,6 +283,10 @@ export class SettingsStore {
     return this.journal.getMutation(assertFamilyId(familyId), key)
   }
 
+  listUnlinkedBabyInfoArchives(): BabyInfoUnlinkedArchive[] {
+    return this.journal.listUnlinkedArchives()
+  }
+
   commitBabyInfo(rawOperation: unknown): BabyInfoSettingsCommitResult {
     const operation = parseBabyInfoSettingsCommitOperation(rawOperation)
     let current = parseAppSettings(this.settings)
@@ -281,21 +294,6 @@ export class SettingsStore {
     if (operation.kind === 'family-transition') {
       this.recoverJournalProjection()
       current = parseAppSettings(this.settings)
-      if (operation.mode === 'create' && current.familyId !== '') {
-        throw new BabyInfoSettingsCommitError(
-          'FAMILY_MISMATCH',
-          'family creation can adopt only an unlinked local pair',
-        )
-      }
-      let mutation: BabyInfoMutation | undefined
-      if (operation.mode === 'create') {
-        mutation = makeLegacyLocalBabyInfoMutation(
-          operation.familyId,
-          current.baby.name,
-          current.baby.birthdate,
-        )
-        if (mutation) this.journal.ingest(operation.familyId, [mutation], [])
-      }
       const next = this.projectFamily(current, operation.familyId)
       this.write(next)
       const summary = this.journal.getSummary(operation.familyId)
@@ -303,7 +301,6 @@ export class SettingsStore {
         kind: 'family-transition',
         settings: this.get(),
         babyInfo: summary.pendingCount > 0 ? 'pending' : 'unchanged',
-        mutation,
         pendingCount: this.journal.getTotalPendingCount(),
         activePendingCount: summary.pendingCount,
         winner: summary.winner,

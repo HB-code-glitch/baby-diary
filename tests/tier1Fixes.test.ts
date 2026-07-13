@@ -281,15 +281,21 @@ describe('P10: settings deep-merge on load', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('JSON with only baby.name preserves default birthdate (not undefined)', () => {
+  it('archives an unlinked partial baby pair and keeps the visible pair blank', () => {
     const settingsPath = path.join(tmpDir, 'settings.json')
-    // Write partial JSON — baby has only name, missing birthdate
+    // Write a pre-journal familyless pair with a missing birthdate.
     fs.writeFileSync(settingsPath, JSON.stringify({ baby: { name: 'Alice' } }), 'utf-8')
 
     const store = new SettingsStore(tmpDir)
     const s = store.get()
-    expect(s.baby.name).toBe('Alice')
-    expect(s.baby.birthdate).toBe('')  // defaulted, not undefined
+    expect(s.baby).toMatchObject({ name: '', birthdate: '' })
+    expect(store.listUnlinkedBabyInfoArchives()).toEqual([
+      expect.objectContaining({ babyName: 'Alice', babyBirthdate: '' }),
+    ])
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(restarted.listUnlinkedBabyInfoArchives()).toHaveLength(1)
   })
 
   it('JSON with only profile.name preserves default role', () => {

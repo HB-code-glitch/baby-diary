@@ -8,6 +8,7 @@ import type {
   BabyInfoPendingPageRequest,
   BabyInfoSettingsCommitOperation,
   BabyInfoSettingsCommitResult,
+  BabyInfoUnlinkedArchive,
   DataInfo,
   DiaryEvent,
   ExportFormat,
@@ -27,6 +28,7 @@ import {
 import {
   canonicalBabyInfoMutationJson,
   getBabyInfoMutationKey,
+  getBabyInfoUnlinkedArchiveId,
   isValidBabyInfoMutationKey,
   makeLegacyLocalBabyInfoMutation,
   normalizeBabyInfoSyncState,
@@ -55,6 +57,7 @@ declare global {
       listPendingBabyInfo: (request: BabyInfoPendingPageRequest) => Promise<BabyInfoPendingPage>
       getBabyInfoSummary: (familyId: string) => Promise<BabyInfoJournalSummary>
       getBabyInfoMutation: (familyId: string, key: string) => Promise<BabyInfoMutation | undefined>
+      listUnlinkedBabyInfoArchives: () => Promise<BabyInfoUnlinkedArchive[]>
       exportData: (format: ExportFormat) => Promise<void>
       openBackupFolder: () => Promise<void>
       getDataInfo: () => Promise<DataInfo>
@@ -128,10 +131,11 @@ interface MockJournalState {
   version: 1
   mutations: BabyInfoMutation[]
   acknowledgedKeys: string[]
+  unlinkedArchives: BabyInfoUnlinkedArchive[]
 }
 
 function mockEmptyJournal(): MockJournalState {
-  return { version: 1, mutations: [], acknowledgedKeys: [] }
+  return { version: 1, mutations: [], acknowledgedKeys: [], unlinkedArchives: [] }
 }
 
 function mockGetJournal(): MockJournalState {
@@ -142,6 +146,7 @@ function mockGetJournal(): MockJournalState {
     if (parsed.version !== 1 || !Array.isArray(parsed.mutations) || !Array.isArray(parsed.acknowledgedKeys)) {
       return mockEmptyJournal()
     }
+    if (!Array.isArray(parsed.unlinkedArchives)) parsed.unlinkedArchives = []
     for (const mutation of parsed.mutations) canonicalBabyInfoMutationJson(mutation)
     return parsed
   } catch {
@@ -197,6 +202,18 @@ function mockMigrateLegacy(current: AppSettings, state: MockJournalState): AppSe
     )
     if (legacy) mockAppendMutation(state, legacy)
   }
+  if (!current.familyId && (current.baby.name !== '' || current.baby.birthdate !== '')) {
+    const archiveId = getBabyInfoUnlinkedArchiveId(current.baby.name, current.baby.birthdate)
+    if (!state.unlinkedArchives.some(item => item.archiveId === archiveId)) {
+      state.unlinkedArchives.push({
+        archiveId,
+        babyName: current.baby.name,
+        babyBirthdate: current.baby.birthdate,
+        archivedAt: new Date().toISOString(),
+        source: 'legacy-unscoped',
+      })
+    }
+  }
   const summary = current.familyId ? mockSummary(state, current.familyId) : undefined
   const winner = summary?.winner
   return {
@@ -205,7 +222,7 @@ function mockMigrateLegacy(current: AppSettings, state: MockJournalState): AppSe
       ? { ...current.baby, name: winner.babyName, birthdate: winner.babyBirthdate }
       : current.familyId
         ? { ...current.baby, name: '', birthdate: '' }
-        : current.baby,
+        : { ...current.baby, name: '', birthdate: '' },
     babyInfoSync: undefined,
     babyInfoJournal: {
       version: 1,
@@ -245,18 +262,6 @@ function mockCommit(rawOperation: unknown): BabyInfoSettingsCommitResult {
   let current = mockMigrateLegacy(mockGetSettings(), journal)
 
   if (operation.kind === 'family-transition') {
-    if (operation.mode === 'create' && current.familyId !== '') {
-      throw new BabyInfoSettingsCommitError('FAMILY_MISMATCH', 'family creation requires no family')
-    }
-    let mutation: BabyInfoMutation | undefined
-    if (operation.mode === 'create') {
-      mutation = makeLegacyLocalBabyInfoMutation(
-        operation.familyId,
-        current.baby.name,
-        current.baby.birthdate,
-      )
-      if (mutation) mockAppendMutation(journal, mutation)
-    }
     current = mockProjectFamily(current, journal, operation.familyId)
     mockWriteJournal(journal)
     mockWriteSettings(current)
@@ -265,7 +270,6 @@ function mockCommit(rawOperation: unknown): BabyInfoSettingsCommitResult {
       kind: 'family-transition',
       settings: current,
       babyInfo: summary.pendingCount > 0 ? 'pending' : 'unchanged',
-      mutation,
       pendingCount: mockTotalPending(journal),
       activePendingCount: summary.pendingCount,
       winner: summary.winner,
@@ -451,6 +455,7 @@ const mockBabyDiary: Window['babyDiary'] = {
     const candidate = mockGetJournal().mutations.find(item => getBabyInfoMutationKey(item) === key)
     return candidate?.familyId === validFamilyId ? candidate : undefined
   },
+  listUnlinkedBabyInfoArchives: async () => mockGetJournal().unlinkedArchives.map(item => ({ ...item })),
   exportData: async () => { throw new Error('ELECTRON_ONLY') },
   openBackupFolder: async () => { throw new Error('ELECTRON_ONLY') },
   getDataInfo: async () => ({
@@ -525,6 +530,8 @@ export const ipc = {
     getApi().getBabyInfoSummary(familyId),
   getBabyInfoMutation: (familyId: string, key: string): Promise<BabyInfoMutation | undefined> =>
     getApi().getBabyInfoMutation(familyId, key),
+  listUnlinkedBabyInfoArchives: (): Promise<BabyInfoUnlinkedArchive[]> =>
+    getApi().listUnlinkedBabyInfoArchives(),
   exportData: (format: ExportFormat) => getApi().exportData(format),
   openBackupFolder: (): Promise<void> => getApi().openBackupFolder(),
   getDataInfo: (): Promise<DataInfo> => getApi().getDataInfo(),
