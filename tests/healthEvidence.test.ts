@@ -16,6 +16,7 @@ const requiredSourceIds = [
   'who-infant-feeding',
   'who-complementary-feeding',
   'who-under-five-activity',
+  'who-child-growth-standards',
   'cdc-breastfeeding-frequency',
   'cdc-formula-feeding',
   'cdc-hunger-fullness-cues',

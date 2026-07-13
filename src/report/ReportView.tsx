@@ -27,6 +27,7 @@ const PRINT_STYLES = `
   td { border: 1px solid #bbb; padding: 4px 6px; }
   .stat-label { color: #555; font-size: 10pt; }
   .stat-value { font-weight: 600; }
+  .report-context-note { margin: 2px 0 8px; font-size: 8.5pt; line-height: 1.45; color: #555; }
   .footer { margin-top: 20px; font-size: 8pt; color: #666; border-top: 1px solid #ccc; padding-top: 6px; }
   @media print {
     body { padding: 0; }
@@ -155,6 +156,7 @@ export function ReportView() {
           </tr>
         </tbody>
       </table>
+      <p className="report-context-note">{t('report.temperatureContext')}</p>
 
       {/* Growth records */}
       {model.growthRows.length > 0 && (
@@ -213,7 +215,6 @@ export function ReportView() {
       {/* Footer */}
       <div className="footer">
         <p>{t('report.footerDisclaimer')}</p>
-        <p>{t('report.footerDisclaimerJa')}</p>
         <p>{t('report.footerApp')} &mdash; {format(now, 'yyyy-MM-dd HH:mm', { locale: dateFnsLocale })}</p>
       </div>
     </div>

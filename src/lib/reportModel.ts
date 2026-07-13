@@ -10,7 +10,7 @@ export interface ReportPeriodStats {
   avgSleepHoursPerDay: number // total sleep minutes / 60 / period days
   recentTemp: number | null   // latest temp reading celsius in period
   maxTemp: number | null      // highest temp in period
-  feverCount: number          // readings >= 38.0 in period
+  feverCount: number          // recorded values >= 38.0 in period; not a diagnosis
 }
 
 export interface ReportGrowthRow {

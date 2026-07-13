@@ -34,6 +34,13 @@ const sourceDefinitions = [
     reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
   },
   {
+    id: 'who-child-growth-standards',
+    organization: { ko: '세계보건기구(WHO)', ja: '世界保健機関（WHO）' },
+    title: { ko: 'WHO 아동 성장 기준', ja: 'WHO乳幼児成長基準' },
+    url: 'https://www.who.int/tools/child-growth-standards',
+    reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
+  },
+  {
     id: 'cdc-breastfeeding-frequency',
     organization: { ko: '미국 질병통제예방센터(CDC)', ja: '米国疾病予防管理センター（CDC）' },
     title: { ko: '모유 수유량과 수유 빈도', ja: '母乳を与える量と頻度' },
