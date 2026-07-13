@@ -7,10 +7,12 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -106,6 +108,11 @@ describe('v0.3.8 upgrade data contract', () => {
     expect(fixture.events.some(event => event.mutationId === undefined)).toBe(true)
     expect(fixture.settings.babyInfoSync.mutations).toHaveLength(2)
     expect(fixture.settings.babyInfoSync.pendingMutationKeys).toHaveLength(1)
+    expect(fixture.settings.upgradeOpaque.deep.nested).toEqual({
+      ko: '보존',
+      ja: '保持',
+      values: [0, false, null, { marker: 'v0.3.8' }],
+    })
 
     await contract.writeV038Fixture(root)
     const projection = await contract.validateV038Fixture(root)
@@ -151,6 +158,78 @@ describe('v0.3.8 upgrade data contract', () => {
     ])).rejects.toThrow(/added.*extra/i)
   })
 
+  it('binds an exact CI provenance document to the complete candidate package digest', async () => {
+    const root = tempRoot('candidate-provenance')
+    const packagePath = join(root, 'Baby-Diary-Setup-0.3.9.exe')
+    const provenancePath = join(root, 'candidate-provenance.json')
+    const outputPath = join(root, 'verified-provenance.json')
+    writeFileSync(packagePath, 'complete candidate package bytes')
+    const artifactSha256 = createHash('sha256')
+      .update(readFileSync(packagePath))
+      .digest('hex')
+    const provenance = {
+      schemaVersion: 1,
+      repository: 'HB-code-glitch/BABY-DIARY',
+      workflowRunId: '1234567890',
+      sourceSha: 'a'.repeat(40),
+      releaseTag: 'v0.3.9',
+      appVersion: '0.3.9',
+      platform: 'windows-x64',
+      artifactName: 'Baby-Diary-Setup-0.3.9.exe',
+      artifactSha256,
+    }
+    writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`)
+
+    await expect(contract.runDataContractCli([
+      'verify-provenance',
+      '--package', packagePath,
+      '--provenance', provenancePath,
+      '--output', outputPath,
+      '--expected-repository', provenance.repository,
+      '--expected-workflow-run-id', provenance.workflowRunId,
+      '--expected-source-sha', provenance.sourceSha,
+      '--expected-release-tag', provenance.releaseTag,
+      '--expected-app-version', provenance.appVersion,
+      '--expected-platform', provenance.platform,
+      '--expected-artifact-name', provenance.artifactName,
+      '--expected-artifact-sha256', artifactSha256,
+    ])).resolves.toEqual(provenance)
+    expect(JSON.parse(readFileSync(outputPath, 'utf8'))).toEqual(provenance)
+
+    appendFileSync(packagePath, '-tampered')
+    await expect(contract.verifyCandidateProvenance({
+      packagePath,
+      provenancePath,
+      expected: {
+        repository: provenance.repository,
+        workflowRunId: provenance.workflowRunId,
+        sourceSha: provenance.sourceSha,
+        releaseTag: provenance.releaseTag,
+        appVersion: provenance.appVersion,
+        platform: provenance.platform,
+        artifactName: provenance.artifactName,
+        artifactSha256,
+      },
+    })).rejects.toThrow(/package SHA-256 mismatch/i)
+
+    writeFileSync(packagePath, 'complete candidate package bytes')
+    writeFileSync(provenancePath, JSON.stringify({ ...provenance, unexpected: true }))
+    await expect(contract.verifyCandidateProvenance({
+      packagePath,
+      provenancePath,
+      expected: {
+        repository: provenance.repository,
+        workflowRunId: provenance.workflowRunId,
+        sourceSha: provenance.sourceSha,
+        releaseTag: provenance.releaseTag,
+        appVersion: provenance.appVersion,
+        platform: provenance.platform,
+        artifactName: provenance.artifactName,
+        artifactSha256,
+      },
+    })).rejects.toThrow(/exact fields/i)
+  })
+
   it('rejects case collisions, traversal, links/reparse points, and file/tree cap breaches', async () => {
     expect(() => contract.validateRawManifestEntries([
       { path: 'Data/value', type: 'file', size: 0, sha256: '0'.repeat(64) },
@@ -173,6 +252,23 @@ describe('v0.3.8 upgrade data contract', () => {
     await expect(contract.createRawManifest(cappedRoot, { maxFileBytes: 8, maxTreeBytes: 8 })).rejects.toThrow(/tree.*cap/i)
   })
 
+  it('rejects a manifest file path swapped after its descriptor is opened', async () => {
+    const root = tempRoot('descriptor-swap')
+    const file = join(root, 'settings.json')
+    writeFileSync(file, '{"original":true}\n')
+    let swapped = false
+
+    await expect(contract.createRawManifest(root, {
+      afterFileOpen: async ({ relativePath }: { relativePath: string }) => {
+        if (relativePath !== 'settings.json' || swapped) return
+        swapped = true
+        renameSync(file, join(root, 'settings.original.json'))
+        writeFileSync(file, '{"replacement":true}\n')
+      },
+    })).rejects.toThrow(/changed|identity|TOCTOU/i)
+    expect(swapped).toBe(true)
+  })
+
   it('normalizes the legacy settings sync state and the migrated journal to the same semantics', async () => {
     const baselineRoot = tempRoot('legacy-sync')
     await contract.writeV038Fixture(baselineRoot)
@@ -183,6 +279,46 @@ describe('v0.3.8 upgrade data contract', () => {
     const migrated = await contract.projectUpgradeSemantics(migratedRoot)
     expect(() => contract.assertSemanticPreservation(baseline, migrated)).not.toThrow()
     expect(migrated.babyInfo).toEqual(baseline.babyInfo)
+    expect(migrated.babyInfoJournal.records).toEqual(baseline.babyInfoJournal.expectedRecords)
+    expect(migrated.babyInfoJournal.importSourceIds).toEqual([
+      baseline.babyInfoJournal.expectedImportSourceId,
+    ])
+  })
+
+  it('rejects duplicate/wrong-family journal evidence and more than one derivative per event source', async () => {
+    const baselineRoot = tempRoot('strict-journal')
+    await contract.writeV038Fixture(baselineRoot)
+    await contract.materializeMigratedBabyInfoJournal(baselineRoot)
+    const journalPath = join(baselineRoot, 'baby-info-journal-v1.jsonl')
+    const records = readFileSync(journalPath, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line))
+    const acknowledgement = records.find(record => record.type === 'ack')
+    const imported = records.find(record => record.type === 'import')
+
+    const duplicateAckRoot = cloneRoot(baselineRoot, 'duplicate-ack')
+    appendFileSync(join(duplicateAckRoot, 'baby-info-journal-v1.jsonl'), `${JSON.stringify(acknowledgement)}\n`)
+    await expect(contract.projectUpgradeSemantics(duplicateAckRoot)).rejects.toThrow(/duplicate acknowledgement/i)
+
+    const wrongFamilyRoot = cloneRoot(baselineRoot, 'wrong-family-ack')
+    appendFileSync(join(wrongFamilyRoot, 'baby-info-journal-v1.jsonl'), `${JSON.stringify({
+      ...acknowledgement,
+      familyId: 'wrong-family',
+    })}\n`)
+    await expect(contract.projectUpgradeSemantics(wrongFamilyRoot)).rejects.toThrow(/family mismatch/i)
+
+    const duplicateImportRoot = cloneRoot(baselineRoot, 'duplicate-import')
+    appendFileSync(join(duplicateImportRoot, 'baby-info-journal-v1.jsonl'), `${JSON.stringify(imported)}\n`)
+    await expect(contract.projectUpgradeSemantics(duplicateImportRoot)).rejects.toThrow(/duplicate import/i)
+
+    const derivativeRoot = cloneRoot(baselineRoot, 'same-source-derivative')
+    const first = contract.buildFixtureEventDerivative()
+    const second = contract.buildFixtureEventDerivative({
+      mutationId: '33333333-3333-4333-8333-333333333333',
+    })
+    appendFileSync(
+      join(derivativeRoot, 'data', 'events-2026-07.jsonl'),
+      `${JSON.stringify(first)}\n${JSON.stringify(second)}\n`,
+    )
+    await expect(contract.projectUpgradeSemantics(derivativeRoot)).rejects.toThrow(/multiple.*source|source.*derivative/i)
   })
 
   it('rejects a duplicate migration derivative and a tombstone resurrection', async () => {
@@ -226,7 +362,36 @@ describe('v0.3.8 upgrade data contract', () => {
     expect(() => contract.assertSemanticPreservation(baseline, substituted)).toThrow(/account|family|identity/i)
   })
 
-  it('allows reordered JSON keys only in the semantic projection, not the raw manifest', async () => {
+  it('preserves unknown/deep settings and exact auxiliary/auth sentinel files', async () => {
+    const baselineRoot = tempRoot('opaque-before')
+    await contract.writeV038Fixture(baselineRoot)
+    const baseline = await contract.projectUpgradeSemantics(baselineRoot)
+    expect(baseline.auxiliaryFiles.map((item: any) => item.path)).toEqual([
+      'Local Storage/upgrade-auth-sentinel.json',
+      'auxiliary/legacy-attachment.bin',
+    ])
+
+    const migratedRoot = cloneRoot(baselineRoot, 'opaque-after')
+    await contract.materializeMigratedBabyInfoJournal(migratedRoot)
+    const migrated = await contract.projectUpgradeSemantics(migratedRoot)
+    expect(() => contract.assertSemanticPreservation(baseline, migrated)).not.toThrow()
+    expect(migrated.settingsOpaqueHash).toBe(baseline.settingsOpaqueHash)
+    expect(migrated.auxiliaryFiles).toEqual(baseline.auxiliaryFiles)
+
+    const auxiliaryRoot = cloneRoot(migratedRoot, 'auxiliary-substitution')
+    const settingsPath = join(migratedRoot, 'settings.json')
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    settings.upgradeOpaque.deep.nested.ja = '置換'
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+    const substituted = await contract.projectUpgradeSemantics(migratedRoot)
+    expect(() => contract.assertSemanticPreservation(baseline, substituted)).toThrow(/unknown|settings|opaque/i)
+
+    writeFileSync(join(auxiliaryRoot, 'auxiliary', 'legacy-attachment.bin'), 'substituted')
+    const auxiliaryChanged = await contract.projectUpgradeSemantics(auxiliaryRoot)
+    expect(() => contract.assertSemanticPreservation(baseline, auxiliaryChanged)).toThrow(/auxiliary|auth/i)
+  })
+
+  it('normalizes reordered domain values but retains byte-order-sensitive import provenance', async () => {
     const beforeRoot = tempRoot('keys-before')
     await contract.writeV038Fixture(beforeRoot)
     const reorderedRoot = cloneRoot(beforeRoot, 'keys-after')
@@ -239,7 +404,10 @@ describe('v0.3.8 upgrade data contract', () => {
     const beforeProjection = await contract.projectUpgradeSemantics(beforeRoot)
     const reorderedProjection = await contract.projectUpgradeSemantics(reorderedRoot)
     expect(() => contract.assertSemanticPreservation(beforeProjection, reorderedProjection)).not.toThrow()
-    expect(contract.semanticProjectionHash(beforeProjection)).toBe(contract.semanticProjectionHash(reorderedProjection))
+    expect(reorderedProjection.eventSources).toEqual(beforeProjection.eventSources)
+    expect(reorderedProjection.babyInfo).toEqual(beforeProjection.babyInfo)
+    expect(reorderedProjection.babyInfoJournal.expectedImportSourceId)
+      .not.toBe(beforeProjection.babyInfoJournal.expectedImportSourceId)
   })
 
   it('requires second-run semantic idempotence, including derivative multiplicity', async () => {
@@ -258,7 +426,6 @@ describe('v0.3.8 upgrade data contract', () => {
       mutationId: '33333333-3333-4333-8333-333333333333',
     })
     appendFileSync(join(changedRoot, 'data', 'events-2026-07.jsonl'), `${JSON.stringify(changed)}\n`)
-    const changedProjection = await contract.projectUpgradeSemantics(changedRoot)
-    expect(() => contract.assertSemanticIdempotence(first, changedProjection)).toThrow(/idempotent|derivative/i)
+    await expect(contract.projectUpgradeSemantics(changedRoot)).rejects.toThrow(/multiple.*source|source.*derivative/i)
   })
 })

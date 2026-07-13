@@ -19,6 +19,7 @@ import {
   FIRESTORE_PORT,
   assertCleanDiagnostics,
   assertEmulatorEnvironment,
+  assertPackagedRuntimeAttestation,
   attachRendererDiagnostics,
   buildFirebaseCliInvocation,
   buildExpectedDeletedEvent,
@@ -38,6 +39,7 @@ import {
   ownedProcessTreePids,
   parseEmulatorAddress,
   readJavaMajor,
+  resolveCanonicalUpgradeProfile,
   resolvePackagedExecutable,
   removeTempDirectoryWithRetry,
   semanticEventPayload,
@@ -264,6 +266,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     const winResources = path.join(root, 'release', 'win-unpacked', 'resources', 'app.asar')
     const mac = path.join(root, 'release', 'mac-universal', 'Baby Diary.app', 'Contents', 'MacOS', 'Baby Diary')
     const macResources = path.join(root, 'release', 'mac-universal', 'Baby Diary.app', 'Contents', 'Resources', 'app.asar')
+    const installedWin = path.join(root, 'Program Files', 'Baby Diary', 'Baby Diary.exe')
+    const installedWinResources = path.join(root, 'Program Files', 'Baby Diary', 'resources', 'app.asar')
     const installedMac = path.join(root, 'Applications', 'Baby Diary.app', 'Contents', 'MacOS', 'Baby Diary')
     const installedMacResources = path.join(root, 'Applications', 'Baby Diary.app', 'Contents', 'Resources', 'app.asar')
     const arbitraryBinary = path.join(root, 'tools', 'node.exe')
@@ -273,6 +277,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         winResources,
         mac,
         macResources,
+        installedWin,
+        installedWinResources,
         installedMac,
         installedMacResources,
         arbitraryBinary,
@@ -285,6 +291,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
 
       expect(resolvePackagedExecutable({ root, platform: 'win32' })).toBe(win)
       expect(resolvePackagedExecutable({ root, platform: 'darwin' })).toBe(mac)
+      expect(resolvePackagedExecutable({ root, platform: 'win32', override: installedWin })).toBe(installedWin)
+      expect(resolvePackagedExecutable({ root, platform: 'darwin', override: installedMac })).toBe(installedMac)
       expect(() => resolvePackagedExecutable({ root, platform: 'linux' })).toThrow(/Windows.*macOS/)
       expect(() => resolvePackagedExecutable({ root, platform: 'win32', override: path.join(root, 'missing.exe') })).toThrow(/packaged Baby Diary/i)
       expect(() => resolvePackagedExecutable({
@@ -292,15 +300,76 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         platform: 'win32',
         override: arbitraryBinary,
       })).toThrow(/packaged Baby Diary/i)
-      expect(() => resolvePackagedExecutable({
-        root,
-        platform: 'darwin',
-        override: installedMac,
-      })).toThrow(/packaged Baby Diary/i)
-
       rmSync(winResources)
       mkdirSync(winResources)
       expect(() => resolvePackagedExecutable({ root, platform: 'win32', override: win })).toThrow(/regular file.*app\.asar/i)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('attests the launched installed app and rejects a source Electron runtime', () => {
+    const executablePath = path.resolve('Program Files', 'Baby Diary', 'Baby Diary.exe')
+    const resourcePath = path.resolve('Program Files', 'Baby Diary', 'resources', 'app.asar')
+    const valid = {
+      name: 'Baby Diary',
+      version: '0.3.9',
+      isPackaged: true,
+      appPath: resourcePath,
+      executablePath,
+    }
+
+    expect(assertPackagedRuntimeAttestation(valid, {
+      executablePath,
+      resourcePath,
+      platform: 'win32',
+      expectedVersion: '0.3.9',
+    })).toEqual(valid)
+    expect(() => assertPackagedRuntimeAttestation({
+      ...valid,
+      name: 'Electron',
+      isPackaged: false,
+      appPath: path.resolve('node_modules', 'electron', 'dist', 'resources', 'default_app.asar'),
+      executablePath: path.resolve('node_modules', 'electron', 'dist', 'electron.exe'),
+    }, {
+      executablePath,
+      resourcePath,
+      platform: 'win32',
+      expectedVersion: '0.3.9',
+    })).toThrow(/packaged Baby Diary runtime/i)
+  })
+
+  it('binds emulator continuation to the existing canonical upgraded profile, never a fresh userData', () => {
+    const runnerSource = readFileSync(path.resolve(import.meta.dirname, '../scripts/sync-e2e.mjs'), 'utf8')
+    const continuationIndex = runnerSource.indexOf('await runCanonicalUpgradeProfileContinuation({')
+    const freshSeedIndex = runnerSource.indexOf("writeSeed(userDataA, 'Device A')")
+    expect(continuationIndex).toBeGreaterThan(-1)
+    expect(freshSeedIndex).toBeGreaterThan(continuationIndex)
+    expect(runnerSource).toContain('BABYDIARY_TEST_USERDATA: canonicalUpgradeProfile')
+
+    const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-upgraded-profile-')))
+    const platform = process.platform === 'darwin' ? 'darwin' : 'win32'
+    const homeOrAppData = platform === 'darwin'
+      ? path.join(root, 'home')
+      : path.join(root, 'AppData', 'Roaming')
+    const profile = platform === 'darwin'
+      ? path.join(homeOrAppData, 'Library', 'Application Support', 'baby-diary')
+      : path.join(homeOrAppData, 'baby-diary')
+    const fresh = path.join(root, 'fresh-device')
+    try {
+      mkdirSync(path.join(profile, 'data'), { recursive: true })
+      mkdirSync(fresh)
+      writeFileSync(path.join(profile, 'settings.json'), '{"version":1}\n')
+      expect(resolveCanonicalUpgradeProfile({
+        override: profile,
+        platform,
+        env: platform === 'darwin' ? { HOME: homeOrAppData } : { APPDATA: homeOrAppData },
+      })).toBe(realpathSync(profile))
+      expect(() => resolveCanonicalUpgradeProfile({
+        override: fresh,
+        platform,
+        env: platform === 'darwin' ? { HOME: homeOrAppData } : { APPDATA: homeOrAppData },
+      })).toThrow(/canonical upgraded profile/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

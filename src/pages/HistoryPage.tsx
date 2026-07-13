@@ -822,6 +822,7 @@ export function HistoryPage() {
           <button
             type="button"
             className="btn-secondary cal-nav-arrow"
+            data-history-period="previous"
             onClick={() => navigatePeriod(-1)}
             aria-label={previousLabel}
           >
@@ -839,6 +840,7 @@ export function HistoryPage() {
           <button
             type="button"
             className="btn-secondary cal-nav-arrow"
+            data-history-period="next"
             onClick={() => navigatePeriod(1)}
             aria-label={nextLabel}
           >

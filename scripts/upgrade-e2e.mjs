@@ -19,6 +19,7 @@ import {
   buildV038Fixture,
   canonicalJson,
   getBabyInfoMutationKey,
+  materializeV038AuxiliaryFixture,
   projectUpgradeSemantics,
   semanticProjectionHash,
   validateV038Fixture,
@@ -238,11 +239,99 @@ export async function withTimeout(promise, timeoutMs, label) {
     return await Promise.race([
       promise,
       new Promise((_, rejectPromise) => {
-        timer = setTimeout(() => rejectPromise(new Error(`${label} exceeded its bounded timeout`)), timeoutMs)
+        timer = setTimeout(() => {
+          const error = new Error(`${label} exceeded its bounded timeout`)
+          error.code = 'UPGRADE_TIMEOUT'
+          error.phase = label
+          rejectPromise(error)
+        }, timeoutMs)
       }),
     ])
   } finally {
     clearTimeout(timer)
+  }
+}
+
+/**
+ * Bounds acquisition while retaining ownership of a resource that resolves
+ * late. The disposer remains attached to the original promise after timeout,
+ * preventing a late Electron launch from becoming an orphan.
+ */
+export async function acquireWithTimeout(acquisition, timeoutMs, label, disposeLate) {
+  invariant(typeof disposeLate === 'function', 'late-resource disposer is required')
+  const observed = Promise.resolve(acquisition)
+  try {
+    return await withTimeout(observed, timeoutMs, label)
+  } catch (error) {
+    if (error?.code === 'UPGRADE_TIMEOUT') {
+      void observed.then(resource => disposeLate(resource)).catch(() => {
+        // The phase already failed. The outer bounded process-tree guard is
+        // the final cleanup backstop if even the late disposer cannot close.
+      })
+    }
+    throw error
+  }
+}
+
+function childHasExited(child) {
+  return Boolean(child) && (child.exitCode !== null || child.signalCode !== null)
+}
+
+async function waitForChildExit(child, timeoutMs, label) {
+  if (childHasExited(child)) return
+  await new Promise((resolvePromise, rejectPromise) => {
+    let timer
+    const onExit = () => {
+      clearTimeout(timer)
+      child.off?.('exit', onExit)
+      child.off?.('close', onExit)
+      resolvePromise()
+    }
+    child.once('exit', onExit)
+    child.once('close', onExit)
+    timer = setTimeout(() => {
+      child.off?.('exit', onExit)
+      child.off?.('close', onExit)
+      const error = new Error(`${label} exceeded its bounded timeout`)
+      error.code = 'UPGRADE_TIMEOUT'
+      error.phase = label
+      rejectPromise(error)
+    }, timeoutMs)
+  })
+}
+
+async function terminateElectronChild(child, timeoutMs) {
+  invariant(child && typeof child.kill === 'function', 'Electron child process is unavailable for cleanup')
+  if (childHasExited(child)) return
+  child.kill('SIGTERM')
+  try {
+    await waitForChildExit(child, timeoutMs, 'Electron graceful termination')
+    return
+  } catch (error) {
+    if (error?.code !== 'UPGRADE_TIMEOUT') throw error
+  }
+  child.kill('SIGKILL')
+  await waitForChildExit(child, timeoutMs, 'Electron forced termination')
+  invariant(childHasExited(child), 'Electron child process did not exit after forced termination')
+}
+
+/** Close normally, then terminate and reap the real child if close is stuck. */
+export async function closeElectronApplication(electronApp, timeoutMs) {
+  try {
+    await withTimeout(Promise.resolve().then(() => electronApp.close()), timeoutMs, 'Electron close')
+  } catch (closeError) {
+    try {
+      await terminateElectronChild(electronApp.process(), timeoutMs)
+    } catch (cleanupError) {
+      const aggregate = new AggregateError(
+        [closeError, cleanupError],
+        'Electron close failed and bounded child-process cleanup did not complete',
+      )
+      aggregate.code = closeError?.code ?? 'UPGRADE_CLEANUP_FAILED'
+      aggregate.phase = closeError?.phase ?? 'Electron close'
+      throw aggregate
+    }
+    throw closeError
   }
 }
 
@@ -271,6 +360,128 @@ async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
 }
 
+async function waitForVisible(page, selector, timeoutMs, label) {
+  const locator = page.locator(selector).first()
+  try {
+    await locator.waitFor({ state: 'visible', timeout: timeoutMs })
+  } catch {
+    throw new Error(`${label} is not visible in the packaged renderer`)
+  }
+  return locator
+}
+
+async function assertInputValue(page, selector, expected, timeoutMs, label) {
+  const locator = await waitForVisible(page, selector, timeoutMs, label)
+  await page.waitForFunction(
+    ({ selector: inputSelector, expectedValue }) => {
+      const input = document.querySelector(inputSelector)
+      return input instanceof HTMLInputElement && input.value === expectedValue
+    },
+    { selector, expectedValue: expected },
+    { timeout: timeoutMs },
+  )
+  invariant(await locator.inputValue() === expected, `${label} changed in the visible settings form`)
+}
+
+/**
+ * Proves that the preserved candidate state is discoverable through the real
+ * History and Settings routes, not only through an in-page IPC evaluation.
+ */
+export async function assertCandidateUiVisibility(page, publicView, timeoutMs) {
+  invariant(isPlainObject(publicView?.identity), 'candidate UI identity is missing')
+  invariant(Array.isArray(publicView.events), 'candidate UI event projection is missing')
+  const formulaWinner = publicView.events.find(item => item?.id === 'legacy-formula')
+  const deletedWinner = publicView.events.find(item => item?.id === 'legacy-diary-tombstone')
+  invariant(formulaWinner?.rev === 2 && formulaWinner.deleted === false,
+    'candidate IPC did not expose the preserved formula winner')
+  invariant(deletedWinner?.rev === 2 && deletedWinner.deleted === true,
+    'candidate IPC did not expose the preserved deleted winner')
+
+  const tutorialSkip = page.locator('.tour-skip-button').first()
+  if (await tutorialSkip.isVisible().catch(() => false)) await tutorialSkip.click()
+
+  await (await waitForVisible(page, '[data-tour="nav-history"]', timeoutMs, 'History navigation')).click()
+  await waitForVisible(page, '[data-tour="calendar"]', timeoutMs, 'History page')
+
+  const targetDaySelector = '[data-history-date="2026-07-01"]'
+  let targetDay
+  for (let month = 0; month < 240; month += 1) {
+    const candidate = page.locator(targetDaySelector).first()
+    if (await candidate.isVisible().catch(() => false)) {
+      targetDay = candidate
+      break
+    }
+    await (await waitForVisible(
+      page,
+      '[data-history-period="previous"]',
+      timeoutMs,
+      'History previous-period control',
+    )).click()
+  }
+  invariant(targetDay, 'preserved fixture day was not reachable through bounded History navigation')
+  await targetDay.click()
+  await (await waitForVisible(page, '[data-history-preview-action]', timeoutMs, 'History day details')).click()
+
+  await waitForVisible(
+    page,
+    '[data-event-id="legacy-formula"][data-event-rev="2"]',
+    timeoutMs,
+    'preserved formula revision',
+  )
+  await waitForVisible(
+    page,
+    '[data-event-id="legacy-poop"][data-event-rev="1"]',
+    timeoutMs,
+    'preserved legacy event',
+  )
+  invariant(await page.locator('[data-event-id="legacy-diary-tombstone"]').count() === 0,
+    'deleted winner was rendered in History')
+
+  await (await waitForVisible(page, '[data-tour="nav-settings"]', timeoutMs, 'Settings navigation')).click()
+  await waitForVisible(page, '[data-tour="settings-main"]', timeoutMs, 'Settings page')
+  await assertInputValue(
+    page,
+    '[data-settings-baby-name]',
+    publicView.identity.baby.name,
+    timeoutMs,
+    'baby name',
+  )
+  await assertInputValue(
+    page,
+    '[data-settings-baby-birthdate]',
+    publicView.identity.baby.birthdate,
+    timeoutMs,
+    'baby birthdate',
+  )
+  await assertInputValue(
+    page,
+    '[data-settings-account-name]',
+    publicView.identity.account.name,
+    timeoutMs,
+    'account name',
+  )
+  const expectedRole = publicView.identity.account.role
+  const role = await waitForVisible(
+    page,
+    `[data-settings-account-role="${expectedRole}"]`,
+    timeoutMs,
+    'account role',
+  )
+  invariant((await role.getAttribute('class'))?.split(/\s+/).includes('selected'),
+    'preserved account role is not selected in Settings')
+
+  const koButton = await waitForVisible(page, '[data-settings-language="ko"]', timeoutMs, 'Korean language option')
+  const jaButton = await waitForVisible(page, '[data-settings-language="ja"]', timeoutMs, 'Japanese language option')
+  invariant((await koButton.textContent())?.trim(), 'Korean language option has no visible label')
+  invariant((await jaButton.textContent())?.trim(), 'Japanese language option has no visible label')
+  const expectedLanguage = publicView.identity.preferences.language
+  invariant(expectedLanguage === 'ko' || expectedLanguage === 'ja', 'preserved language is invalid')
+  const expectedLanguageButton = expectedLanguage === 'ko' ? koButton : jaButton
+  invariant((await expectedLanguageButton.getAttribute('class'))?.split(/\s+/).includes('selected'),
+    'preserved language is not selected in Settings')
+  await waitForVisible(page, '[data-sync-state]', timeoutMs, 'Sync status')
+}
+
 async function defaultRunPackagedSession({
   mode,
   executablePath,
@@ -282,11 +493,13 @@ async function defaultRunPackagedSession({
   const { _electron: electron } = await import('playwright')
   let electronApp
   try {
-    electronApp = await withTimeout(electron.launch({
+    electronApp = await acquireWithTimeout(electron.launch({
       executablePath,
       cwd: ROOT,
       env: buildPackagedLaunchEnvironment(env),
-    }), timeouts.launchMs, 'Electron launch')
+    }), timeouts.launchMs, 'Electron launch', lateApplication => (
+      closeElectronApplication(lateApplication, timeouts.closeMs)
+    ))
     const [{ version, architecture }, page] = await Promise.all([
       withTimeout(electronApp.evaluate(({ app }) => ({
         version: app.getVersion(),
@@ -388,6 +601,9 @@ async function defaultRunPackagedSession({
     const canonicalUserDataPath = path.dirname(rendererResult.dataDir)
     invariant(normalizeForComparison(canonicalUserDataPath) === normalizeForComparison(profileRoot),
       'packaged application selected an unexpected user-data directory')
+    if (mode !== 'baseline-initialize') {
+      await assertCandidateUiVisibility(page, rendererResult.publicView, timeouts.rendererMs)
+    }
     return {
       appVersion: version,
       hostArchitecture: architecture,
@@ -395,7 +611,7 @@ async function defaultRunPackagedSession({
       publicView: rendererResult.publicView,
     }
   } finally {
-    if (electronApp) await withTimeout(electronApp.close(), timeouts.closeMs, 'Electron close')
+    if (electronApp) await closeElectronApplication(electronApp, timeouts.closeMs)
   }
 }
 
@@ -576,6 +792,10 @@ export async function runUpgradePhase(options, dependencies = {}) {
       `packaged architecture mismatch: expected ${options.expectedArch}`)
     invariant(normalizeForComparison(runtime.canonicalUserDataPath) === normalizeForComparison(owned.profileRoot),
       'runtime user-data path does not match the wrapper-owned canonical path')
+
+    if (options.mode === 'baseline-initialize') {
+      await materializeV038AuxiliaryFixture(owned.profileRoot)
+    }
 
     const projection = options.mode === 'baseline-initialize'
       ? await validateFixture(owned.profileRoot)

@@ -412,6 +412,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <button
                   className={`role-btn${currentLang === 'ko' ? ' selected' : ''}`}
                   onClick={() => handleLanguageChange('ko')}
+                  data-settings-language="ko"
                   lang="ko"
                 >
                   한국어
@@ -419,6 +420,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <button
                   className={`role-btn${currentLang === 'ja' ? ' selected' : ''}`}
                   onClick={() => handleLanguageChange('ja')}
+                  data-settings-language="ja"
                   lang="ja"
                 >
                   日本語
@@ -517,6 +519,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <input
                   type="text"
                   className="input-field"
+                  data-settings-baby-name
                   placeholder={t('settings.babyNamePlaceholder')}
                   value={babyName}
                   onChange={e => {
@@ -531,6 +534,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <input
                   type="date"
                   className="input-field"
+                  data-settings-baby-birthdate
                   value={birthdate}
                   onChange={e => {
                     birthdateDirtyRef.current = true
@@ -570,6 +574,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <input
                   type="text"
                   className="input-field"
+                  data-settings-account-name
                   placeholder={t('settings.myNamePlaceholder')}
                   value={myName}
                   onChange={e => setMyName(e.target.value)}
@@ -580,12 +585,14 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
                     className={`role-btn${myRole === 'mom' ? ' selected' : ''}`}
+                    data-settings-account-role="mom"
                     onClick={() => setMyRole('mom')}
                   >
                     {t('settings.roleMom')}
                   </button>
                   <button
                     className={`role-btn${myRole === 'dad' ? ' selected' : ''}`}
+                    data-settings-account-role="dad"
                     onClick={() => setMyRole('dad')}
                   >
                     {t('settings.roleDad')}

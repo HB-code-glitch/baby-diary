@@ -12,8 +12,10 @@ import path, { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   UPGRADE_MODES,
+  acquireWithTimeout,
   buildPackagedLaunchEnvironment,
   canonicalProfileForPlatform,
+  closeElectronApplication,
   parseUpgradeCli,
   runUpgradePhase,
   sanitizeUpgradeDiagnostic,
@@ -105,6 +107,56 @@ afterEach(() => {
 })
 
 describe('packaged in-place upgrade driver', () => {
+  it('disposes an Electron application that resolves only after the bounded launch timeout', async () => {
+    let resolveApplication: ((value: { close: () => Promise<void> }) => void) | undefined
+    let closeCount = 0
+    const acquisition = new Promise<{ close: () => Promise<void> }>(resolvePromise => {
+      resolveApplication = resolvePromise
+    })
+    const pending = acquireWithTimeout(
+      acquisition,
+      5,
+      'late Electron launch',
+      async application => application.close(),
+    )
+    await expect(pending).rejects.toMatchObject({ code: 'UPGRADE_TIMEOUT' })
+    resolveApplication?.({ close: async () => { closeCount += 1 } })
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 0))
+    expect(closeCount).toBe(1)
+  })
+
+  it('terminates and reaps the real Electron child when graceful close exceeds its bound', async () => {
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const child = {
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      once(event: string, listener: (...args: unknown[]) => void) {
+        listeners.set(event, listener)
+        return this
+      },
+      off(event: string) {
+        listeners.delete(event)
+        return this
+      },
+      kill(signal: string) {
+        if (signal === 'SIGTERM') {
+          this.signalCode = signal
+          queueMicrotask(() => {
+            listeners.get('exit')?.(null, signal)
+            listeners.get('close')?.(null, signal)
+          })
+        }
+        return true
+      },
+    }
+    const application = {
+      close: () => new Promise<void>(() => {}),
+      process: () => child,
+    }
+    await expect(closeElectronApplication(application, 5)).rejects.toMatchObject({ code: 'UPGRADE_TIMEOUT' })
+    expect(child.signalCode).toBe('SIGTERM')
+  })
+
   it('wires the production renderer session to exact event and baby-info IPC discovery', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../scripts/upgrade-e2e.mjs'), 'utf8')
     expect(source).toContain('api.getSettings()')
@@ -112,6 +164,15 @@ describe('packaged in-place upgrade driver', () => {
     expect(source).toContain('api.getBabyInfoSummary(settings.familyId)')
     expect(source).toContain('api.listPendingBabyInfo({')
     expect(source).toContain('api.getBabyInfoMutation(settings.familyId, key)')
+    expect(source).toContain('materializeV038AuxiliaryFixture(owned.profileRoot)')
+    expect(source).toContain('assertCandidateUiVisibility(page, rendererResult.publicView')
+    expect(source).toContain('[data-event-id="legacy-formula"][data-event-rev="2"]')
+    expect(source).toContain('[data-event-id="legacy-diary-tombstone"]')
+    expect(source).toContain('[data-settings-language="ko"]')
+    expect(source).toContain('[data-settings-language="ja"]')
+    expect(source).toContain('[data-settings-baby-name]')
+    expect(source).toContain('[data-settings-account-name]')
+    expect(source).toContain('[data-sync-state]')
     expect(source).toContain('assertRuntimeDiscoverability(projection, runtime.publicView, options.mode)')
   })
 

@@ -11,10 +11,20 @@ param(
   [string]$ExpectedCandidateVersion = '0.3.9',
   [Parameter(Mandatory = $true)]
   [string]$CandidateSourceSha,
+  [Parameter(Mandatory = $true)]
+  [string]$CandidatePackageSha256,
+  [Parameter(Mandatory = $true)]
+  [string]$CandidateProvenancePath,
+  [Parameter(Mandatory = $true)]
+  [string]$ExpectedRepository,
+  [Parameter(Mandatory = $true)]
+  [string]$ExpectedWorkflowRunId,
   [ValidateSet(
     'none',
     'after-baseline-close',
     'after-manifest-creation',
+    'before-candidate-replacement',
+    'during-candidate-replacement',
     'after-candidate-replacement',
     'before-candidate-first-launch'
   )]
@@ -30,6 +40,24 @@ $BaselineAssetName = 'Baby-Diary-Setup-0.3.8.exe'
 $BaselineAssetSize = 233249330
 $BaselineAssetSha256 = 'edb3a3e2d036f0d16dc8d75948c3f160c35adc9d1277a3dedc41d8671bd6a6de'
 $BaselineSourceSha = '4ad44829c0de56da33d9123c16f92e6090f0df4a'
+$ExpectedAppId = 'com.family.babydiary'
+$ExpectedProductName = 'Baby Diary'
+$ExpectedInstallChannelArgument = '/currentuser'
+# UUIDv5(ExpectedAppId, electron-builder NSIS namespace 50e065bc-3134-11e6-9bab-38c9862bdaf3).
+$ExpectedRegistryChildName = 'e6d921f5-ef98-5cc5-a617-ae4251276f45'
+$ExpectedBaselineDisplayName = "$ExpectedProductName $ExpectedBaselineVersion"
+$ExpectedCandidateDisplayName = $ExpectedProductName
+$ExpectedCandidateRegistryPublisher = 'HB-code-glitch'
+$ExpectedBaselineShortcutName = -join @(
+  [char]0xBCA0, [char]0xC774, [char]0xBE44, [char]0x20,
+  [char]0xB2E4, [char]0xC774, [char]0xC5B4, [char]0xB9AC
+)
+$ExpectedCandidateShortcutName = $ExpectedProductName
+$SetupTimeoutSeconds = 300
+$DriverTimeoutSeconds = 180
+$NpmTimeoutSeconds = 600
+$UninstallTimeoutSeconds = 180
+$ProcessCleanupTimeoutSeconds = 15
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $upgradeDriver = Join-Path $PSScriptRoot 'upgrade-e2e.mjs'
@@ -42,9 +70,11 @@ $baselineProjection = Join-Path $runRoot 'baseline-projection.json'
 $firstProjection = Join-Path $runRoot 'candidate-first-projection.json'
 $secondProjection = Join-Path $runRoot 'candidate-second-projection.json'
 $baselineManifest = Join-Path $runRoot 'baseline-raw-manifest.json'
+$candidateProvenanceVerified = Join-Path $runRoot 'candidate-provenance-verified.json'
 $originalAppData = $env:APPDATA
 $originalE2eExecutable = $env:BABYDIARY_E2E_EXECUTABLE
 $originalSyncE2eExecutable = $env:BABYDIARY_SYNC_E2E_EXECUTABLE
+$originalSyncE2eUpgradeProfile = $env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE
 $originalExpectedE2eArch = $env:BABYDIARY_EXPECTED_E2E_ARCH
 $originalCanonicalData = if ([string]::IsNullOrWhiteSpace($originalAppData)) {
   $null
@@ -53,6 +83,78 @@ $originalCanonicalData = if ([string]::IsNullOrWhiteSpace($originalAppData)) {
 }
 
 $script:failureInjected = $false
+$script:baselineManifestCreated = $false
+$script:candidateFirstLaunchStarted = $false
+$script:candidateFirstLaunchCompleted = $false
+
+function Get-BoundedProcessTreeIds {
+  param([Parameter(Mandatory = $true)][int]$RootProcessId)
+  $pending = New-Object 'System.Collections.Generic.Stack[int]'
+  $ordered = New-Object 'System.Collections.Generic.List[int]'
+  $pending.Push($RootProcessId)
+  while ($pending.Count -gt 0) {
+    $parentId = $pending.Pop()
+    $ordered.Add($parentId)
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $parentId" -ErrorAction SilentlyContinue)
+    foreach ($child in $children) { $pending.Push([int]$child.ProcessId) }
+  }
+  return @($ordered)
+}
+
+function Stop-BoundedProcessTree {
+  param([Parameter(Mandatory = $true)][int]$RootProcessId)
+  $processIds = @(Get-BoundedProcessTreeIds -RootProcessId $RootProcessId)
+  [array]::Reverse($processIds)
+  foreach ($processId in $processIds) {
+    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+  }
+  $deadline = [DateTime]::UtcNow.AddSeconds($ProcessCleanupTimeoutSeconds)
+  do {
+    $remaining = @($processIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remaining.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw 'Bounded process tree cleanup did not reap every descendant'
+}
+
+function Invoke-BoundedProcess {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [string[]]$Arguments = @(),
+    [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+    [Parameter(Mandatory = $true)][string]$Label,
+    [string]$WorkingDirectory,
+    [switch]$AllowNonZero
+  )
+  if ($TimeoutSeconds -le 0) { throw 'Bounded process timeout must be positive' }
+  $start = @{
+    FilePath = $FilePath
+    ArgumentList = $Arguments
+    PassThru = $true
+    WindowStyle = 'Hidden'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+    $start.WorkingDirectory = $WorkingDirectory
+  }
+  $process = Start-Process @start
+  try {
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+      Stop-BoundedProcessTree -RootProcessId $process.Id
+      $exception = [TimeoutException]::new("$Label exceeded its bounded timeout")
+      $exception.Data['FailureKind'] = 'timeout'
+      throw $exception
+    }
+    $process.Refresh()
+    $result = [pscustomobject]@{ ExitCode = $process.ExitCode; ProcessId = $process.Id }
+    if (-not $AllowNonZero -and $result.ExitCode -ne 0) {
+      throw "$Label failed with exit code $($result.ExitCode)"
+    }
+    return $result
+  }
+  finally {
+    $process.Dispose()
+  }
+}
 
 function Resolve-RegularFile {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -64,15 +166,57 @@ function Resolve-RegularFile {
   throw "Expected a regular file without a reparse point: $Path"
 }
 
+function Assert-CandidateProvenance {
+  $arguments = @(
+    $dataContract,
+    'verify-provenance',
+    '--package', $CandidateSetupPath,
+    '--provenance', $CandidateProvenancePath,
+    '--output', $candidateProvenanceVerified,
+    '--expected-repository', $ExpectedRepository,
+    '--expected-workflow-run-id', $ExpectedWorkflowRunId,
+    '--expected-source-sha', $CandidateSourceSha,
+    '--expected-release-tag', 'v0.3.9',
+    '--expected-app-version', $ExpectedCandidateVersion,
+    '--expected-platform', 'windows-x64',
+    '--expected-artifact-name', ([IO.Path]::GetFileName($CandidateSetupPath)),
+    '--expected-artifact-sha256', $CandidatePackageSha256
+  )
+  Invoke-Node -Arguments $arguments
+  $verified = Get-Content -LiteralPath $candidateProvenanceVerified -Raw | ConvertFrom-Json
+  Write-Output (
+    'Verified candidate provenance binding: repository={0} run={1} source={2} artifact={3} sha256={4}' -f
+      $verified.repository,
+      $verified.workflowRunId,
+      $verified.sourceSha,
+      $verified.artifactName,
+      $verified.artifactSha256
+  )
+}
+
 function Get-BabyDiaryInstall {
+  $registryPaths = @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ExpectedRegistryChildName",
+    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ExpectedRegistryChildName",
+    "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$ExpectedRegistryChildName"
+  )
+  $entries = foreach ($registryPath in $registryPaths) {
+    Get-ItemProperty -LiteralPath $registryPath -ErrorAction SilentlyContinue
+  }
+  return @($entries)
+}
+
+function Get-BabyDiaryNamedUninstallEntries {
   $registryRoots = @(
     'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
   )
   $entries = foreach ($root in $registryRoots) {
-    Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-      Where-Object { $_.DisplayName -eq 'Baby Diary' }
+    Get-ItemProperty -Path $root -ErrorAction SilentlyContinue | Where-Object {
+      -not [string]::IsNullOrWhiteSpace([string]$_.DisplayName) -and
+      ([string]$_.DisplayName).StartsWith($ExpectedProductName, [StringComparison]::Ordinal)
+    }
   }
   return @($entries)
 }
@@ -84,26 +228,275 @@ function Get-UninstallerPath {
   throw 'Could not parse the exact Baby Diary UninstallString'
 }
 
+function Get-RequiredRegistryString {
+  param(
+    [Parameter(Mandatory = $true)][object]$Entry,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  $property = $Entry.PSObject.Properties[$Name]
+  if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+    throw "Baby Diary uninstall registry field is missing: $Name"
+  }
+  return [string]$property.Value
+}
+
+function Get-OptionalRegistryStringState {
+  param(
+    [Parameter(Mandatory = $true)][object]$Entry,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  $property = $Entry.PSObject.Properties[$Name]
+  if ($null -eq $property) {
+    return [pscustomobject]@{ Present = $false; Value = $null }
+  }
+  $value = [string]$property.Value
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    throw "Baby Diary uninstall registry field is empty: $Name"
+  }
+  return [pscustomobject]@{ Present = $true; Value = $value }
+}
+
+function Get-RegistryHiveFromPsPath {
+  param([Parameter(Mandatory = $true)][string]$PSPath)
+  $prefix = 'Microsoft.PowerShell.Core\Registry::'
+  if (-not $PSPath.StartsWith($prefix, [StringComparison]::Ordinal)) {
+    throw 'Baby Diary registry PSPath has an unexpected provider identity'
+  }
+  $providerPath = $PSPath.Substring($prefix.Length)
+  $separator = $providerPath.IndexOf('\')
+  if ($separator -le 0) { throw 'Baby Diary registry PSPath has no exact hive identity' }
+  $hive = $providerPath.Substring(0, $separator)
+  if ($hive -notin @('HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE')) {
+    throw "Baby Diary registry hive is not allowed: $hive"
+  }
+  return $hive
+}
+
 function Get-ExactInstalledApplication {
+  param(
+    [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+    [Parameter(Mandatory = $true)][ValidateSet('Baseline', 'Candidate')][string]$Stage
+  )
   $entries = @(Get-BabyDiaryInstall)
   if ($entries.Count -ne 1) {
     throw "Expected exactly one Baby Diary uninstall entry, found $($entries.Count)"
   }
-  $uninstallerPath = Get-UninstallerPath -UninstallString $entries[0].UninstallString
+  $entry = $entries[0]
+  $namedEntries = @(Get-BabyDiaryNamedUninstallEntries)
+  if ($namedEntries.Count -ne 1) {
+    throw "Expected exactly one Baby Diary named uninstall entry without a legacy duplicate, found $($namedEntries.Count)"
+  }
+  $psPath = Get-RequiredRegistryString -Entry $entry -Name 'PSPath'
+  $psChildName = Get-RequiredRegistryString -Entry $entry -Name 'PSChildName'
+  $displayName = Get-RequiredRegistryString -Entry $entry -Name 'DisplayName'
+  $displayVersion = Get-RequiredRegistryString -Entry $entry -Name 'DisplayVersion'
+  $publisherState = Get-OptionalRegistryStringState -Entry $entry -Name 'Publisher'
+  $uninstallString = Get-RequiredRegistryString -Entry $entry -Name 'UninstallString'
+  $quietUninstallString = Get-RequiredRegistryString -Entry $entry -Name 'QuietUninstallString'
+  $registryHive = Get-RegistryHiveFromPsPath -PSPath $psPath
+  if (-not [string]::Equals(
+      (Get-RequiredRegistryString -Entry $namedEntries[0] -Name 'PSPath'),
+      $psPath,
+      [StringComparison]::Ordinal
+    )) {
+    throw 'Baby Diary named uninstall entry is not the pinned appId registry identity'
+  }
+  $expectedDisplayName = if ($Stage -eq 'Baseline') { $ExpectedBaselineDisplayName } else { $ExpectedCandidateDisplayName }
+  $expectedShortcutName = if ($Stage -eq 'Baseline') { $ExpectedBaselineShortcutName } else { $ExpectedCandidateShortcutName }
+  if (-not [string]::Equals($displayName, $expectedDisplayName, [StringComparison]::Ordinal)) {
+    throw "Baby Diary $Stage registry DisplayName does not match the exact package metadata"
+  }
+  if (-not [string]::Equals($displayVersion, $ExpectedVersion, [StringComparison]::Ordinal)) {
+    throw "Baby Diary registry DisplayVersion does not equal $ExpectedVersion"
+  }
+  if ($Stage -eq 'Baseline' -and $publisherState.Present) {
+    throw 'Baby Diary baseline registry Publisher must be absent exactly as in v0.3.8 metadata'
+  }
+  if ($Stage -eq 'Candidate' -and (
+      -not $publisherState.Present -or
+      -not [string]::Equals($publisherState.Value, $ExpectedCandidateRegistryPublisher, [StringComparison]::Ordinal)
+    )) {
+    throw 'Baby Diary candidate registry Publisher does not match the exact v0.3.9 metadata'
+  }
+  if (-not [string]::Equals($psChildName, $ExpectedRegistryChildName, [StringComparison]::Ordinal)) {
+    throw 'Baby Diary registry PSChildName does not match the pinned application identity'
+  }
+  if (-not [string]::Equals($registryHive, 'HKEY_CURRENT_USER', [StringComparison]::Ordinal)) {
+    throw 'Baby Diary registry hive is not the expected per-user installation hive'
+  }
+
+  # electron-builder stores InstallLocation under Software\APP_GUID and the
+  # uninstall commands under CurrentVersion\Uninstall\APP_GUID. Bind both
+  # exact records instead of inferring the install registry record by name.
+  $installRegistryPath = "HKCU:\Software\$ExpectedRegistryChildName"
+  $installEntry = Get-ItemProperty -LiteralPath $installRegistryPath -ErrorAction Stop
+  $installRegistryPsPath = Get-RequiredRegistryString -Entry $installEntry -Name 'PSPath'
+  $installRegistryPsChildName = Get-RequiredRegistryString -Entry $installEntry -Name 'PSChildName'
+  $registryInstallLocation = Get-RequiredRegistryString -Entry $installEntry -Name 'InstallLocation'
+  $keepShortcuts = Get-RequiredRegistryString -Entry $installEntry -Name 'KeepShortcuts'
+  $shortcutName = Get-RequiredRegistryString -Entry $installEntry -Name 'ShortcutName'
+  if (-not [string]::Equals($installRegistryPsChildName, $ExpectedRegistryChildName, [StringComparison]::Ordinal)) {
+    throw 'Baby Diary install registry PSChildName does not match the uninstall identity'
+  }
+  if (-not [string]::Equals(
+      (Get-RegistryHiveFromPsPath -PSPath $installRegistryPsPath),
+      $registryHive,
+      [StringComparison]::Ordinal
+    )) {
+    throw 'Baby Diary install and uninstall registry hives differ'
+  }
+  if (-not [string]::Equals($keepShortcuts, 'true', [StringComparison]::Ordinal) -or
+      -not [string]::Equals($shortcutName, $expectedShortcutName, [StringComparison]::Ordinal)) {
+    throw "Baby Diary $Stage install registry shortcut identity does not match the exact package metadata"
+  }
+
+  $installLocationPath = [IO.Path]::GetFullPath($registryInstallLocation.Trim().Trim('"'))
+  $registeredUninstallerPath = Get-UninstallerPath -UninstallString $uninstallString
+  $expectedUninstallString = '"' + $registeredUninstallerPath + '" ' + $ExpectedInstallChannelArgument
+  $expectedQuietUninstallString = "$expectedUninstallString /S"
+  if (-not [string]::Equals($uninstallString, $expectedUninstallString, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($quietUninstallString, $expectedQuietUninstallString, [StringComparison]::Ordinal)) {
+    throw "Baby Diary $Stage uninstall commands do not match the exact per-user install channel"
+  }
+  $uninstallerPath = $registeredUninstallerPath
   $uninstallerPath = [IO.Path]::GetFullPath($uninstallerPath)
   if (-not (Test-Path -LiteralPath $uninstallerPath -PathType Leaf)) {
     throw "Baby Diary uninstaller not found: $uninstallerPath"
   }
-  $installLocation = Split-Path -Parent $uninstallerPath
-  $executable = Join-Path $installLocation 'Baby Diary.exe'
+  $uninstallerParent = [IO.Path]::GetFullPath((Split-Path -Parent $uninstallerPath))
+  if (-not [string]::Equals(
+      $uninstallerParent,
+      $installLocationPath,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Baby Diary registry InstallLocation does not own the registered uninstaller'
+  }
+  $quietUninstallerPath = [IO.Path]::GetFullPath(
+    (Get-UninstallerPath -UninstallString $quietUninstallString)
+  )
+  if (-not [string]::Equals(
+      $quietUninstallerPath,
+      $uninstallerPath,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Baby Diary registry QuietUninstallString targets a different uninstaller'
+  }
+  $executable = Join-Path $installLocationPath "$ExpectedProductName.exe"
   if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Installed Baby Diary executable not found: $executable"
   }
   return [pscustomobject]@{
-    Entry = $entries[0]
+    PSPath = $psPath
+    PSChildName = $psChildName
+    RegistryHive = $registryHive
+    DisplayName = $displayName
+    DisplayVersion = $displayVersion
+    PublisherPresent = $publisherState.Present
+    Publisher = $publisherState.Value
+    InstallRegistryPSPath = $installRegistryPsPath
+    InstallRegistryPSChildName = $installRegistryPsChildName
+    InstallLocation = $registryInstallLocation
+    KeepShortcuts = $keepShortcuts
+    ShortcutName = $shortcutName
+    UninstallString = $uninstallString
+    QuietUninstallString = $quietUninstallString
     UninstallerPath = $uninstallerPath
-    InstallLocation = [IO.Path]::GetFullPath($installLocation)
+    InstallLocationPath = $installLocationPath
     Executable = [IO.Path]::GetFullPath($executable)
+  }
+}
+
+function Write-InstallRegistryEvidence {
+  param(
+    [Parameter(Mandatory = $true)][object]$Install,
+    [Parameter(Mandatory = $true)][ValidateSet('Baseline', 'Candidate')][string]$Stage,
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+  [ordered]@{
+    schemaVersion = 1
+    stage = $Stage
+    appId = $ExpectedAppId
+    productName = $ExpectedProductName
+    installChannel = $ExpectedInstallChannelArgument
+    contractSource = if ($Stage -eq 'Baseline') {
+      'published-v0.3.8-installer-and-tag-source'
+    } else {
+      'candidate-package-config-provenance-and-signed-installer'
+    }
+    sourceSha = if ($Stage -eq 'Baseline') { $BaselineSourceSha } else { $CandidateSourceSha }
+    packageSha256 = if ($Stage -eq 'Baseline') { $BaselineAssetSha256 } else { $CandidatePackageSha256 }
+    PSPath = $Install.PSPath
+    PSChildName = $Install.PSChildName
+    RegistryHive = $Install.RegistryHive
+    DisplayName = $Install.DisplayName
+    DisplayVersion = $Install.DisplayVersion
+    PublisherPresent = $Install.PublisherPresent
+    Publisher = $Install.Publisher
+    InstallRegistryPSPath = $Install.InstallRegistryPSPath
+    InstallRegistryPSChildName = $Install.InstallRegistryPSChildName
+    InstallLocation = $Install.InstallLocation
+    ShortcutName = $Install.ShortcutName
+    UninstallString = $Install.UninstallString
+    QuietUninstallString = $Install.QuietUninstallString
+  } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Assert-UpgradeRegistryIdentity {
+  param(
+    [Parameter(Mandatory = $true)][object]$Baseline,
+    [Parameter(Mandatory = $true)][object]$Candidate
+  )
+  $exactFields = @(
+    'PSPath',
+    'PSChildName',
+    'RegistryHive',
+    'InstallRegistryPSPath',
+    'InstallRegistryPSChildName',
+    'InstallLocation',
+    'KeepShortcuts',
+    'UninstallString',
+    'QuietUninstallString'
+  )
+  $fieldErrors = @{
+    PSPath = 'Baby Diary registry PSPath changed across in-place replacement'
+    PSChildName = 'Baby Diary registry PSChildName changed across in-place replacement'
+    RegistryHive = 'Baby Diary registry hive changed across in-place replacement'
+    InstallRegistryPSPath = 'Baby Diary install registry PSPath changed across in-place replacement'
+    InstallRegistryPSChildName = 'Baby Diary install registry PSChildName changed across in-place replacement'
+    InstallLocation = 'Baby Diary registry InstallLocation changed across in-place replacement'
+    KeepShortcuts = 'Baby Diary install registry KeepShortcuts changed across in-place replacement'
+    UninstallString = 'Baby Diary registry UninstallString changed across in-place replacement'
+    QuietUninstallString = 'Baby Diary registry QuietUninstallString changed across in-place replacement'
+  }
+  foreach ($field in $exactFields) {
+    if (-not [string]::Equals(
+        [string]$Baseline.$field,
+        [string]$Candidate.$field,
+        [StringComparison]::Ordinal
+      )) {
+      throw $fieldErrors[$field]
+    }
+  }
+  foreach ($field in @('UninstallerPath', 'InstallLocationPath', 'Executable')) {
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$Baseline.$field),
+        [IO.Path]::GetFullPath([string]$Candidate.$field),
+        [StringComparison]::OrdinalIgnoreCase
+      )) {
+      throw "Baby Diary installed application $field changed across in-place replacement"
+    }
+  }
+  if (-not [string]::Equals($Baseline.DisplayName, $ExpectedBaselineDisplayName, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($Candidate.DisplayName, $ExpectedCandidateDisplayName, [StringComparison]::Ordinal)) {
+    throw 'Baby Diary registry DisplayName transition is not the exact baseline-to-candidate mapping'
+  }
+  if ($Baseline.PublisherPresent -or -not $Candidate.PublisherPresent -or
+      -not [string]::Equals($Candidate.Publisher, $ExpectedCandidateRegistryPublisher, [StringComparison]::Ordinal)) {
+    throw 'Baby Diary registry Publisher transition is not the exact baseline-to-candidate mapping'
+  }
+  if (-not [string]::Equals($Baseline.ShortcutName, $ExpectedBaselineShortcutName, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($Candidate.ShortcutName, $ExpectedCandidateShortcutName, [StringComparison]::Ordinal)) {
+    throw 'Baby Diary install registry ShortcutName transition is not the exact baseline-to-candidate mapping'
   }
 }
 
@@ -197,20 +590,32 @@ function Start-VerifiedSetup {
     [Parameter(Mandatory = $true)][string]$SetupPath,
     [Parameter(Mandatory = $true)][ValidateSet('Baseline', 'Candidate')][string]$Label
   )
-  $process = Start-Process -FilePath $SetupPath -ArgumentList '/S' -Wait -PassThru -WindowStyle Hidden
-  if ($process.ExitCode -ne 0) {
+  $result = Invoke-BoundedProcess -FilePath $SetupPath -Arguments @('/S') `
+    -TimeoutSeconds $SetupTimeoutSeconds -Label "$Label Setup" -AllowNonZero
+  if ($result.ExitCode -ne 0) {
     if ($Label -eq 'Candidate') {
-      throw "Candidate Setup failed with exit code $($process.ExitCode)"
+      throw "Candidate Setup failed with exit code $($result.ExitCode)"
     }
-    throw "Baseline Setup failed with exit code $($process.ExitCode)"
+    throw "Baseline Setup failed with exit code $($result.ExitCode)"
   }
 }
 
 function Invoke-Node {
   param([Parameter(Mandatory = $true)][string[]]$Arguments)
-  & node @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "Node command failed with exit code $LASTEXITCODE"
+  $json = ConvertTo-Json -Compress -InputObject @($Arguments)
+  $encodedArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+  $childCommand = @"
+`$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedArguments'))
+`$arguments = @(`$json | ConvertFrom-Json)
+& node @arguments
+exit `$LASTEXITCODE
+"@
+  $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
+  $result = Invoke-BoundedProcess -FilePath 'powershell.exe' `
+    -Arguments @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
+    -TimeoutSeconds $DriverTimeoutSeconds -Label 'Node upgrade driver' -AllowNonZero
+  if ($result.ExitCode -ne 0) {
+    throw "Node command failed with exit code $($result.ExitCode)"
   }
 }
 
@@ -253,6 +658,7 @@ function New-BaselineManifest {
     '--root', $canonicalProfile,
     '--output', $baselineManifest
   )
+  $script:baselineManifestCreated = $true
 }
 
 function Assert-ProfileMatchesBaseline {
@@ -276,9 +682,25 @@ function Invoke-FailurePoint {
 }
 
 function Assert-FailureInvariant {
-  if ($script:failureInjected) {
+  if ($script:baselineManifestCreated -and -not $script:candidateFirstLaunchStarted) {
     Assert-ProfileMatchesBaseline
   }
+}
+
+function Install-CandidateWithRetry {
+  for ($attempt = 0; $attempt -lt 2; $attempt += 1) {
+    try {
+      Invoke-FailurePoint -Point 'during-candidate-replacement'
+      Start-VerifiedSetup -SetupPath $CandidateSetupPath -Label 'Candidate'
+      return
+    }
+    catch {
+      Assert-ProfileMatchesBaseline
+      if ($script:failureInjected -or $attempt -eq 1) { throw }
+      Write-Warning 'Retrying after an ordinary candidate replacement failure with the raw profile unchanged'
+    }
+  }
+  throw 'Candidate replacement retry bound was exhausted'
 }
 
 function Assert-ExactShortcut {
@@ -312,6 +734,13 @@ function Assert-ExactShortcut {
         )
       $nameMatches -or $targetMatches
     })
+    $legacyShortcutName = "$ExpectedBaselineShortcutName.lnk"
+    $legacyShortcuts = @($resolved | Where-Object {
+      [string]::Equals($_.Name, $legacyShortcutName, [StringComparison]::Ordinal)
+    })
+    if ($legacyShortcuts.Count -ne 0) {
+      throw "Expected zero legacy baseline shortcuts after upgrade, found $($legacyShortcuts.Count)"
+    }
     if ($applicable.Count -ne 1) {
       throw "Expected exactly one applicable Baby Diary shortcut, found $($applicable.Count)"
     }
@@ -345,8 +774,10 @@ function Assert-ExactShortcut {
 
 function Invoke-NpmScript {
   param([Parameter(Mandatory = $true)][string]$Name)
-  & npm run $Name
-  if ($LASTEXITCODE -ne 0) { throw "npm run $Name failed with exit code $LASTEXITCODE" }
+  $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+  $result = Invoke-BoundedProcess -FilePath $npm -Arguments @('run', $Name) `
+    -TimeoutSeconds $NpmTimeoutSeconds -Label "npm run $Name" -WorkingDirectory $repoRoot -AllowNonZero
+  if ($result.ExitCode -ne 0) { throw "npm run $Name failed with exit code $($result.ExitCode)" }
 }
 
 function Invoke-VerifiedUninstall {
@@ -368,8 +799,20 @@ function Invoke-VerifiedUninstall {
         throw 'Installation cleanup refused an unexpected uninstall location'
       }
     }
-    $process = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) { throw "Silent uninstall failed with exit code $($process.ExitCode)" }
+    $uninstallResult = $null
+    for ($attempt = 0; $attempt -lt 2; $attempt += 1) {
+      try {
+        $uninstallResult = Invoke-BoundedProcess -FilePath $uninstaller -Arguments @('/S') `
+          -TimeoutSeconds $UninstallTimeoutSeconds -Label 'Silent uninstall' -AllowNonZero
+        if ($uninstallResult.ExitCode -eq 0) { break }
+      }
+      catch {
+        if ($attempt -eq 1) { throw }
+      }
+    }
+    if ($null -eq $uninstallResult -or $uninstallResult.ExitCode -ne 0) {
+      throw "Silent uninstall failed with exit code $($uninstallResult.ExitCode)"
+    }
   }
   for ($attempt = 0; $attempt -lt 30; $attempt += 1) {
     $remaining = @(Get-BabyDiaryInstall)
@@ -381,32 +824,124 @@ function Invoke-VerifiedUninstall {
   throw 'Baby Diary installation cleanup did not remove the exact registry identity and install directory'
 }
 
+function Test-RunOwnedMutationPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [switch]$AllowRunRoot
+  )
+  try {
+    $rootFull = [IO.Path]::GetFullPath($runRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $targetFull = [IO.Path]::GetFullPath($Path)
+    $comparison = [StringComparison]::OrdinalIgnoreCase
+    $isRoot = [string]::Equals($rootFull, $targetFull, $comparison)
+    if ($isRoot -and -not $AllowRunRoot) { return $false }
+    if (-not $isRoot -and -not $targetFull.StartsWith("$rootFull$([IO.Path]::DirectorySeparatorChar)", $comparison)) {
+      return $false
+    }
+
+    $rootItem = Get-Item -LiteralPath $rootFull -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      return $false
+    }
+    if (-not [string]::Equals([IO.Path]::GetFullPath($rootItem.FullName), $rootFull, $comparison)) {
+      return $false
+    }
+    if ($isRoot) { return $true }
+
+    $relative = $targetFull.Substring($rootFull.Length + 1)
+    $current = $rootFull
+    foreach ($component in $relative.Split([IO.Path]::DirectorySeparatorChar)) {
+      if ([string]::IsNullOrWhiteSpace($component) -or $component -eq '.' -or $component -eq '..') {
+        return $false
+      }
+      $current = Join-Path $current $component
+      $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+      if ($null -eq $item) { break }
+      if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+      $resolved = (Resolve-Path -LiteralPath $current -ErrorAction Stop).ProviderPath
+      if (-not [string]::Equals([IO.Path]::GetFullPath($resolved), [IO.Path]::GetFullPath($current), $comparison)) {
+        return $false
+      }
+    }
+    return $true
+  }
+  catch {
+    return $false
+  }
+}
+
+function Test-RunOwnedTreeWithoutReparsePoints {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-RunOwnedMutationPath -Path $Path -AllowRunRoot)) { return $false }
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if ($null -eq $item) { return $true }
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+  if (-not $item.PSIsContainer) { return $true }
+  try {
+    foreach ($child in Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop) {
+      if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+    }
+    return $true
+  }
+  catch {
+    return $false
+  }
+}
+
+function Remove-RunOwnedItem {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [switch]$Recurse
+  )
+  if (-not (Test-RunOwnedMutationPath -Path $Path)) { return }
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if ($null -eq $item) { return }
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+  if ($Recurse -and -not (Test-RunOwnedTreeWithoutReparsePoints -Path $Path)) { return }
+  if (-not (Test-RunOwnedMutationPath -Path $Path)) { return }
+  Remove-Item -LiteralPath $Path -Force -Recurse:$Recurse
+}
+
 function Scrub-DiagnosticSecrets {
   if (-not (Test-Path -LiteralPath $runRoot -PathType Container)) { return }
-  $settingsFiles = @(Get-ChildItem -LiteralPath $runRoot -Filter 'settings.json' -File -Recurse -Force -ErrorAction SilentlyContinue)
-  foreach ($file in $settingsFiles) {
-    if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+  if (-not (Test-RunOwnedMutationPath -Path $canonicalProfile)) { return }
+  $settingsPath = Join-Path $canonicalProfile 'settings.json'
+  $sensitivePaths = @(
+    'Local Storage',
+    'Session Storage',
+    'IndexedDB',
+    'Network',
+    'WebStorage',
+    'Cookies'
+  ) | ForEach-Object { Join-Path $canonicalProfile $_ }
+  $markerPath = Join-Path $runRoot 'secrets-scrubbed.json'
+  foreach ($candidate in @($settingsPath) + $sensitivePaths + @($markerPath)) {
+    if (-not (Test-RunOwnedMutationPath -Path $candidate)) { return }
+  }
+
+  $settingsItem = Get-Item -LiteralPath $settingsPath -Force -ErrorAction SilentlyContinue
+  if ($null -ne $settingsItem) {
+    if ($settingsItem.PSIsContainer -or ($settingsItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return }
     try {
-      $settings = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+      $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
       if ($null -ne $settings.PSObject.Properties['firebase']) { $settings.firebase = $null }
-      $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $file.FullName -Encoding UTF8
+      if (-not (Test-RunOwnedMutationPath -Path $settingsPath)) { return }
+      $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath -Encoding UTF8
     }
     catch {
-      Remove-Item -LiteralPath $file.FullName -Force
+      Remove-RunOwnedItem -Path $settingsPath
     }
   }
-  foreach ($relative in @('Local Storage', 'Session Storage', 'IndexedDB', 'Network', 'WebStorage', 'Cookies')) {
-    $sensitivePath = Join-Path $canonicalProfile $relative
-    if (Test-Path -LiteralPath $sensitivePath) {
-      Remove-Item -LiteralPath $sensitivePath -Recurse -Force
-    }
+  foreach ($sensitivePath in $sensitivePaths) {
+    Remove-RunOwnedItem -Path $sensitivePath -Recurse
   }
+  if (-not (Test-RunOwnedMutationPath -Path $markerPath)) { return }
   [ordered]@{
     version = 1
     scrubbed = $true
     removedAuthStores = $true
     firebaseConfigRedacted = $true
-  } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runRoot 'secrets-scrubbed.json') -Encoding UTF8
+  } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding UTF8
 }
 
 function Remove-RunOwnedTempRoot {
@@ -421,6 +956,9 @@ function Remove-RunOwnedTempRoot {
       )) {
     throw 'Refusing to remove a path that is not the run-owned temp root'
   }
+  if (-not (Test-RunOwnedTreeWithoutReparsePoints -Path $resolvedRunRoot)) {
+    throw 'Refusing to remove a run root with uncertain or reparse-point components'
+  }
   Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force
 }
 
@@ -430,6 +968,15 @@ if ($ExpectedCertificateSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
 }
 if ($CandidateSourceSha -notmatch '^[0-9a-f]{40}$') {
   throw 'CandidateSourceSha must be exactly 40 lowercase hexadecimal characters'
+}
+if ($CandidatePackageSha256 -notmatch '^[0-9a-f]{64}$') {
+  throw 'CandidatePackageSha256 must be exactly 64 lowercase hexadecimal characters'
+}
+if ($ExpectedRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+  throw 'ExpectedRepository must be an exact owner/repository identity'
+}
+if ($ExpectedWorkflowRunId -notmatch '^[1-9][0-9]*$') {
+  throw 'ExpectedWorkflowRunId must be a positive decimal run identity'
 }
 if (-not [string]::Equals($ExpectedBaselineVersion, '0.3.8', [StringComparison]::Ordinal)) {
   throw 'This gate accepts only the pinned v0.3.8 baseline version'
@@ -441,6 +988,7 @@ if ([string]::IsNullOrWhiteSpace($originalAppData)) { throw 'The runner APPDATA 
 
 $BaselineSetupPath = Resolve-RegularFile -Path $BaselineSetupPath
 $CandidateSetupPath = Resolve-RegularFile -Path $CandidateSetupPath
+$CandidateProvenancePath = Resolve-RegularFile -Path $CandidateProvenancePath
 $expectedCandidateName = "Baby-Diary-Setup-$ExpectedCandidateVersion.exe"
 if (-not [string]::Equals(
     [IO.Path]::GetFileName($CandidateSetupPath),
@@ -471,14 +1019,17 @@ try {
 
   Assert-BaselineAssetContract -Path $BaselineSetupPath
   Record-BaselineLegacyTrust -Path $BaselineSetupPath -OutputPath (Join-Path $runRoot 'baseline-legacy-trust.json')
+  Assert-CandidateProvenance
   # Candidate trust is mandatory and is checked before any candidate bytes can replace v0.3.8.
   Assert-CandidateSignature -Path $CandidateSetupPath
 
   $env:APPDATA = $isolatedAppData
   $installationStarted = $true
   Start-VerifiedSetup -SetupPath $BaselineSetupPath -Label 'Baseline'
-  $baselineInstall = Get-ExactInstalledApplication
-  $baselineInstallLocation = $baselineInstall.InstallLocation
+  $baselineInstall = Get-ExactInstalledApplication -ExpectedVersion $ExpectedBaselineVersion -Stage 'Baseline'
+  Write-InstallRegistryEvidence -Install $baselineInstall -Stage 'Baseline' `
+    -Path (Join-Path $runRoot 'baseline-registry-evidence.json')
+  $baselineInstallLocation = $baselineInstall.InstallLocationPath
   $installLocation = $baselineInstallLocation
   Assert-X64Pe -Path $baselineInstall.Executable
 
@@ -496,16 +1047,13 @@ try {
   Invoke-FailurePoint -Point 'after-manifest-creation'
   Assert-ProfileMatchesBaseline
 
-  Start-VerifiedSetup -SetupPath $CandidateSetupPath -Label 'Candidate'
-  $candidateInstall = Get-ExactInstalledApplication
-  $installLocation = $candidateInstall.InstallLocation
-  if (-not [string]::Equals(
-      $candidateInstall.InstallLocation,
-      $baselineInstallLocation,
-      [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-    throw 'Candidate Setup changed the Baby Diary install identity/location'
-  }
+  Invoke-FailurePoint -Point 'before-candidate-replacement'
+  Install-CandidateWithRetry
+  $candidateInstall = Get-ExactInstalledApplication -ExpectedVersion $ExpectedCandidateVersion -Stage 'Candidate'
+  Write-InstallRegistryEvidence -Install $candidateInstall -Stage 'Candidate' `
+    -Path (Join-Path $runRoot 'candidate-registry-evidence.json')
+  $installLocation = $candidateInstall.InstallLocationPath
+  Assert-UpgradeRegistryIdentity -Baseline $baselineInstall -Candidate $candidateInstall
   Assert-CandidateSignature -Path $candidateInstall.Executable
   Assert-X64Pe -Path $candidateInstall.Executable
   $candidateExecutable = $candidateInstall.Executable
@@ -515,6 +1063,7 @@ try {
   Assert-ExactShortcut -CandidateExecutable $candidateExecutable
   Invoke-FailurePoint -Point 'before-candidate-first-launch'
 
+  $script:candidateFirstLaunchStarted = $true
   Invoke-UpgradePhase `
     -Mode 'candidate-first-run' `
     -Executable $candidateExecutable `
@@ -523,6 +1072,7 @@ try {
     -DiagnosticPath (Join-Path $runRoot 'candidate-first-diagnostic.json') `
     -ProjectionOutput $firstProjection `
     -ComparisonProjection $baselineProjection
+  $script:candidateFirstLaunchCompleted = $true
 
   Invoke-UpgradePhase `
     -Mode 'candidate-second-run' `
@@ -539,6 +1089,7 @@ try {
   Push-Location $repoRoot
   try {
     Invoke-NpmScript -Name 'test:e2e'
+    $env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE = $canonicalProfile
     Invoke-NpmScript -Name 'test:e2e:sync'
   }
   finally {
@@ -556,6 +1107,8 @@ finally {
   else { $env:BABYDIARY_E2E_EXECUTABLE = $originalE2eExecutable }
   if ($null -eq $originalSyncE2eExecutable) { Remove-Item Env:BABYDIARY_SYNC_E2E_EXECUTABLE -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_SYNC_E2E_EXECUTABLE = $originalSyncE2eExecutable }
+  if ($null -eq $originalSyncE2eUpgradeProfile) { Remove-Item Env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE -ErrorAction SilentlyContinue }
+  else { $env:BABYDIARY_SYNC_E2E_UPGRADE_PROFILE = $originalSyncE2eUpgradeProfile }
   if ($null -eq $originalExpectedE2eArch) { Remove-Item Env:BABYDIARY_EXPECTED_E2E_ARCH -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_EXPECTED_E2E_ARCH = $originalExpectedE2eArch }
   if ($installationStarted) {

@@ -5,10 +5,11 @@
  */
 
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { constants } from 'node:fs'
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
@@ -28,6 +29,17 @@ const DEFAULT_MANIFEST_LIMITS = Object.freeze({
   maxFileBytes: 16 * 1024 * 1024,
   maxTreeBytes: 64 * 1024 * 1024,
 })
+
+const V038_AUXILIARY_FILES = Object.freeze([
+  Object.freeze({
+    path: 'Local Storage/upgrade-auth-sentinel.json',
+    bytes: Buffer.from('{"version":1,"kind":"auth-continuity","account":"account-dad-v038"}\n', 'utf8'),
+  }),
+  Object.freeze({
+    path: 'auxiliary/legacy-attachment.bin',
+    bytes: Buffer.from([0x42, 0x44, 0x30, 0x33, 0x38, 0x00, 0xff, 0x7f]),
+  }),
+])
 
 export const V038_SOURCE = Object.freeze({
   tag: 'v0.3.8',
@@ -222,18 +234,27 @@ export function buildV038Fixture() {
   const fixture = {
     settings: {
       baby: { name: '하루・ハル', birthdate: '2026-01-15', gender: 'girl' },
-      profile: cloneJson(DAD),
+      profile: { ...cloneJson(DAD), legacyContact: { label: '가족・家族', enabled: false } },
       familyId: FAMILY_ID,
       firebase: {
         apiKey: 'fixture-api-key-never-log',
-        authDomain: '127.0.0.1.invalid',
-        projectId: 'upgrade-fixture-offline',
-        storageBucket: 'upgrade-fixture-offline.invalid',
+        authDomain: 'demo-baby-diary.firebaseapp.com',
+        projectId: 'demo-baby-diary',
+        storageBucket: 'demo-baby-diary.appspot.com',
         messagingSenderId: '38039',
         appId: '1:38039:web:upgrade-fixture',
       },
       language: 'ko',
       theme: 'dark',
+      upgradeOpaque: {
+        deep: {
+          nested: {
+            ko: '보존',
+            ja: '保持',
+            values: [0, false, null, { marker: 'v0.3.8' }],
+          },
+        },
+      },
       // v0.3.8 preserves unknown top-level settings fields byte-for-byte when
       // saveSettings receives them. This forward-compatible state supplies one
       // acknowledged and one pending baby-info mutation to the v0.3.9 importer.
@@ -277,7 +298,18 @@ export async function writeV038Fixture(profileRoot) {
       'utf8',
     )
   }
+  await materializeV038AuxiliaryFixture(root)
   return fixture
+}
+
+/** Adds fixed non-store files after the historical packaged process is closed. */
+export async function materializeV038AuxiliaryFixture(profileRoot) {
+  const root = path.resolve(profileRoot)
+  for (const entry of V038_AUXILIARY_FILES) {
+    const absolute = path.join(root, ...entry.path.split('/'))
+    await mkdir(path.dirname(absolute), { recursive: true })
+    await writeFile(absolute, entry.bytes, { mode: 0o600 })
+  }
 }
 
 function normalizeRelativePath(relativePath) {
@@ -332,41 +364,122 @@ export function validateRawManifestEntries(entries) {
   return entries
 }
 
-async function streamFileSha256(filePath, expectedSize) {
-  const hash = createHash('sha256')
-  let bytes = 0
-  await new Promise((resolvePromise, rejectPromise) => {
-    const stream = createReadStream(filePath)
-    stream.on('data', chunk => {
-      bytes += chunk.byteLength
+function exactFsPath(value) {
+  return path.resolve(value).normalize('NFC')
+}
+
+function sameFileIdentity(left, right) {
+  return left.isFile() === right.isFile()
+    && left.isDirectory() === right.isDirectory()
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.nlink === right.nlink
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+async function assertStablePathIdentity(filePath, expectedStat, label) {
+  let current
+  let resolved
+  try {
+    current = await lstat(filePath)
+    resolved = await realpath(filePath)
+  } catch {
+    throw new Error(`${label} path changed during descriptor verification: ${filePath}`)
+  }
+  if (current.isSymbolicLink()
+    || !sameFileIdentity(expectedStat, current)
+    || exactFsPath(resolved) !== exactFsPath(filePath)) {
+    throw new Error(`${label} path identity changed or traversed a link/reparse point: ${filePath}`)
+  }
+  return current
+}
+
+async function readRegularFileDescriptorSafe(filePath, {
+  label,
+  expectedStat,
+  maxBytes = Number.MAX_SAFE_INTEGER,
+  captureBytes = false,
+  afterOpen,
+} = {}) {
+  const before = expectedStat ?? await lstat(filePath)
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new Error(`${label} must be a real regular file, not a link/reparse point: ${filePath}`)
+  }
+  if (before.size > maxBytes) throw new Error(`${label} file cap exceeded: ${filePath}`)
+  await assertStablePathIdentity(filePath, before, label)
+
+  const noFollow = Number.isInteger(constants.O_NOFOLLOW) ? constants.O_NOFOLLOW : 0
+  let descriptor
+  try {
+    descriptor = await open(filePath, constants.O_RDONLY | noFollow)
+  } catch {
+    throw new Error(`${label} could not be opened without following a link/reparse point: ${filePath}`)
+  }
+  try {
+    const opened = await descriptor.stat()
+    if (!opened.isFile() || !sameFileIdentity(before, opened)) {
+      throw new Error(`${label} descriptor identity does not match its path: ${filePath}`)
+    }
+    if (afterOpen) await afterOpen()
+
+    const hash = createHash('sha256')
+    const captured = []
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    let position = 0
+    for (;;) {
+      const { bytesRead } = await descriptor.read(buffer, 0, buffer.length, position)
+      if (bytesRead === 0) break
+      position += bytesRead
+      if (position > maxBytes) throw new Error(`${label} file cap exceeded: ${filePath}`)
+      const chunk = buffer.subarray(0, bytesRead)
       hash.update(chunk)
-    })
-    stream.once('error', rejectPromise)
-    stream.once('end', resolvePromise)
-  })
-  if (bytes !== expectedSize) throw new Error(`raw manifest file changed while hashing: ${filePath}`)
-  return hash.digest('hex')
+      if (captureBytes) captured.push(Buffer.from(chunk))
+    }
+
+    const afterDescriptor = await descriptor.stat()
+    if (position !== opened.size || !sameFileIdentity(opened, afterDescriptor)) {
+      throw new Error(`${label} descriptor changed while hashing: ${filePath}`)
+    }
+    await assertStablePathIdentity(filePath, opened, label)
+    return {
+      size: position,
+      sha256: hash.digest('hex'),
+      bytes: captureBytes ? Buffer.concat(captured, position) : undefined,
+    }
+  } finally {
+    await descriptor.close()
+  }
 }
 
 /** Recursively hashes regular files without retaining their bytes. */
 export async function createRawManifest(profileRoot, options = {}) {
-  const limits = { ...DEFAULT_MANIFEST_LIMITS, ...options }
+  const { afterFileOpen, ...limitOverrides } = options
+  const limits = { ...DEFAULT_MANIFEST_LIMITS, ...limitOverrides }
   for (const key of ['maxEntries', 'maxFileBytes', 'maxTreeBytes']) {
     if (!Number.isSafeInteger(limits[key]) || limits[key] < 1) throw new Error(`invalid ${key}`)
   }
-  const root = path.resolve(profileRoot)
-  const rootStat = await lstat(root)
+  const requestedRoot = path.resolve(profileRoot)
+  const rootStat = await lstat(requestedRoot)
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     throw new Error('raw manifest root must be a regular directory, not a link/reparse point')
   }
-  const resolvedRoot = await realpath(root)
-  if (normalizeFsPath(resolvedRoot) !== normalizeFsPath(root)) {
+  const resolvedRoot = await realpath(requestedRoot)
+  if (normalizeFsPath(resolvedRoot) !== normalizeFsPath(requestedRoot)) {
     throw new Error('raw manifest root resolves through a link/reparse point')
   }
 
   const entries = []
   let treeBytes = 0
   async function visit(directory, relativeDirectory) {
+    const directoryBefore = await lstat(directory)
+    if (directoryBefore.isSymbolicLink() || !directoryBefore.isDirectory()) {
+      throw new Error(`raw manifest rejects link/reparse point: ${relativeDirectory || '.'}`)
+    }
+    await assertStablePathIdentity(directory, directoryBefore, 'raw manifest directory')
     const children = await readdir(directory)
     children.sort(compareUtf8)
     for (const name of children) {
@@ -386,16 +499,18 @@ export async function createRawManifest(profileRoot, options = {}) {
       if (stats.size > limits.maxFileBytes) throw new Error(`raw manifest file cap exceeded: ${relative}`)
       treeBytes += stats.size
       if (treeBytes > limits.maxTreeBytes) throw new Error('raw manifest tree cap exceeded')
-      const digest = await streamFileSha256(absolute, stats.size)
-      const after = await lstat(absolute)
-      if (!after.isFile() || after.size !== stats.size || after.mtimeMs !== stats.mtimeMs) {
-        throw new Error(`raw manifest file changed while hashing: ${relative}`)
-      }
-      entries.push({ path: relative, type: 'file', size: stats.size, sha256: digest })
+      const verified = await readRegularFileDescriptorSafe(absolute, {
+        label: 'raw manifest file',
+        expectedStat: stats,
+        maxBytes: limits.maxFileBytes,
+        afterOpen: afterFileOpen ? () => afterFileOpen({ absolutePath: absolute, relativePath: relative }) : undefined,
+      })
+      entries.push({ path: relative, type: 'file', size: verified.size, sha256: verified.sha256 })
       if (entries.length > limits.maxEntries) throw new Error('raw manifest entry cap exceeded')
     }
+    await assertStablePathIdentity(directory, directoryBefore, 'raw manifest directory')
   }
-  await visit(root, '')
+  await visit(resolvedRoot, '')
   entries.sort((left, right) => compareUtf8(left.path, right.path))
   validateRawManifestEntries(entries)
   return { version: 1, entries }
@@ -485,34 +600,123 @@ function readLegacyBabyInfoState(rawState) {
   return { mutations, pending }
 }
 
+function normalizeLegacyBabyInfoState(rawState) {
+  if (!isPlainObject(rawState)
+    || rawState.version !== 1
+    || !Array.isArray(rawState.mutations)
+    || !Array.isArray(rawState.pendingMutationKeys)) {
+    throw new Error('legacy baby-info sync state is invalid')
+  }
+  const mutations = []
+  const canonicalSeen = new Set()
+  for (const mutation of rawState.mutations) {
+    const canonical = canonicalBabyInfoMutationJson(mutation)
+    if (canonicalSeen.has(canonical)) continue
+    canonicalSeen.add(canonical)
+    mutations.push(cloneJson(mutation))
+  }
+  const available = new Set(mutations.map(getBabyInfoMutationKey))
+  const pendingMutationKeys = []
+  const pendingSeen = new Set()
+  for (const key of rawState.pendingMutationKeys) {
+    if (typeof key !== 'string' || !available.has(key)) {
+      throw new Error('legacy pending key is missing its mutation')
+    }
+    if (pendingSeen.has(key)) continue
+    pendingSeen.add(key)
+    pendingMutationKeys.push(key)
+  }
+  return { version: 1, mutations, pendingMutationKeys }
+}
+
+function legacyBabyInfoImportSourceId(rawState) {
+  return `settings-v1:${sha256(JSON.stringify(normalizeLegacyBabyInfoState(rawState)))}`
+}
+
+function projectJournalRecord(record, index) {
+  if (record.type === 'mutation') {
+    return {
+      index,
+      type: 'mutation',
+      key: record.key,
+      familyId: record.mutation.familyId,
+      canonicalHash: sha256(canonicalBabyInfoMutationJson(record.mutation)),
+    }
+  }
+  if (record.type === 'ack') return { index, type: 'ack', familyId: record.familyId, key: record.key }
+  if (record.type === 'import') return { index, type: 'import', sourceId: record.sourceId }
+  return { index, type: 'unlinked-archive', canonicalHash: sha256(canonicalJson(record.archive)) }
+}
+
+function expectedJournalRecordsFromLegacy(rawState) {
+  const normalized = normalizeLegacyBabyInfoState(rawState)
+  const pending = new Set(normalized.pendingMutationKeys)
+  const records = normalized.mutations.map(mutation => ({
+    version: 1,
+    type: 'mutation',
+    key: getBabyInfoMutationKey(mutation),
+    mutation,
+  }))
+  for (const mutation of normalized.mutations) {
+    const key = getBabyInfoMutationKey(mutation)
+    if (!pending.has(key)) records.push({ version: 1, type: 'ack', familyId: mutation.familyId, key })
+  }
+  records.push({ version: 1, type: 'import', sourceId: legacyBabyInfoImportSourceId(rawState) })
+  return records.map(projectJournalRecord)
+}
+
 async function readJournalBabyInfoState(journalPath) {
   const mutations = new Map()
   const pending = new Set()
   const acknowledged = new Set()
+  const imports = new Set()
+  const records = []
   const content = await readFile(journalPath, 'utf8')
   for (const line of content.split('\n')) {
     if (line.length === 0) continue
     const record = JSON.parse(line)
     if (record?.version !== 1 || typeof record.type !== 'string') throw new Error('baby-info journal record is invalid')
     if (record.type === 'mutation') {
+      assertExactObjectFields(record, ['version', 'type', 'key', 'mutation'], 'baby-info mutation record')
       const expectedKey = getBabyInfoMutationKey(record.mutation)
       if (record.key !== expectedKey) throw new Error('baby-info journal mutation key mismatch')
       if (mutations.has(record.key)) throw new Error('duplicate mutation derivative in baby-info journal')
       mutations.set(record.key, canonicalBabyInfoMutationJson(record.mutation))
       pending.add(record.key)
+      records.push(projectJournalRecord(record, records.length))
       continue
     }
     if (record.type === 'ack') {
+      assertExactObjectFields(record, ['version', 'type', 'familyId', 'key'], 'baby-info acknowledgement record')
       if (!mutations.has(record.key)) throw new Error('baby-info acknowledgement references a missing mutation')
+      const mutation = JSON.parse(mutations.get(record.key))
+      if (mutation.familyId !== record.familyId) throw new Error('baby-info acknowledgement family mismatch')
+      if (acknowledged.has(record.key)) throw new Error('duplicate acknowledgement in baby-info journal')
       pending.delete(record.key)
       acknowledged.add(record.key)
+      records.push(projectJournalRecord(record, records.length))
+      continue
+    }
+    if (record.type === 'import') {
+      assertExactObjectFields(record, ['version', 'type', 'sourceId'], 'baby-info import record')
+      if (typeof record.sourceId !== 'string' || record.sourceId.length === 0) {
+        throw new Error('baby-info import source is invalid')
+      }
+      if (imports.has(record.sourceId)) throw new Error('duplicate import in baby-info journal')
+      imports.add(record.sourceId)
+      records.push(projectJournalRecord(record, records.length))
+      continue
+    }
+    if (record.type === 'unlinked-archive') {
+      assertExactObjectFields(record, ['version', 'type', 'archive'], 'baby-info archive record')
+      records.push(projectJournalRecord(record, records.length))
       continue
     }
     if (record.type !== 'import' && record.type !== 'unlinked-archive') {
       throw new Error(`unknown baby-info journal record: ${record.type}`)
     }
   }
-  return { mutations, pending, acknowledged }
+  return { mutations, pending, acknowledged, records, importSourceIds: [...imports].sort(compareUtf8) }
 }
 
 function finishBabyInfoProjection(state) {
@@ -526,6 +730,34 @@ function finishBabyInfoProjection(state) {
   }
 }
 
+function settingsPreservationHash(settings) {
+  const preserved = cloneJson(settings)
+  delete preserved.firebase
+  delete preserved.babyInfoSync
+  delete preserved.babyInfoJournal
+  delete preserved.babyInfoRevision
+  return sha256(canonicalJson(preserved))
+}
+
+async function projectAuxiliaryFiles(root) {
+  const projected = []
+  for (const fixture of V038_AUXILIARY_FILES) {
+    const absolute = path.join(root, ...fixture.path.split('/'))
+    let verified
+    try {
+      verified = await readRegularFileDescriptorSafe(absolute, {
+        label: `upgrade auxiliary file ${fixture.path}`,
+        maxBytes: 1024 * 1024,
+      })
+    } catch (error) {
+      if (error?.code === 'ENOENT') throw new Error(`upgrade auxiliary/auth file is missing: ${fixture.path}`)
+      throw error
+    }
+    projected.push({ path: fixture.path, size: verified.size, sha256: verified.sha256 })
+  }
+  return projected
+}
+
 /** Deterministic, secret-redacted semantic view of the user-data directory. */
 export async function projectUpgradeSemantics(profileRoot) {
   const root = path.resolve(profileRoot)
@@ -534,6 +766,8 @@ export async function projectUpgradeSemantics(profileRoot) {
   const firebaseHash = settings.firebase === null || settings.firebase === undefined
     ? null
     : sha256(canonicalJson(settings.firebase))
+  const settingsOpaqueHash = settingsPreservationHash(settings)
+  const auxiliaryFiles = await projectAuxiliaryFiles(root)
 
   const dataRoot = path.join(root, 'data')
   const names = (await readdir(dataRoot)).filter(name => /^events-\d{1,4}-\d{2}\.jsonl$/.test(name)).sort(compareUtf8)
@@ -541,6 +775,7 @@ export async function projectUpgradeSemantics(profileRoot) {
   const eventDerivatives = []
   const sourceCanonicalSeen = new Set()
   const derivativeIds = new Set()
+  const derivativeSources = new Set()
   const winnerById = new Map()
   for (const name of names) {
     const content = await readFile(path.join(dataRoot, name), 'utf8')
@@ -560,7 +795,11 @@ export async function projectUpgradeSemantics(profileRoot) {
           throw new Error('event migration derivative is invalid')
         }
         if (derivativeIds.has(item.mutationId)) throw new Error('duplicate mutation derivative in event log')
+        if (derivativeSources.has(item.migration.sourceContentId)) {
+          throw new Error('multiple event derivatives reference the same source mutation')
+        }
         derivativeIds.add(item.mutationId)
+        derivativeSources.add(item.migration.sourceContentId)
         eventDerivatives.push({
           mutationId: item.mutationId,
           sourceContentId: item.migration.sourceContentId,
@@ -595,24 +834,38 @@ export async function projectUpgradeSemantics(profileRoot) {
     .sort((left, right) => compareUtf8(left.id, right.id))
 
   let babyInfoState
+  let babyInfoJournal
   const journalPath = path.join(root, 'baby-info-journal-v1.jsonl')
   try {
     const journalStats = await lstat(journalPath)
     if (journalStats.isSymbolicLink() || !journalStats.isFile()) throw new Error('baby-info journal is a link/reparse point')
     babyInfoState = await readJournalBabyInfoState(journalPath)
+    babyInfoJournal = {
+      kind: 'journal',
+      records: babyInfoState.records,
+      importSourceIds: babyInfoState.importSourceIds,
+    }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
     babyInfoState = readLegacyBabyInfoState(settings.babyInfoSync)
+    babyInfoJournal = {
+      kind: 'legacy',
+      expectedRecords: expectedJournalRecordsFromLegacy(settings.babyInfoSync),
+      expectedImportSourceId: legacyBabyInfoImportSourceId(settings.babyInfoSync),
+    }
   }
 
   return {
     version: 1,
     identity,
     firebaseHash,
+    settingsOpaqueHash,
+    auxiliaryFiles,
     eventSources,
     eventDerivatives,
     eventWinners,
     babyInfo: finishBabyInfoProjection(babyInfoState),
+    babyInfoJournal,
   }
 }
 
@@ -625,6 +878,12 @@ export function assertSemanticPreservation(before, after) {
     throw new Error('account/family/baby identity substitution detected')
   }
   if (before.firebaseHash !== after.firebaseHash) throw new Error('Firebase configuration substitution detected')
+  if (before.settingsOpaqueHash !== after.settingsOpaqueHash) {
+    throw new Error('unknown or deep settings content changed')
+  }
+  if (!sameSemantic(before.auxiliaryFiles, after.auxiliaryFiles)) {
+    throw new Error('auxiliary or authentication continuity file changed')
+  }
   if (!sameSemantic(before.eventSources, after.eventSources)) {
     const baselineTombstones = new Map(before.eventWinners.filter(item => item.deleted).map(item => [item.id, item]))
     const resurrected = after.eventWinners.some(item => baselineTombstones.has(item.id) && !item.deleted)
@@ -638,6 +897,19 @@ export function assertSemanticPreservation(before, after) {
   }
   if (!sameSemantic(before.babyInfo.acknowledgedKeys, after.babyInfo.acknowledgedKeys)) {
     throw new Error('acknowledged baby-info work changed')
+  }
+  if (before.babyInfoJournal?.kind === 'legacy') {
+    if (after.babyInfoJournal?.kind === 'legacy') return
+    if (after.babyInfoJournal?.kind !== 'journal'
+      || !sameSemantic(before.babyInfoJournal.expectedRecords, after.babyInfoJournal.records)
+      || !sameSemantic(
+        [before.babyInfoJournal.expectedImportSourceId],
+        after.babyInfoJournal.importSourceIds,
+      )) {
+      throw new Error('baby-info migration journal records or import provenance changed')
+    }
+  } else if (!sameSemantic(before.babyInfoJournal, after.babyInfoJournal)) {
+    throw new Error('baby-info journal records or provenance changed')
   }
 }
 
@@ -664,6 +936,17 @@ export async function validateV038Fixture(profileRoot) {
   if (!sameSemantic(projectIdentity(fixture.settings), projection.identity)) {
     throw new Error('v0.3.8 fixture identity does not match the explicit contract')
   }
+  if (settingsPreservationHash(fixture.settings) !== projection.settingsOpaqueHash) {
+    throw new Error('v0.3.8 fixture unknown/deep settings do not match the explicit contract')
+  }
+  const expectedAuxiliary = V038_AUXILIARY_FILES.map(entry => ({
+    path: entry.path,
+    size: entry.bytes.byteLength,
+    sha256: sha256(entry.bytes),
+  }))
+  if (!sameSemantic(expectedAuxiliary, projection.auxiliaryFiles)) {
+    throw new Error('v0.3.8 fixture auxiliary/auth files do not match the explicit contract')
+  }
   const expectedBabyInfo = finishBabyInfoProjection(readLegacyBabyInfoState(fixture.settings.babyInfoSync))
   if (!sameSemantic(expectedBabyInfo, projection.babyInfo)) {
     throw new Error('v0.3.8 fixture baby-info state does not match the explicit contract')
@@ -676,14 +959,18 @@ export async function materializeMigratedBabyInfoJournal(profileRoot) {
   const root = path.resolve(profileRoot)
   const settingsPath = path.join(root, 'settings.json')
   const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
-  const state = readLegacyBabyInfoState(settings.babyInfoSync)
+  const normalized = normalizeLegacyBabyInfoState(settings.babyInfoSync)
+  const state = readLegacyBabyInfoState(normalized)
   const records = []
-  for (const mutation of settings.babyInfoSync.mutations) {
+  for (const mutation of normalized.mutations) {
     const key = getBabyInfoMutationKey(mutation)
     records.push({ version: 1, type: 'mutation', key, mutation })
+  }
+  for (const mutation of normalized.mutations) {
+    const key = getBabyInfoMutationKey(mutation)
     if (!state.pending.has(key)) records.push({ version: 1, type: 'ack', familyId: mutation.familyId, key })
   }
-  records.push({ version: 1, type: 'import', sourceId: 'upgrade-contract-v038' })
+  records.push({ version: 1, type: 'import', sourceId: legacyBabyInfoImportSourceId(settings.babyInfoSync) })
   await writeFile(
     path.join(root, 'baby-info-journal-v1.jsonl'),
     `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
@@ -728,21 +1015,124 @@ export function buildFixtureTombstoneResurrection() {
   }
 }
 
+const PROVENANCE_FIELDS = Object.freeze([
+  'schemaVersion',
+  'repository',
+  'workflowRunId',
+  'sourceSha',
+  'releaseTag',
+  'appVersion',
+  'platform',
+  'artifactName',
+  'artifactSha256',
+])
+const EXPECTED_PROVENANCE_FIELDS = Object.freeze(PROVENANCE_FIELDS.filter(field => field !== 'schemaVersion'))
+
+function assertExactObjectFields(value, fields, label) {
+  if (!isPlainObject(value)) throw new Error(`${label} must be a JSON object`)
+  const actual = Object.keys(value).sort()
+  const expected = [...fields].sort()
+  if (actual.length !== expected.length || actual.some((field, index) => field !== expected[index])) {
+    throw new Error(`${label} must contain the exact fields: ${expected.join(', ')}`)
+  }
+}
+
+function validateCandidateProvenance(provenance) {
+  assertExactObjectFields(provenance, PROVENANCE_FIELDS, 'candidate provenance')
+  if (provenance.schemaVersion !== 1
+    || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(provenance.repository)
+    || !/^[1-9][0-9]*$/.test(provenance.workflowRunId)
+    || !/^[0-9a-f]{40}$/.test(provenance.sourceSha)
+    || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(provenance.releaseTag)
+    || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(provenance.appVersion)
+    || !['windows-x64', 'mac-universal'].includes(provenance.platform)
+    || typeof provenance.artifactName !== 'string'
+    || provenance.artifactName.length === 0
+    || path.basename(provenance.artifactName) !== provenance.artifactName
+    || !/^[0-9a-f]{64}$/.test(provenance.artifactSha256)) {
+    throw new Error('candidate provenance field value is invalid')
+  }
+  return provenance
+}
+
+export async function verifyCandidateProvenance({ packagePath, provenancePath, expected }) {
+  assertExactObjectFields(expected, EXPECTED_PROVENANCE_FIELDS, 'expected candidate provenance')
+  validateCandidateProvenance({ schemaVersion: 1, ...expected })
+  const provenanceFile = await readRegularFileDescriptorSafe(path.resolve(provenancePath), {
+    label: 'candidate provenance',
+    maxBytes: 64 * 1024,
+    captureBytes: true,
+  })
+  let provenance
+  try {
+    provenance = JSON.parse(provenanceFile.bytes.toString('utf8'))
+  } catch {
+    throw new Error('candidate provenance must be valid UTF-8 JSON')
+  }
+  validateCandidateProvenance(provenance)
+  for (const field of PROVENANCE_FIELDS) {
+    const expectedValue = field === 'schemaVersion' ? 1 : expected[field]
+    if (provenance[field] !== expectedValue) {
+      throw new Error(`candidate provenance ${field} does not match the expected binding`)
+    }
+  }
+
+  const candidate = await readRegularFileDescriptorSafe(path.resolve(packagePath), {
+    label: 'candidate package',
+  })
+  if (candidate.sha256 !== expected.artifactSha256) {
+    throw new Error('candidate package SHA-256 mismatch')
+  }
+  if (path.basename(path.resolve(packagePath)) !== provenance.artifactName) {
+    throw new Error('candidate package basename does not match provenance artifactName')
+  }
+  return provenance
+}
+
 function parseDataContractCli(args) {
   const [command, ...rest] = args
-  if (command !== 'manifest' && command !== 'compare-manifest') {
-    throw new Error('data contract command must be manifest or compare-manifest')
+  if (!['manifest', 'compare-manifest', 'verify-provenance'].includes(command)) {
+    throw new Error('data contract command must be manifest, compare-manifest, or verify-provenance')
   }
+  const allowedFlags = command === 'verify-provenance'
+    ? [
+        '--package', '--provenance', '--output', '--expected-repository',
+        '--expected-workflow-run-id', '--expected-source-sha', '--expected-release-tag',
+        '--expected-app-version', '--expected-platform', '--expected-artifact-name',
+        '--expected-artifact-sha256',
+      ]
+    : ['--root', '--output', '--before']
   const values = {}
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index]
     const value = rest[index + 1]
-    if (!['--root', '--output', '--before'].includes(flag)) throw new Error(`unknown data contract argument: ${flag}`)
+    if (!allowedFlags.includes(flag)) throw new Error(`unknown data contract argument: ${flag}`)
     if (Object.prototype.hasOwnProperty.call(values, flag)) throw new Error(`duplicate data contract argument: ${flag}`)
     if (typeof value !== 'string' || value.length === 0 || value.startsWith('--')) {
       throw new Error(`data contract argument value is required: ${flag}`)
     }
     values[flag] = value
+  }
+  if (command === 'verify-provenance') {
+    for (const flag of allowedFlags) {
+      if (!values[flag]) throw new Error(`${flag} is required`)
+    }
+    return {
+      command,
+      packagePath: values['--package'],
+      provenancePath: values['--provenance'],
+      output: values['--output'],
+      expected: {
+        repository: values['--expected-repository'],
+        workflowRunId: values['--expected-workflow-run-id'],
+        sourceSha: values['--expected-source-sha'],
+        releaseTag: values['--expected-release-tag'],
+        appVersion: values['--expected-app-version'],
+        platform: values['--expected-platform'],
+        artifactName: values['--expected-artifact-name'],
+        artifactSha256: values['--expected-artifact-sha256'],
+      },
+    }
   }
   if (!values['--root']) throw new Error('--root is required')
   if (command === 'manifest' && !values['--output']) throw new Error('--output is required')
@@ -753,6 +1143,17 @@ function parseDataContractCli(args) {
 /** Narrow command seam used by shell wrappers; no application data is mutated. */
 export async function runDataContractCli(args) {
   const options = parseDataContractCli(args)
+  if (options.command === 'verify-provenance') {
+    const verified = await verifyCandidateProvenance(options)
+    const output = path.resolve(options.output)
+    await mkdir(path.dirname(output), { recursive: true })
+    await writeFile(output, `${JSON.stringify(verified, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    })
+    return verified
+  }
   const current = await createRawManifest(options.root)
   if (options.command === 'manifest') {
     const output = path.resolve(options.output)

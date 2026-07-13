@@ -38,6 +38,7 @@ export const FIRESTORE_PORT = 8080
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
+const APP_VERSION = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version
 const E2E_TIMEOUT_MS = 30_000
 const CLOSE_TIMEOUT_MS = 10_000
 const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
@@ -116,21 +117,23 @@ export function buildFirebaseCliInvocation({ platform, nodePath, scriptPath }) {
 export function packagedResourcePath(executablePath, platform) {
   if (platform === 'win32') {
     if (path.basename(executablePath).toLowerCase() !== 'baby diary.exe') return null
-    if (path.basename(path.dirname(executablePath)).toLowerCase() !== 'win-unpacked') return null
-    return path.join(path.dirname(executablePath), 'resources', 'app.asar')
+    const executableDirectory = path.dirname(executablePath)
+    const directoryName = path.basename(executableDirectory).toLowerCase()
+    const sourceSegments = path.resolve(executablePath).split(/[\\/]+/).map(segment => segment.toLowerCase())
+    if (sourceSegments.includes('node_modules') || sourceSegments.includes('electron')) return null
+    if (directoryName !== 'win-unpacked' && directoryName !== 'baby diary') return null
+    return path.join(executableDirectory, 'resources', 'app.asar')
   }
 
   if (platform === 'darwin') {
     const macosDirectory = path.dirname(executablePath)
     const contentsDirectory = path.dirname(macosDirectory)
     const appDirectory = path.dirname(contentsDirectory)
-    const unpackedDirectory = path.basename(path.dirname(appDirectory))
     if (
       path.basename(executablePath) !== 'Baby Diary'
       || path.basename(macosDirectory) !== 'MacOS'
       || path.basename(contentsDirectory) !== 'Contents'
       || path.basename(appDirectory) !== 'Baby Diary.app'
-      || !['mac', 'mac-arm64', 'mac-universal', 'mac-x64'].includes(unpackedDirectory)
     ) {
       return null
     }
@@ -143,6 +146,68 @@ export function packagedResourcePath(executablePath, platform) {
 function comparablePath(value, platform) {
   const normalized = path.normalize(path.resolve(value))
   return platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+export function assertPackagedRuntimeAttestation(attestation, {
+  executablePath,
+  resourcePath,
+  platform,
+  expectedVersion,
+}) {
+  const validIdentity = attestation
+    && attestation.name === 'Baby Diary'
+    && attestation.isPackaged === true
+    && attestation.version === expectedVersion
+  const validPaths = validIdentity
+    && comparablePath(attestation.executablePath, platform) === comparablePath(executablePath, platform)
+    && comparablePath(attestation.appPath, platform) === comparablePath(resourcePath, platform)
+  invariant(
+    validIdentity && validPaths,
+    `Expected packaged Baby Diary runtime ${expectedVersion} at ${executablePath}`,
+  )
+  return attestation
+}
+
+export function resolveCanonicalUpgradeProfile({
+  override,
+  platform = process.platform,
+  env = process.env,
+  fileSystem = DEFAULT_FILE_SYSTEM,
+} = {}) {
+  invariant(typeof override === 'string' && override.length > 0,
+    'Canonical upgraded profile path is required')
+  let expected
+  if (platform === 'win32') {
+    invariant(typeof env.APPDATA === 'string' && env.APPDATA.length > 0, 'APPDATA is required')
+    expected = path.resolve(env.APPDATA, 'baby-diary')
+  } else if (platform === 'darwin') {
+    invariant(typeof env.HOME === 'string' && env.HOME.length > 0, 'HOME is required')
+    expected = path.resolve(env.HOME, 'Library', 'Application Support', 'baby-diary')
+  } else {
+    throw new Error('Canonical upgraded profile continuation supports Windows and macOS only')
+  }
+  const candidate = path.resolve(override)
+  invariant(
+    comparablePath(candidate, platform) === comparablePath(expected, platform),
+    `Sync continuation must use the canonical upgraded profile: ${expected}`,
+  )
+  invariant(fileSystem.existsSync(candidate), `Canonical upgraded profile not found: ${candidate}`)
+  const profile = fileSystem.lstatSync(candidate)
+  invariant(profile.isDirectory() && !profile.isSymbolicLink(),
+    'Canonical upgraded profile must be a real directory')
+  const real = fileSystem.realpathSync(candidate)
+  invariant(comparablePath(real, platform) === comparablePath(candidate, platform),
+    'Canonical upgraded profile resolves through a link/reparse point')
+  const settingsPath = path.join(candidate, 'settings.json')
+  const dataPath = path.join(candidate, 'data')
+  invariant(fileSystem.existsSync(settingsPath) && fileSystem.existsSync(dataPath),
+    'Canonical upgraded profile is missing settings or data')
+  const settings = fileSystem.lstatSync(settingsPath)
+  const data = fileSystem.lstatSync(dataPath)
+  invariant(settings.isFile() && !settings.isSymbolicLink()
+    && data.isDirectory() && !data.isSymbolicLink(),
+  'Canonical upgraded profile settings/data must not use links or reparse points')
+  return real
 }
 
 function assertRealRegularFile(candidate, label, platform, fileSystem) {
@@ -811,6 +876,7 @@ export async function finalizeRun({
 async function launchDevice({
   executablePath,
   userData,
+  canonicalUpgradeProfile,
   name,
   rendererErrors,
   blockedRequests,
@@ -820,9 +886,16 @@ async function launchDevice({
   const resourcePath = packagedResourcePath(executablePath, process.platform)
   invariant(resourcePath, `${name}: packaged resource path could not be derived`)
   const guardToken = randomBytes(32).toString('hex')
-  const diagnosticPath = path.join(userData, `sync-e2e-diagnostics-${guardToken}.jsonl`)
+  const selectedUserData = canonicalUpgradeProfile ?? userData
+  if (canonicalUpgradeProfile) {
+    invariant(
+      comparablePath(canonicalUpgradeProfile, process.platform) === comparablePath(userData, process.platform),
+      `${name}: canonical upgraded profile must be the exact launch userData`,
+    )
+  }
+  const diagnosticPath = path.join(selectedUserData, `sync-e2e-diagnostics-${guardToken}.jsonl`)
   diagnosticFiles.push({ name, path: diagnosticPath })
-  const device = { app: null, page: null, userData, name, closing: false }
+  const device = { app: null, page: null, userData: selectedUserData, name, closing: false }
   try {
     const app = await electron.launch({
       executablePath,
@@ -830,7 +903,7 @@ async function launchDevice({
       env: {
         ...process.env,
         NODE_ENV: 'production',
-        BABYDIARY_TEST_USERDATA: userData,
+        BABYDIARY_TEST_USERDATA: canonicalUpgradeProfile ?? userData,
         BABYDIARY_SYNC_E2E_EARLY_GUARD: '1',
         BABYDIARY_SYNC_E2E_GUARD_TOKEN: guardToken,
         BABYDIARY_SYNC_E2E_DIAGNOSTICS: diagnosticPath,
@@ -842,6 +915,19 @@ async function launchDevice({
       },
     })
     device.app = app
+    const attestation = await app.evaluate(({ app: electronApp }) => ({
+      name: electronApp.getName(),
+      version: electronApp.getVersion(),
+      isPackaged: electronApp.isPackaged,
+      appPath: electronApp.getAppPath(),
+      executablePath: process.execPath,
+    }))
+    assertPackagedRuntimeAttestation(attestation, {
+      executablePath,
+      resourcePath,
+      platform: process.platform,
+      expectedVersion: APP_VERSION,
+    })
     const context = app.context()
     await installNetworkGuards(context, { name, resourcePath, blockedRequests })
     attachRendererDiagnostics({
@@ -964,6 +1050,82 @@ async function readSnapshot(device) {
     settings: await window.babyDiary.getSettings(),
     dataInfo: await window.babyDiary.getDataInfo(),
   }))
+}
+
+export function assertCanonicalUpgradeProfileSnapshot(snapshot, canonicalUpgradeProfile) {
+  invariant(snapshot && typeof snapshot === 'object', 'Canonical upgraded profile snapshot is missing')
+  invariant(snapshot.settings?.baby?.name === '하루・ハル'
+    && snapshot.settings?.baby?.birthdate === '2026-01-15',
+  'Canonical upgraded profile baby identity was replaced')
+  invariant(snapshot.settings?.upgradeOpaque?.deep?.nested?.ko === '보존'
+    && snapshot.settings?.upgradeOpaque?.deep?.nested?.ja === '保持',
+  'Canonical upgraded profile unknown/deep settings were lost')
+  invariant(Array.isArray(snapshot.events), 'Canonical upgraded profile events are missing')
+  const winners = new Map(snapshot.events.map(event => [event.id, event]))
+  for (const expected of [
+    { id: 'legacy-pee', rev: 1, deleted: false },
+    { id: 'legacy-formula', rev: 2, deleted: false },
+    { id: 'legacy-diary-tombstone', rev: 2, deleted: true },
+  ]) {
+    const actual = winners.get(expected.id)
+    invariant(actual?.rev === expected.rev && actual?.deleted === expected.deleted,
+      `Canonical upgraded profile legacy winner changed: ${expected.id}`)
+  }
+  invariant(typeof snapshot.dataInfo?.dataDir === 'string'
+    && comparablePath(path.dirname(snapshot.dataInfo.dataDir), process.platform)
+      === comparablePath(canonicalUpgradeProfile, process.platform),
+  'Canonical upgraded profile IPC resolved a fresh or different userData directory')
+  return snapshot
+}
+
+async function runCanonicalUpgradeProfileContinuation({
+  executablePath,
+  canonicalUpgradeProfile,
+  email,
+  password,
+  rendererErrors,
+  blockedRequests,
+  diagnosticFiles,
+}) {
+  let device
+  try {
+    device = await launchDevice({
+      executablePath,
+      userData: canonicalUpgradeProfile,
+      canonicalUpgradeProfile,
+      name: 'upgrade-canonical',
+      rendererErrors,
+      blockedRequests,
+      diagnosticFiles,
+    })
+    await dismissFirstLaunch(device)
+    const before = assertCanonicalUpgradeProfileSnapshot(
+      await readSnapshot(device),
+      canonicalUpgradeProfile,
+    )
+    await openSettings(device)
+    await device.page.locator('[data-sync-state="signed-out"]').waitFor({
+      state: 'visible',
+      timeout: E2E_TIMEOUT_MS,
+    })
+    await device.page.evaluate(async () => {
+      const settings = await window.babyDiary.getSettings()
+      await window.babyDiary.saveSettings({ ...settings, familyId: '' })
+    })
+    await signUpDevice(device, email, password)
+    await createFamilyOn(device)
+    const continued = await addQuickEvent(device, 'pee')
+    const after = assertCanonicalUpgradeProfileSnapshot(
+      await readSnapshot(device),
+      canonicalUpgradeProfile,
+    )
+    invariant(after.events.some(event => event.id === continued.id && event.rev === 1 && !event.deleted),
+      'Canonical upgraded profile emulator continuation did not persist its new event')
+    invariant(after.events.length > before.events.length,
+      'Canonical upgraded profile emulator continuation replaced legacy events')
+  } finally {
+    if (device) await closeDevice(device)
+  }
 }
 
 function convergencePayload(event) {
@@ -1176,6 +1338,9 @@ async function runInsideEmulators() {
   const executablePath = resolvePackagedExecutable({
     override: process.env.BABYDIARY_SYNC_E2E_EXECUTABLE,
   })
+  const canonicalUpgradeProfile = process.env.BABYDIARY_SYNC_E2E_UPGRADE_PROFILE
+    ? resolveCanonicalUpgradeProfile({ override: process.env.BABYDIARY_SYNC_E2E_UPGRADE_PROFILE })
+    : null
   // macOS commonly exposes /var as a symlink to /private/var. Canonicalize the
   // isolated root before handing it to the fail-closed main-process guard.
   const rootTemp = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-sync-e2e-')))
@@ -1195,6 +1360,18 @@ async function runInsideEmulators() {
   let passSummary
 
   try {
+    if (canonicalUpgradeProfile) {
+      console.log('[sync-e2e] continue on exact upgraded canonical profile before fresh-device coverage')
+      await runCanonicalUpgradeProfileContinuation({
+        executablePath,
+        canonicalUpgradeProfile,
+        email: `sync-e2e-upgrade-${suffix}@example.test`,
+        password,
+        rendererErrors,
+        blockedRequests,
+        diagnosticFiles,
+      })
+    }
     invariant(userDataA !== userDataB, 'Device A and B must use different userData directories')
     writeSeed(userDataA, 'Device A')
     writeSeed(userDataB, 'Device B')
