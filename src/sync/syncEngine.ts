@@ -190,6 +190,21 @@ export const DETAIL_FAMILY_GONE = 'FAMILY_GONE'
 /** Access could not be classified; retain both local and cloud identity. */
 export const DETAIL_FAMILY_ACCESS_UNCERTAIN = 'FAMILY_ACCESS_UNCERTAIN'
 
+/** Local listeners detach immediately, while persisted Firebase logout is bounded. */
+export const SIGN_OUT_TIMEOUT_MS = 10_000
+export const DETAIL_SIGN_OUT_INCOMPLETE = 'SIGN_OUT_INCOMPLETE'
+
+export class SyncLifecycleError extends Error {
+  readonly code: 'SIGN_OUT_TIMEOUT' | 'SIGN_OUT_FAILED'
+
+  constructor(code: SyncLifecycleError['code'], message: string, cause?: unknown) {
+    super(message)
+    this.name = 'SyncLifecycleError'
+    this.code = code
+    if (cause !== undefined) Object.assign(this, { cause })
+  }
+}
+
 // ────────────────────────────────────────────────────────────
 // 내부 상태
 // ────────────────────────────────────────────────────────────
@@ -281,6 +296,36 @@ function enqueueLifecycle(operation: () => Promise<void>): Promise<void> {
   const result = _lifecycleTail.then(operation, operation)
   _lifecycleTail = result.catch(() => undefined)
   return result
+}
+
+/** Network work must never occupy the lifecycle lane used by stop/restart. */
+function runDetached(operation: () => Promise<void>, label: string): void {
+  void Promise.resolve()
+    .then(operation)
+    .catch(error => {
+      if (error instanceof StaleSyncOperationError) return
+      console.error(`[syncEngine] detached ${label} failed`, error)
+    })
+}
+
+function boundedOperation<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  timeoutError: Error,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(timeoutError), timeoutMs)
+    operation.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
 }
 
 function contextIsCurrent(context: SyncContext): boolean {
@@ -399,7 +444,7 @@ setBabyInfoPersistenceObserver((pendingCount, needsRetry) => {
   if (_state.status === 'online' && needsRetry) {
     _babyInfoNextRetry = 0
     const context = currentContext()
-    if (context) void enqueueLifecycle(() => drainQueue(context))
+    if (context) runDetached(() => drainQueue(context), 'baby-info drain')
   }
 })
 
@@ -545,7 +590,7 @@ async function configureInternal(
     return
   }
 
-  const result = await initFirebase(effectiveCfg)
+  const result = await initFirebase(effectiveCfg, `sync-${generation}`)
   if (generation !== _generation) return
   if (!result) {
     setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: totalPendingCount() })
@@ -562,6 +607,7 @@ async function configureInternal(
 /** Serialize direct configuration with teardown; callers may safely await it. */
 export function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
   const generation = ++_generation
+  invalidateConfiguredRuntime(false)
   return enqueueLifecycle(async () => {
     await stopRuntime(generation, false)
     if (generation !== _generation) return
@@ -589,14 +635,34 @@ export async function signOutSync(): Promise<void> {
   const auth = _auth
   const shouldRemainStarted = _started
   // Invalidate captured callbacks synchronously, before the Firebase promise.
-  detachDataListeners()
+  suspendRuntimeWork()
   _currentUser = null
+  setState({ status: 'signed-out', detail: 'signed out', pendingCount: totalPendingCount() })
   return enqueueLifecycle(async () => {
-    if (auth) await fbSignOut(auth)
     if (generation !== _generation) return
-    setState({ status: 'signed-out', detail: 'signed out', pendingCount: totalPendingCount() })
+    try {
+      if (auth) {
+        await boundedOperation(
+          Promise.resolve().then(() => fbSignOut(auth)),
+          SIGN_OUT_TIMEOUT_MS,
+          new SyncLifecycleError('SIGN_OUT_TIMEOUT', 'Firebase sign-out timed out'),
+        )
+      }
+    } catch (error) {
+      const structured = error instanceof SyncLifecycleError
+        ? error
+        : new SyncLifecycleError('SIGN_OUT_FAILED', 'Firebase sign-out failed', error)
+      if (generation === _generation) {
+        setState({
+          status: 'error',
+          detail: DETAIL_SIGN_OUT_INCOMPLETE,
+          pendingCount: totalPendingCount(),
+        })
+      }
+      throw structured
+    }
+    if (generation !== _generation) return
     if (shouldRemainStarted && _auth && _config) {
-      _started = false
       await startInternal(generation)
     }
   })
@@ -656,13 +722,21 @@ export async function createFamily(
     console.warn('[syncEngine] createFamily: could not write users doc', e)
   }
 
+  // Main owns the projection transition. Creation is the only path allowed
+  // to adopt an unlinked local pair into the destination journal.
+  await ipc.commitBabyInfo({
+    kind: 'family-transition',
+    familyId: familyRef.id,
+    mode: 'create',
+  })
+
   _familyId = familyRef.id
   setState({ inviteCode })
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
   if (_currentUser && _db) {
     const context: AuthContext = { generation: _generation, db: _db, user: _currentUser }
-    void enqueueLifecycle(() => onUserSignedIn(context))
+    runDetached(() => onUserSignedIn(context), 'family creation reconnect')
   }
   return { familyId: familyRef.id, inviteCode }
 }
@@ -740,11 +814,19 @@ export async function joinFamily(
     console.warn('[syncEngine] joinFamily: could not write users doc', e)
   }
 
+  // Joining selects only destination history (or a blank projection); it must
+  // never upload the previous/local family pair.
+  await ipc.commitBabyInfo({
+    kind: 'family-transition',
+    familyId,
+    mode: 'join',
+  })
+
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
   if (_currentUser && _db) {
     const context: AuthContext = { generation: _generation, db: _db, user: _currentUser }
-    void enqueueLifecycle(() => onUserSignedIn(context))
+    runDetached(() => onUserSignedIn(context), 'family join reconnect')
   }
   return { familyId, babyName, babyBirthdate }
 }
@@ -805,7 +887,7 @@ export function enqueue(event: DiaryEvent): void {
   // 연결 중이면 즉시 드레인 시도
   if (_state.status === 'online') {
     const context = currentContext()
-    if (context) void enqueueLifecycle(() => drainQueue(context))
+    if (context) runDetached(() => drainQueue(context), 'event drain')
   }
 }
 
@@ -816,6 +898,31 @@ function detachDataListeners(): void {
   _unsubBabyInfoSnapshot = null
   _unsubFamilySnapshot?.()
   _unsubFamilySnapshot = null
+}
+
+function suspendRuntimeWork(): void {
+  _started = false
+  detachDataListeners()
+  _unsubAuth?.()
+  _unsubAuth = null
+  if (_retryTimer) {
+    clearTimeout(_retryTimer)
+    _retryTimer = null
+  }
+}
+
+function invalidateConfiguredRuntime(publishState: boolean): void {
+  suspendRuntimeWork()
+  _db = null
+  _auth = null
+  _currentUser = null
+  _pendingAuthUser = undefined
+  _connectionNeedsRetry = false
+  _connectionRetryAttempts = 0
+  _connectionNextRetry = 0
+  if (publishState) {
+    setState({ status: 'off', detail: 'sync stopped', pendingCount: totalPendingCount() })
+  }
 }
 
 async function startInternal(generation: number): Promise<void> {
@@ -842,10 +949,10 @@ async function startInternal(generation: number): Promise<void> {
 
     _currentUser = user
     const context: AuthContext = { generation, db, user }
-    void enqueueLifecycle(async () => {
+    runDetached(async () => {
       if (!authContextIsCurrent(context)) return
       await onUserSignedIn(context)
-    })
+    }, 'auth reconciliation')
   })
   _started = true
 }
@@ -857,23 +964,16 @@ export function start(): Promise<void> {
 }
 
 async function stopRuntime(generation: number, publishState = true): Promise<void> {
-  _started = false
-  detachDataListeners()
-  _unsubAuth?.()
-  _unsubAuth = null
-  if (_retryTimer) {
-    clearTimeout(_retryTimer)
-    _retryTimer = null
+  invalidateConfiguredRuntime(false)
+  try {
+    const teardown = teardownFirebase()
+    void teardown.catch(error => {
+      console.error('[syncEngine] background Firebase teardown failed', error)
+    })
+  } catch (error) {
+    console.error('[syncEngine] background Firebase teardown failed', error)
   }
-  _db = null
-  _auth = null
-  _currentUser = null
-  _pendingAuthUser = undefined
-  await teardownFirebase()
   if (generation !== _generation) return
-  _connectionNeedsRetry = false
-  _connectionRetryAttempts = 0
-  _connectionNextRetry = 0
   if (publishState) {
     setState({ status: 'off', detail: 'sync stopped', pendingCount: totalPendingCount() })
   }
@@ -882,12 +982,14 @@ async function stopRuntime(generation: number, publishState = true): Promise<voi
 /** 동기화 중단. Generation is invalidated synchronously. */
 export function stop(): Promise<void> {
   const generation = ++_generation
+  invalidateConfiguredRuntime(true)
   return enqueueLifecycle(() => stopRuntime(generation))
 }
 
 /** Latest queued restart owns Firebase and every installed listener. */
 export function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
   const generation = ++_generation
+  invalidateConfiguredRuntime(false)
   return enqueueLifecycle(async () => {
     if (generation !== _generation) return
     await stopRuntime(generation, false)
@@ -1041,7 +1143,7 @@ async function onUserSignedIn(authContext: AuthContext): Promise<void> {
     _connectionRetryAttempts = 0
     _connectionNextRetry = 0
     setState({ status: 'online', detail: `${user.email} connected`, pendingCount: totalPendingCount() })
-    void enqueueLifecycle(() => drainQueue(context))
+    runDetached(() => drainQueue(context), 'post-connect drain')
   } catch (error) {
     if (error instanceof StaleSyncOperationError || !authContextIsCurrent(authContext)) return
     markConnectionRetry(authContext, error)
@@ -1253,7 +1355,7 @@ async function attachSnapshot(context: SyncContext): Promise<void> {
         change.type === 'added' || change.type === 'modified'
       ))
       if (!hasRelevantChange) return
-      void enqueueLifecycle(async () => {
+      runDetached(async () => {
         if (!contextIsCurrent(context)) return
         try {
           await runBabyInfoReconcile(context)
@@ -1262,7 +1364,7 @@ async function attachSnapshot(context: SyncContext): Promise<void> {
           detachDataListeners()
           markConnectionRetry(context, error)
         }
-      })
+      }, 'baby-info snapshot reconciliation')
     },
     err => {
       if (!contextIsCurrent(context)) return
@@ -1279,7 +1381,7 @@ async function attachSnapshot(context: SyncContext): Promise<void> {
     { includeMetadataChanges: false },
     snapshot => {
       if (!contextIsCurrent(context)) return
-      void enqueueLifecycle(async () => {
+      runDetached(async () => {
         if (!contextIsCurrent(context)) return
         if (!snapshot.exists()) {
           await handleFamilyGone(context)
@@ -1297,7 +1399,7 @@ async function attachSnapshot(context: SyncContext): Promise<void> {
           detachDataListeners()
           markConnectionRetry(context, error)
         }
-      })
+      }, 'family snapshot reconciliation')
     },
     err => {
       if (!contextIsCurrent(context)) return
@@ -1540,12 +1642,12 @@ function scheduleRetry(): void {
         db: _db,
         user: _currentUser,
       }
-      void enqueueLifecycle(() => onUserSignedIn(context))
+      runDetached(() => onUserSignedIn(context), 'connection retry')
       return
     }
     const context = currentContext()
     if (context && (_state.status === 'online' || _state.status === 'error')) {
-      void enqueueLifecycle(() => drainQueue(context))
+      runDetached(() => drainQueue(context), 'pending retry')
     }
   }, delay)
 }

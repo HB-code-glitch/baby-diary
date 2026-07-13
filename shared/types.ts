@@ -115,9 +115,18 @@ export interface BabyInfoReconcileCommit {
   exactAcknowledgedMutationKeys: string[]
 }
 
+export interface BabyInfoFamilyTransitionCommit {
+  kind: 'family-transition'
+  /** The non-empty destination family whose projection becomes visible. */
+  familyId: string
+  /** Only creation may adopt an unlinked local pair into the new family. */
+  mode: 'create' | 'join'
+}
+
 export type BabyInfoSettingsCommitOperation =
   | BabyInfoUserEditCommit
   | BabyInfoReconcileCommit
+  | BabyInfoFamilyTransitionCommit
 
 export interface BabyInfoSettingsCommitResult {
   kind: BabyInfoSettingsCommitOperation['kind']

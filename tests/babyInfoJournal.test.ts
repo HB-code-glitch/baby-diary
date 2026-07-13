@@ -2,7 +2,12 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { BabyInfoMutation, BabyInfoSyncState } from '../shared/types'
+import type {
+  BabyInfoJournalSummary,
+  BabyInfoMutation,
+  BabyInfoPendingPage,
+  BabyInfoSyncState,
+} from '../shared/types'
 import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
 import {
   BABY_INFO_JOURNAL_FILE,
@@ -173,5 +178,65 @@ describe('main-process baby-info append-only journal', () => {
     expect(firstPage.items).toHaveLength(128)
     expect(JSON.stringify(firstPage).length).toBeLessThan(100_000)
     expect(firstPage.nextCursor).toBeTypeOf('string')
+
+    // Summary and page reads must not fall back to whole-family Set scans.
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(Set.prototype, Symbol.iterator)!
+    let indexedSummary!: BabyInfoJournalSummary
+    let indexedPage!: BabyInfoPendingPage
+    Object.defineProperty(Set.prototype, Symbol.iterator, {
+      ...iteratorDescriptor,
+      value() { throw new Error('whole Set iteration is forbidden on the indexed read path') },
+    })
+    try {
+      indexedSummary = restarted.getSummary('family-large')
+      indexedPage = restarted.listPending('family-large', { limit: 10 })
+    } finally {
+      Object.defineProperty(Set.prototype, Symbol.iterator, iteratorDescriptor)
+    }
+    expect(indexedSummary.pendingCount).toBe(total)
+    expect(indexedPage.items).toHaveLength(10)
+
+    const seen = new Set<string>()
+    let afterKey: string | undefined
+    let remainingBudget = total
+    let pageCalls = 0
+    let insertedSmaller: BabyInfoMutation | undefined
+    while (remainingBudget > 0) {
+      const page = restarted.listPending('family-large', {
+        limit: Math.min(500, remainingBudget),
+        afterKey,
+      })
+      if (page.items.length === 0) break
+      pageCalls += 1
+      const keys = page.items.map(getBabyInfoMutationKey)
+      for (const key of keys) {
+        expect(seen.has(key)).toBe(false)
+        seen.add(key)
+      }
+      restarted.ingest('family-large', [], keys)
+      afterKey = keys.at(-1)
+      remainingBudget -= keys.length
+      if (pageCalls === 1) {
+        insertedSmaller = {
+          ...mutation(99_999, 'family-large', payload),
+          mutationId: '00000000-0000-4000-8000-000000000001',
+        }
+        expect(getBabyInfoMutationKey(insertedSmaller) < afterKey!).toBe(true)
+        restarted.ingest('family-large', [insertedSmaller], [])
+      }
+    }
+
+    expect(pageCalls).toBe(Math.ceil(total / 500))
+    expect(seen.size).toBe(total)
+    expect(restarted.getSummary('family-large').pendingCount).toBe(1)
+    expect(restarted.listPending('family-large', { limit: 10 }).items).toEqual([insertedSmaller])
+    restarted.ingest('family-large', [], [getBabyInfoMutationKey(insertedSmaller!)])
+
+    const drainedRestart = new BabyInfoJournal(tmpDir)
+    expect(drainedRestart.getSummary('family-large')).toMatchObject({
+      mutationCount: total + 1,
+      pendingCount: 0,
+      totalPendingCount: 0,
+    })
   }, 20_000)
 })

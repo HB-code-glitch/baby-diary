@@ -5,6 +5,7 @@ import { pathToFileURL } from 'url'
 import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
+import { SettingsRecoveryError } from './store/backupSnapshot'
 import type {
   AppSettings,
   BabyInfoCommitIpcResponse,
@@ -153,6 +154,10 @@ function setupIPC(): void {
 
   ipcMain.handle('babyInfo:getSummary', async (_, familyId: string) => {
     return settingsStore.getBabyInfoSummary(familyId)
+  })
+
+  ipcMain.handle('babyInfo:getMutation', async (_, familyId: string, key: string) => {
+    return settingsStore.getBabyInfoMutation(familyId, key)
   })
 
   ipcMain.handle('settings:commitBabyInfo', async (
@@ -373,6 +378,17 @@ app.whenReady().then(() => {
       setupUpdater()
     }
   })
+}).catch(error => {
+  const recoveryRequired = error instanceof SettingsRecoveryError
+    || (error && typeof error === 'object'
+      && (error as { code?: unknown }).code === 'SETTINGS_RECOVERY_REQUIRED')
+  dialog.showErrorBox(
+    recoveryRequired ? 'Baby Diary recovery required' : 'Baby Diary startup failed',
+    recoveryRequired
+      ? 'Settings and baby journal could not be verified or restored from a verified backup. The originals were preserved for support recovery.'
+      : 'Baby Diary could not start. No local data was modified after the startup failure.',
+  )
+  app.exit(1)
 })
 
 app.on('will-quit', () => {

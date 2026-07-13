@@ -46,14 +46,14 @@ describe('SettingsStore.merge', () => {
     try { fs.rmSync(tmpDir, { recursive: true }) } catch { /* ignore */ }
   })
 
-  it('merge writes only the provided fields, leaves others intact', () => {
+  it('merge projects the destination family without leaking the prior family pair', () => {
     store.save(makeSettings({ familyId: 'fam-001', baby: { name: 'Sora', birthdate: '2024-06-01' } }))
     commitPair(store, 'Sora', '2024-06-01')
     store.merge({ familyId: 'fam-002' })
     const result = store.get()
     expect(result.familyId).toBe('fam-002')
-    expect(result.baby.name).toBe('Sora')           // untouched
-    expect(result.baby.birthdate).toBe('2024-06-01') // untouched
+    expect(result.baby.name).toBe('')                 // fam-002 has no retained winner
+    expect(result.baby.birthdate).toBe('')
     expect(result.profile.uid).toBe('uid-test')     // untouched
   })
 
@@ -84,7 +84,7 @@ describe('SettingsStore.merge', () => {
     // CRITICAL: familyId must still be fam-new — merge must not resurrect old value
     const final = new SettingsStore(tmpDir).get()
     expect(final.familyId).toBe('fam-new')
-    expect(final.baby.name).toBe(staleSettings.baby.name) // baby write from A applied
+    expect(final.baby.name).toBe('') // generic writes cannot leak fam-old's managed pair
   })
 
   it('merge deep-merges unmanaged baby fields without changing the managed pair', () => {
@@ -105,12 +105,12 @@ describe('SettingsStore.merge', () => {
     expect(result.familyId).toBe('fam-xyz') // untouched
   })
 
-  it('merge with { familyId: "" } clears familyId without touching other fields', () => {
+  it('merge with { familyId: "" } clears both the link and managed projection', () => {
     store.save(makeSettings({ familyId: 'fam-xyz', baby: { name: 'Rio', birthdate: '2025-01-01' } }))
     commitPair(store, 'Rio', '2025-01-01')
     store.merge({ familyId: '' })
     const result = store.get()
     expect(result.familyId).toBe('')
-    expect(result.baby.name).toBe('Rio')
+    expect(result.baby.name).toBe('')
   })
 })

@@ -114,19 +114,17 @@ describe('SettingsStore', () => {
 
   // ── Corrupt settings + backup restore ──────────────────────────────────────
 
-  it('corrupt settings.json: writes .bak and falls back to DEFAULT_SETTINGS when no backup exists', () => {
+  it('corrupt settings.json: writes .bak and fails closed when no verified backup exists', () => {
     // Write garbage JSON
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), '{ not valid json !!!', 'utf-8')
 
-    const loaded = new SettingsStore(tmpDir).get()
-
-    // Should fall back to defaults
-    expect(loaded.baby.name).toBe('')
-    expect(loaded.familyId).toBe('')
+    expect(() => new SettingsStore(tmpDir)).toThrow(expect.objectContaining({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+    }))
 
     // A .bak file should have been created
     const baks = fs.readdirSync(tmpDir).filter(f => f.includes('.corrupt-') && f.endsWith('.bak'))
-    expect(baks.length).toBe(1)
+    expect(baks.length).toBe(2)
   })
 
   it('corrupt settings.json: restores from newest backup snapshot', () => {

@@ -4,6 +4,7 @@ import type {
   BabyInfoCommitIpcResponse,
   BabyInfoSettingsCommitOperation,
   BabyInfoJournalSummary,
+  BabyInfoMutation,
   BabyInfoPendingPage,
   BabyInfoPendingPageRequest,
   DataInfo,
@@ -52,6 +53,9 @@ const babyDiaryAPI = {
 
   getBabyInfoSummary: (familyId: string): Promise<BabyInfoJournalSummary> =>
     ipcRenderer.invoke('babyInfo:getSummary', familyId),
+
+  getBabyInfoMutation: (familyId: string, key: string): Promise<BabyInfoMutation | undefined> =>
+    ipcRenderer.invoke('babyInfo:getMutation', familyId, key),
 
   exportData: (format: ExportFormat): Promise<void> =>
     ipcRenderer.invoke('data:export', format),

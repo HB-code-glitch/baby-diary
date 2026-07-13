@@ -127,6 +127,7 @@ const ipcMock = vi.hoisted(() => ({
   commitBabyInfo: vi.fn(),
   listPendingBabyInfo: vi.fn(),
   getBabyInfoSummary: vi.fn(),
+  getBabyInfoMutation: vi.fn(),
 }))
 
 vi.mock('../src/lib/ipc', () => ({ ipc: ipcMock }))
@@ -171,6 +172,13 @@ function installStore(tmpDir: string, settings: AppSettings): void {
   ipcMock.getBabyInfoSummary.mockReset().mockImplementation(async (familyId: string) => (
     clone(store.getBabyInfoSummary(familyId))
   ))
+  ipcMock.getBabyInfoMutation.mockReset().mockImplementation(async (familyId: string, key: string) => {
+    const journal = store as SettingsStore & {
+      getBabyInfoMutation(familyId: string, key: string): BabyInfoMutation | undefined
+    }
+    const candidate = journal.getBabyInfoMutation(familyId, key)
+    return candidate === undefined ? undefined : clone(candidate)
+  })
 }
 
 async function options(familyData?: Record<string, unknown>) {
@@ -318,6 +326,108 @@ describe('baby-info delta sync over the main journal', () => {
     await sync.reconcileFamilyBabyInfo(await options(familyData))
     expect(store.getBabyInfoSummary('family-A').winner).toEqual(firstWinner)
     expect(store.getBabyInfoSummary('family-A').mutationCount).toBe(2)
+  })
+
+  it.each([
+    ['marker sorts before W2', 120, 121],
+    ['W2 sorts before marker', 220, 119],
+  ])('preserves legacy pair L from marker W1 even when concurrent W2 is already the winner: %s', async (
+    _label,
+    markerId,
+    winnerId,
+  ) => {
+    installStore(tmpDir, baseSettings({ baby: { name: '', birthdate: '' } }))
+    const sync = await import('../src/sync/babyInfoSync')
+    const marker = mutation(markerId, {
+      babyName: 'Marker W1',
+      logicalClock: 10,
+      updatedAt: '2026-07-13T10:00:00.000Z',
+    })
+    const concurrentWinner = mutation(winnerId, {
+      babyName: 'Concurrent W2',
+      logicalClock: 20,
+      updatedAt: '2026-07-13T10:00:01.000Z',
+    })
+    for (const item of [marker, concurrentWinner]) {
+      firestore.documents.set(
+        `families/family-A/babyInfoMutations/${sync.makeBabyInfoDocId(item)}`,
+        { mutation: item },
+      )
+    }
+    const familyData = {
+      babyName: 'Legacy pair L',
+      babyBirthdate: '2026-05-05',
+      babyInfoWinnerKey: getBabyInfoMutationKey(marker),
+      babyInfoWinnerMutationId: marker.mutationId,
+      babyInfoWinnerLogicalClock: marker.logicalClock,
+      babyInfoWinnerUpdatedAt: marker.updatedAt,
+      babyInfoWinnerAuthorId: marker.authorId,
+      babyInfoWinnerOrigin: marker.origin,
+    }
+    firestore.documents.set('families/family-A', clone(familyData))
+
+    await sync.reconcileFamilyBabyInfo(await options(familyData))
+
+    expect(store.getBabyInfoSummary('family-A')).toMatchObject({
+      mutationCount: 3,
+      pendingCount: 0,
+      winner: concurrentWinner,
+    })
+    const journalText = fs.readFileSync(path.join(tmpDir, 'baby-info-journal-v1.jsonl'), 'utf8')
+    expect(journalText).toContain('Legacy pair L')
+
+    // Restart/retry must deduplicate the marker-bound bridge physically.
+    installStore(tmpDir, store.get())
+    await sync.reconcileFamilyBabyInfo(await options(familyData))
+    expect(store.getBabyInfoSummary('family-A').mutationCount).toBe(3)
+  })
+
+  it('does not invent a rolling bridge when the family marker child is missing', async () => {
+    installStore(tmpDir, baseSettings({ baby: { name: '', birthdate: '' } }))
+    const sync = await import('../src/sync/babyInfoSync')
+    const missingMarker = mutation(300, { babyName: 'Missing W1', logicalClock: 10 })
+    const winner = mutation(301, { babyName: 'Winner W2', logicalClock: 20 })
+    firestore.documents.set(
+      `families/family-A/babyInfoMutations/${sync.makeBabyInfoDocId(winner)}`,
+      { mutation: winner },
+    )
+    const familyData = {
+      babyName: 'Untrusted legacy pair',
+      babyBirthdate: '2026-05-05',
+      babyInfoWinnerKey: getBabyInfoMutationKey(missingMarker),
+    }
+
+    await sync.reconcileFamilyBabyInfo(await options(familyData))
+
+    expect(store.getBabyInfoSummary('family-A')).toMatchObject({
+      mutationCount: 1,
+      winner,
+    })
+    expect(fs.readFileSync(path.join(tmpDir, 'baby-info-journal-v1.jsonl'), 'utf8'))
+      .not.toContain('Untrusted legacy pair')
+  })
+
+  it('advances a stable pending cursor past a failed key and drains later pages in the same cycle', async () => {
+    installStore(tmpDir, baseSettings({ baby: { name: '', birthdate: '' } }))
+    const discovered = Array.from({ length: 205 }, (_, index) => mutation(1_000 + index))
+    store.commitBabyInfo({
+      kind: 'reconcile',
+      familyId: 'family-A',
+      discoveredMutations: discovered,
+      exactAcknowledgedMutationKeys: [],
+    })
+    firestore.failWrites = 1
+    const sync = await import('../src/sync/babyInfoSync')
+
+    const result = await sync.reconcileFamilyBabyInfo(await options())
+
+    expect(result.needsRetry).toBe(true)
+    expect(result.activePendingCount).toBe(1)
+    expect(store.listPendingBabyInfo({ familyId: 'family-A', limit: 500 }).items).toHaveLength(1)
+    expect(ipcMock.listPendingBabyInfo.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(ipcMock.listPendingBabyInfo.mock.calls.slice(1).every(
+      ([request]) => typeof request.afterKey === 'string',
+    )).toBe(true)
   })
 
   it('propagates an initial paged read failure even when there were zero local pending items', async () => {

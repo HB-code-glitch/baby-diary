@@ -8,9 +8,9 @@ import type {
 } from './types'
 import {
   canonicalBabyInfoMutationJson,
+  isValidBabyInfoMutationKey,
   normalizeBabyInfoSyncState,
 } from './babyInfoResolver'
-import { isValidMutationId } from './eventResolver'
 import { assertFamilyId, isValidFamilyId } from './familyId'
 
 export type DeepPartial<T> = T extends object
@@ -66,15 +66,8 @@ function parseManagedRevision(value: unknown, field: string): number | undefined
 }
 
 function parseMutationKey(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 160) invalid('acknowledgement key is invalid')
-  const parts = value.split(':')
-  if (parts.length !== 3
-    || parts[0] !== 'baby-info'
-    || !isValidMutationId(parts[1])
-    || !isValidMutationId(parts[2])) {
-    invalid('acknowledgement key is invalid')
-  }
-  return value
+  if (!isValidBabyInfoMutationKey(value)) invalid('acknowledgement key is invalid')
+  return value as string
 }
 
 function parseJournalMetadata(value: unknown): BabyInfoJournalMetadata | undefined {
@@ -170,6 +163,38 @@ export function parseAppSettings(value: unknown): AppSettings {
     babyInfoSync: legacyState as BabyInfoSyncState | undefined,
     babyInfoJournal: metadata,
   }
+}
+
+/**
+ * Pre-journal settings were historically partial and deep-merged with these
+ * defaults. Journal-aware files stay strict because their pair metadata is an
+ * integrity boundary, not a migration hint.
+ */
+export function parseAppSettingsWithLegacyDefaults(value: unknown): AppSettings {
+  if (!isRecord(value)
+    || value.babyInfoJournal !== undefined
+    || value.babyInfoRevision !== undefined) {
+    return parseAppSettings(value)
+  }
+  if (value.baby !== undefined && !isRecord(value.baby)) return parseAppSettings(value)
+  if (value.profile !== undefined && !isRecord(value.profile)) return parseAppSettings(value)
+
+  return parseAppSettings({
+    ...value,
+    baby: {
+      name: '',
+      birthdate: '',
+      ...(value.baby as Record<string, unknown> | undefined),
+    },
+    profile: {
+      uid: '',
+      name: '',
+      role: 'dad',
+      ...(value.profile as Record<string, unknown> | undefined),
+    },
+    familyId: value.familyId === undefined ? '' : value.familyId,
+    firebase: value.firebase === undefined ? null : value.firebase,
+  })
 }
 
 /** Generic settings writes can never modify main-owned baby-info fields. */
@@ -283,6 +308,22 @@ export function parseBabyInfoSettingsCommitOperation(
       familyId,
       discoveredMutations,
       exactAcknowledgedMutationKeys,
+    }
+  }
+
+  if (value.kind === 'family-transition') {
+    if (!hasOnlyKeys(value, ['kind', 'familyId', 'mode'])) {
+      invalid('family transition shape is invalid')
+    }
+    let familyId: string
+    try { familyId = assertFamilyId(value.familyId) } catch { return invalid('familyId is invalid') }
+    if (value.mode !== 'create' && value.mode !== 'join') {
+      invalid('family transition mode is invalid')
+    }
+    return {
+      kind: 'family-transition',
+      familyId,
+      mode: value.mode,
     }
   }
 

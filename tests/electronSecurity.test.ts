@@ -83,12 +83,14 @@ class MockBrowserWindow extends EventEmitter {
 const ipcHandlers = new Map<string, (...args: any[]) => any>()
 const testPdfPath = join(tmpdir(), 'baby-diary-electron-security-test.pdf')
 const settingsStoreMocks = vi.hoisted(() => ({
+  construct: vi.fn(),
   get: vi.fn(() => ({})),
   save: vi.fn(),
   merge: vi.fn(),
   commitBabyInfo: vi.fn(),
   listPendingBabyInfo: vi.fn(),
   getBabyInfoSummary: vi.fn(),
+  getBabyInfoMutation: vi.fn(),
 }))
 
 vi.mock('electron', () => {
@@ -114,6 +116,7 @@ vi.mock('electron', () => {
     dialog: {
       showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] })),
       showSaveDialog: vi.fn(async () => ({ canceled: false, filePath: testPdfPath })),
+      showErrorBox: vi.fn(),
     },
     shell: {
       openExternal: vi.fn(async () => undefined),
@@ -133,12 +136,14 @@ vi.mock('../electron/store/eventLog', () => ({
 
 vi.mock('../electron/store/settings', () => ({
   SettingsStore: class {
+    constructor() { settingsStoreMocks.construct() }
     get = settingsStoreMocks.get
     save = settingsStoreMocks.save
     merge = settingsStoreMocks.merge
     commitBabyInfo = settingsStoreMocks.commitBabyInfo
     listPendingBabyInfo = settingsStoreMocks.listPendingBabyInfo
     getBabyInfoSummary = settingsStoreMocks.getBabyInfoSummary
+    getBabyInfoMutation = settingsStoreMocks.getBabyInfoMutation
   },
 }))
 
@@ -210,11 +215,13 @@ describe('Electron BrowserWindow security boundary', () => {
     ipcMain.removeAllListeners()
     ipcMain.handle.mockClear()
     settingsStoreMocks.commitBabyInfo.mockReset()
+    settingsStoreMocks.construct.mockReset()
     settingsStoreMocks.get.mockReset().mockReturnValue({})
     settingsStoreMocks.save.mockReset()
     settingsStoreMocks.merge.mockReset()
     settingsStoreMocks.listPendingBabyInfo.mockReset()
     settingsStoreMocks.getBabyInfoSummary.mockReset()
+    settingsStoreMocks.getBabyInfoMutation.mockReset()
   })
 
   it('explicitly sandboxes both the main and print windows', async () => {
@@ -253,6 +260,30 @@ describe('Electron BrowserWindow security boundary', () => {
     })
   })
 
+  it('fails closed with a user-visible recovery message when settings and journal cannot be verified', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('C:\\private\\settings.json contains secrets'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+      })
+    })
+    const electron = await import('electron')
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringContaining('verified backup'),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('C:\\private'),
+    )
+    expect(electron.app.exit).toHaveBeenCalledWith(1)
+    expect(MockBrowserWindow.instances).toHaveLength(0)
+  })
+
   it('exposes bounded baby-info delta handlers and broadcasts authoritative settings after successful writes', async () => {
     const mainWindow = await loadMainWindow()
     const save = ipcHandlers.get('settings:save')
@@ -260,11 +291,13 @@ describe('Electron BrowserWindow security boundary', () => {
     const commit = ipcHandlers.get('settings:commitBabyInfo')
     const listPending = ipcHandlers.get('babyInfo:listPending')
     const getSummary = ipcHandlers.get('babyInfo:getSummary')
+    const getMutation = ipcHandlers.get('babyInfo:getMutation')
     expect(save).toBeTypeOf('function')
     expect(merge).toBeTypeOf('function')
     expect(commit).toBeTypeOf('function')
     expect(listPending).toBeTypeOf('function')
     expect(getSummary).toBeTypeOf('function')
+    expect(getMutation).toBeTypeOf('function')
 
     const first = { baby: { name: 'A', birthdate: '' } }
     const second = { baby: { name: 'B', birthdate: '' } }
@@ -282,6 +315,7 @@ describe('Electron BrowserWindow security boundary', () => {
     settingsStoreMocks.getBabyInfoSummary.mockReturnValueOnce({
       familyId: 'family-A', mutationCount: 0, pendingCount: 0,
     })
+    settingsStoreMocks.getBabyInfoMutation.mockReturnValueOnce(undefined)
 
     await expect(save!({}, first)).resolves.toBe(first)
     await expect(merge!({}, { theme: 'dark' })).resolves.toBe(second)
@@ -290,6 +324,9 @@ describe('Electron BrowserWindow security boundary', () => {
     })).resolves.toEqual({ ok: true, value: expect.objectContaining({ settings: third }) })
     await expect(listPending!({}, { familyId: 'family-A', limit: 100 })).resolves.toEqual({ items: [] })
     await expect(getSummary!({}, 'family-A')).resolves.toMatchObject({ familyId: 'family-A' })
+    await expect(getMutation!({}, 'family-A', 'baby-info:key')).resolves.toBeUndefined()
+    expect(settingsStoreMocks.getBabyInfoMutation)
+      .toHaveBeenCalledWith('family-A', 'baby-info:key')
 
     expect(mainWindow.webContents.send.mock.calls.filter(call => call[0] === 'settings:changed'))
       .toEqual([

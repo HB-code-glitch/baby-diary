@@ -99,6 +99,22 @@ describe('Firebase auth persistence', () => {
     expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
+  it('does not let a held old teardown clear a newer owned Firebase instance', async () => {
+    let finishDelete!: () => void
+    const heldDelete = new Promise<void>(resolve => { finishDelete = resolve })
+    firebase.deleteApp.mockReturnValueOnce(heldDelete)
+    const { getFirebaseAuth, initFirebase, teardownFirebase } = await import('../src/sync/firebase')
+
+    await initFirebase(config, 'owner-a')
+    const tearingDown = teardownFirebase()
+    await initFirebase(config, 'owner-b')
+    expect(getFirebaseAuth()).toBe(firebase.auth)
+
+    finishDelete()
+    await tearingDown
+    expect(getFirebaseAuth()).toBe(firebase.auth)
+  })
+
   it('keeps omitted keepLoggedIn as a local-persistence sign-in', async () => {
     const { fbSignIn } = await import('../src/sync/firebase')
 

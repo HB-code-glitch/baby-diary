@@ -10,10 +10,12 @@ import {
   canonicalBabyInfoMutationJson,
   compareBabyInfoMutations,
   getBabyInfoMutationKey,
+  isValidBabyInfoMutationKey,
   normalizeBabyInfoSyncState,
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
 import { appendDurableFileSync, truncateDurableFileSync } from './durableFs'
+import { OrderedStringSet } from './orderedStringSet'
 
 export const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
 const MAX_PAGE_SIZE = 500
@@ -41,6 +43,13 @@ interface ImportRecord {
 
 type JournalRecord = MutationRecord | AcknowledgementRecord | ImportRecord
 
+interface FamilyIndex {
+  mutationCount: number
+  pendingCount: number
+  pendingKeys: OrderedStringSet
+  winner?: BabyInfoMutation
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
@@ -64,15 +73,20 @@ function validImportId(value: unknown): value is string {
 export class BabyInfoJournal {
   private readonly journalPath: string
   private readonly mutationsByKey = new Map<string, BabyInfoMutation>()
-  private readonly familyKeys = new Map<string, Set<string>>()
+  private readonly families = new Map<string, FamilyIndex>()
   private readonly acknowledgedKeys = new Set<string>()
   private readonly completedImports = new Set<string>()
-  private readonly winners = new Map<string, BabyInfoMutation>()
+  private totalPendingCount = 0
   private tornOffset: number | undefined
   private needsSeparator = false
+  private readonly strictReplay: boolean
 
-  constructor(userDataPath: string) {
+  constructor(userDataPath: string, options: { strict?: boolean } = {}) {
     this.journalPath = path.join(userDataPath, BABY_INFO_JOURNAL_FILE)
+    this.strictReplay = options.strict ?? false
+    if (!fs.existsSync(this.journalPath)) {
+      appendDurableFileSync(this.journalPath, Buffer.alloc(0))
+    }
     this.load()
   }
 
@@ -94,7 +108,7 @@ export class BabyInfoJournal {
       try {
         candidate = JSON.parse(raw)
       } catch {
-        if (!terminated && end === content.byteLength) {
+        if (!this.strictReplay && !terminated && end === content.byteLength) {
           this.tornOffset = offset
           return
         }
@@ -157,13 +171,19 @@ export class BabyInfoJournal {
         return
       }
       this.mutationsByKey.set(record.key, record.mutation)
-      const keys = this.familyKeys.get(record.mutation.familyId) ?? new Set<string>()
-      keys.add(record.key)
-      this.familyKeys.set(record.mutation.familyId, keys)
-      const winner = this.winners.get(record.mutation.familyId)
-      if (!winner || compareBabyInfoMutations(record.mutation, winner) > 0) {
-        this.winners.set(record.mutation.familyId, record.mutation)
+      const family = this.families.get(record.mutation.familyId) ?? {
+        mutationCount: 0,
+        pendingCount: 0,
+        pendingKeys: new OrderedStringSet(),
       }
+      family.mutationCount += 1
+      family.pendingCount += 1
+      family.pendingKeys.add(record.key)
+      this.totalPendingCount += 1
+      if (!family.winner || compareBabyInfoMutations(record.mutation, family.winner) > 0) {
+        family.winner = record.mutation
+      }
+      this.families.set(record.mutation.familyId, family)
       return
     }
     if (record.type === 'ack') {
@@ -171,7 +191,15 @@ export class BabyInfoJournal {
       if (!mutation || mutation.familyId !== record.familyId) {
         throw new Error('acknowledgement references unknown mutation')
       }
-      this.acknowledgedKeys.add(record.key)
+      if (!this.acknowledgedKeys.has(record.key)) {
+        this.acknowledgedKeys.add(record.key)
+        const family = this.families.get(record.familyId)!
+        if (!family.pendingKeys.delete(record.key)) {
+          throw new Error('acknowledgement pending index mismatch')
+        }
+        family.pendingCount -= 1
+        this.totalPendingCount -= 1
+      }
       return
     }
     this.completedImports.add(record.sourceId)
@@ -261,19 +289,22 @@ export class BabyInfoJournal {
     return this.completedImports.has(sourceId)
   }
 
+  /** True for any durable mutation, acknowledgement, or completed import marker. */
+  hasAnyRecords(): boolean {
+    return this.mutationsByKey.size > 0
+      || this.acknowledgedKeys.size > 0
+      || this.completedImports.size > 0
+  }
+
   getSummary(familyIdValue: string): BabyInfoJournalSummary {
     const familyId = assertFamilyId(familyIdValue)
-    const keys = this.familyKeys.get(familyId) ?? new Set<string>()
-    let pendingCount = 0
-    for (const key of Array.from(keys)) {
-      if (!this.acknowledgedKeys.has(key)) pendingCount += 1
-    }
+    const family = this.families.get(familyId)
     return {
       familyId,
-      mutationCount: keys.size,
-      pendingCount,
-      totalPendingCount: this.mutationsByKey.size - this.acknowledgedKeys.size,
-      winner: this.winners.get(familyId),
+      mutationCount: family?.mutationCount ?? 0,
+      pendingCount: family?.pendingCount ?? 0,
+      totalPendingCount: this.totalPendingCount,
+      winner: family?.winner,
     }
   }
 
@@ -285,19 +316,16 @@ export class BabyInfoJournal {
     if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > MAX_PAGE_SIZE) {
       throw new Error(`baby info pending page limit must be between 1 and ${MAX_PAGE_SIZE}`)
     }
-    if (options.afterKey !== undefined && typeof options.afterKey !== 'string') {
+    if (options.afterKey !== undefined && !isValidBabyInfoMutationKey(options.afterKey)) {
       throw new Error('baby info pending cursor is invalid')
     }
-    const pendingKeys = Array.from(this.familyKeys.get(familyId) ?? [])
-      .filter(key => !this.acknowledgedKeys.has(key))
-      .sort()
-    const start = options.afterKey === undefined
-      ? 0
-      : pendingKeys.findIndex(key => key > options.afterKey!)
-    if (start < 0) return { items: [] }
-    const selected = pendingKeys.slice(start, start + options.limit)
+    const selectedWithLookahead = this.families.get(familyId)?.pendingKeys.valuesAfter(
+      options.afterKey,
+      options.limit + 1,
+    ) ?? []
+    const selected = selectedWithLookahead.slice(0, options.limit)
     const items = selected.map(key => this.mutationsByKey.get(key)!)
-    const hasMore = start + selected.length < pendingKeys.length
+    const hasMore = selectedWithLookahead.length > options.limit
     return {
       items,
       nextCursor: hasMore ? selected[selected.length - 1] : undefined,
@@ -305,6 +333,13 @@ export class BabyInfoJournal {
   }
 
   getTotalPendingCount(): number {
-    return this.mutationsByKey.size - this.acknowledgedKeys.size
+    return this.totalPendingCount
+  }
+
+  getMutation(familyIdValue: string, key: string): BabyInfoMutation | undefined {
+    const familyId = assertFamilyId(familyIdValue)
+    if (!isValidBabyInfoMutationKey(key)) throw new Error('baby info mutation key is invalid')
+    const mutation = this.mutationsByKey.get(key)
+    return mutation?.familyId === familyId ? mutation : undefined
   }
 }

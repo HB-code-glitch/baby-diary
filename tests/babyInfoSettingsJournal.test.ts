@@ -70,16 +70,8 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
   })
 
   it('generic full save cannot modify the current pair, journal metadata, or revision even at the current revision', () => {
-    const currentWinnerKey = getBabyInfoMutationKey(mutation(900))
     const staleWinnerKey = getBabyInfoMutationKey(mutation(901))
-    writeSettings(tmpDir, baseSettings({
-      babyInfoRevision: 7,
-      babyInfoJournal: {
-        version: 1,
-        projectedFamilyId: 'family-A',
-        projectedWinnerKey: currentWinnerKey,
-      },
-    } as Partial<AppSettings>))
+    writeSettings(tmpDir, baseSettings())
     const store = new SettingsStore(tmpDir)
     const current = store.get()
 
@@ -102,7 +94,7 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
   })
 
   it('generic partial merge cannot modify managed fields even with a fresh revision', () => {
-    writeSettings(tmpDir, baseSettings({ babyInfoRevision: 3 }))
+    writeSettings(tmpDir, baseSettings())
     const store = new SettingsStore(tmpDir)
     const current = store.get()
 
@@ -238,5 +230,137 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     fs.rmSync(settingsPath, { recursive: true, force: true })
     writeSettings(tmpDir, before)
     expect(new SettingsStore(tmpDir).get().baby.name).toBe('Durable but not projected')
+  })
+
+  it('isolates projections across A -> B -> restart and restores A when switching back', () => {
+    writeSettings(tmpDir, baseSettings())
+    const store = new SettingsStore(tmpDir)
+    const familyAWinner = store.getBabyInfoSummary('family-A').winner
+    expect(familyAWinner?.babyName).toBe('Before')
+
+    const switched = store.merge({ familyId: 'family-B' })
+    expect(switched.familyId).toBe('family-B')
+    expect(switched.baby).toMatchObject({ name: '', birthdate: '' })
+    expect(switched.babyInfoJournal).toEqual({
+      version: 1,
+      projectedFamilyId: 'family-B',
+      projectedWinnerKey: undefined,
+    })
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(restarted.getBabyInfoSummary('family-B').mutationCount).toBe(0)
+
+    const returned = restarted.merge({ familyId: 'family-A' })
+    expect(returned.baby).toMatchObject({
+      name: familyAWinner!.babyName,
+      birthdate: familyAWinner!.babyBirthdate,
+    })
+    expect(returned.babyInfoJournal?.projectedWinnerKey)
+      .toBe(getBabyInfoMutationKey(familyAWinner!))
+  })
+
+  it('projects an existing destination winner and clears the pair for an empty destination', () => {
+    writeSettings(tmpDir, baseSettings())
+    const familyBWinner = mutation(700, 'family-B')
+    new BabyInfoJournal(tmpDir).ingest('family-B', [familyBWinner], [])
+    const store = new SettingsStore(tmpDir)
+
+    expect(store.merge({ familyId: 'family-B' }).baby).toMatchObject({
+      name: familyBWinner.babyName,
+      birthdate: familyBWinner.babyBirthdate,
+    })
+    expect(store.merge({ familyId: '' }).baby).toMatchObject({ name: '', birthdate: '' })
+    expect(store.get().babyInfoJournal).toEqual({
+      version: 1,
+      projectedFamilyId: '',
+      projectedWinnerKey: undefined,
+    })
+  })
+
+  it('bootstraps a pair only for a truly pre-journal settings file', () => {
+    writeSettings(tmpDir, baseSettings())
+
+    const migrated = new SettingsStore(tmpDir)
+
+    expect(migrated.getBabyInfoSummary('family-A')).toMatchObject({
+      mutationCount: 1,
+      winner: expect.objectContaining({
+        babyName: 'Before',
+        babyBirthdate: '2026-01-01',
+        origin: 'legacy-local',
+      }),
+    })
+    expect(new SettingsStore(tmpDir).getBabyInfoSummary('family-A').mutationCount).toBe(1)
+  })
+
+  it('adopts a pre-family local pair only through create, never through join', () => {
+    writeSettings(tmpDir, baseSettings({
+      familyId: '',
+      baby: { name: 'Local draft', birthdate: '2026-05-05', gender: 'girl' },
+    }))
+    const createStore = new SettingsStore(tmpDir)
+
+    const created = commit(createStore, {
+      kind: 'family-transition',
+      familyId: 'family-created',
+      mode: 'create',
+    })
+
+    expect(created.settings.baby).toMatchObject({
+      name: 'Local draft',
+      birthdate: '2026-05-05',
+    })
+    expect(created.activePendingCount).toBe(1)
+    expect(createStore.getBabyInfoSummary('family-created').winner?.origin).toBe('legacy-local')
+
+    const joinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-settings-join-'))
+    try {
+      writeSettings(joinDir, baseSettings({
+        familyId: '',
+        baby: { name: 'Must not join', birthdate: '2025-01-01', gender: 'boy' },
+      }))
+      const joinStore = new SettingsStore(joinDir)
+      const joined = commit(joinStore, {
+        kind: 'family-transition',
+        familyId: 'family-existing',
+        mode: 'join',
+      })
+
+      expect(joined.settings.baby).toMatchObject({ name: '', birthdate: '' })
+      expect(joined.activePendingCount).toBe(0)
+      expect(joinStore.getBabyInfoSummary('family-existing').mutationCount).toBe(0)
+    } finally {
+      fs.rmSync(joinDir, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers a create transition that crashed after the destination mutation journal fsync', () => {
+    const initial = baseSettings({
+      familyId: '',
+      baby: { name: 'Crash-safe local', birthdate: '2026-06-06', gender: 'girl' },
+    })
+    writeSettings(tmpDir, initial)
+    const store = new SettingsStore(tmpDir)
+    const before = store.get()
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    fs.rmSync(settingsPath)
+    fs.mkdirSync(settingsPath)
+
+    expect(() => commit(store, {
+      kind: 'family-transition',
+      familyId: 'family-created',
+      mode: 'create',
+    })).toThrow()
+
+    fs.rmSync(settingsPath, { recursive: true, force: true })
+    writeSettings(tmpDir, before)
+    const restarted = new SettingsStore(tmpDir)
+    const recovered = restarted.merge({ familyId: 'family-created' })
+    expect(recovered.baby).toMatchObject({
+      name: 'Crash-safe local',
+      birthdate: '2026-06-06',
+    })
+    expect(restarted.getBabyInfoSummary('family-created').mutationCount).toBe(1)
   })
 })

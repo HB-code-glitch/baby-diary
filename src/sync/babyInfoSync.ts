@@ -292,16 +292,19 @@ async function ingestLegacyProjection(
       projectedName,
       projectedBirthdate,
     )
-  } else if (
-    summary.winner
-    && getBabyInfoMutationKey(summary.winner) === options.familyData.babyInfoWinnerKey
-  ) {
-    candidate = makeLegacyCloudBridgeBabyInfoMutation(
-      options.familyId,
-      projectedName,
-      projectedBirthdate,
-      summary.winner,
-    )
+  } else {
+    const markerKey = options.familyData.babyInfoWinnerKey
+    const marker = await ipc.getBabyInfoMutation(options.familyId, markerKey)
+    options.assertCurrent?.()
+    if (marker) {
+      candidate = makeLegacyCloudBridgeBabyInfoMutation(
+        options.familyId,
+        projectedName,
+        projectedBirthdate,
+        markerKey,
+        marker,
+      )
+    }
   }
 
   if (!candidate) return { summary }
@@ -328,22 +331,21 @@ async function uploadPendingPages(
   // Concurrent edits stay durable and are picked up by the next retry.
   let remainingBudget = initialSummary.pendingCount
   let settings: AppSettings | undefined
+  let afterKey: string | undefined
 
   while (remainingBudget > 0) {
     const page = await ipc.listPendingBabyInfo({
       familyId: options.familyId,
       limit: Math.min(PENDING_PAGE_SIZE, remainingBudget),
+      afterKey,
     })
     options.assertCurrent?.()
     if (page.items.length === 0) break
 
     const acknowledgements: string[] = []
-    let failed = false
     for (const mutation of page.items) {
       if (await uploadAndReadBack(mutation, options)) {
         acknowledgements.push(getBabyInfoMutationKey(mutation))
-      } else {
-        failed = true
       }
     }
     if (acknowledgements.length > 0) {
@@ -357,7 +359,7 @@ async function uploadPendingPages(
       settings = committed.settings
     }
     remainingBudget -= page.items.length
-    if (failed) break
+    afterKey = getBabyInfoMutationKey(page.items[page.items.length - 1])
   }
 
   options.assertCurrent?.()

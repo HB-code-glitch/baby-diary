@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { app } from 'electron'
+import { stageVerifiedBackupSnapshot } from './backupSnapshot'
 
 export type BackupDestination = 'userData' | 'documents'
 
@@ -99,7 +100,7 @@ export function selectBackupsToPrune(names: string[], now: Date): string[] {
 }
 
 export class BackupManager {
-  private dataDir: string
+  private readonly userDataPath: string
   private userDataBackupDir: string
   private documentsBackupDir: string
   private lastBackupTime: string | null = null
@@ -111,6 +112,7 @@ export class BackupManager {
     userDataPath: string,
     options: { documentsPath?: string; platform?: NodeJS.Platform } = {},
   ) {
+    this.userDataPath = userDataPath
     this.platform = options.platform ?? process.platform
     // V4: use app.getPath('documents') instead of os.homedir()/Documents so
     // OneDrive-redirected Documents folders are resolved correctly on Windows.
@@ -119,20 +121,8 @@ export class BackupManager {
       options.documentsPath ?? app.getPath('documents'),
       this.platform,
     )
-    this.dataDir = directories.dataDir
     this.userDataBackupDir = directories.userDataBackupDir
     this.documentsBackupDir = directories.documentsBackupDir
-  }
-
-  private copyFileDurably(source: string, destination: string): void {
-    fs.copyFileSync(source, destination)
-    // Windows requires a writable handle for FlushFileBuffers (fsync).
-    const fd = fs.openSync(destination, 'r+')
-    try {
-      fs.fsyncSync(fd)
-    } finally {
-      fs.closeSync(fd)
-    }
   }
 
   private syncDirectory(directory: string): void {
@@ -147,30 +137,7 @@ export class BackupManager {
     }
   }
 
-  private copyDataFiles(destDir: string): void {
-    if (!fs.existsSync(this.dataDir)) {
-      return
-    }
-
-    fs.mkdirSync(destDir, { recursive: true })
-
-    const files = fs.readdirSync(this.dataDir).filter(f => f.endsWith('.jsonl'))
-    for (const file of files) {
-      const src = path.join(this.dataDir, file)
-      const dest = path.join(destDir, file)
-      this.copyFileDurably(src, dest)
-    }
-  }
-
-  private copySettingsFile(destDir: string): void {
-    // MF-02: also back up settings.json (baby name, birthdate, familyId, Firebase creds)
-    const settingsSrc = path.join(path.dirname(this.dataDir), 'settings.json')
-    if (fs.existsSync(settingsSrc)) {
-      this.copyFileDurably(settingsSrc, path.join(destDir, 'settings.json'))
-    }
-  }
-
-  private backupDestination(root: string, timestamp: string): string {
+  private backupDestination(root: string, timestamp: string, snapshotTimestamp: string): string {
     fs.mkdirSync(root, { recursive: true })
     const finalPath = path.join(root, timestamp)
     if (fs.existsSync(finalPath)) {
@@ -180,9 +147,12 @@ export class BackupManager {
     }
     const stagingPath = fs.mkdtempSync(path.join(root, `${timestamp}.tmp-`))
     try {
-      this.copyDataFiles(stagingPath)
-      this.copySettingsFile(stagingPath)
-      this.syncDirectory(stagingPath)
+      stageVerifiedBackupSnapshot(
+        this.userDataPath,
+        stagingPath,
+        snapshotTimestamp,
+        this.platform,
+      )
       fs.renameSync(stagingPath, finalPath)
       this.syncDirectory(root)
       return finalPath
@@ -238,7 +208,7 @@ export class BackupManager {
     for (const target of targets) {
       const finalPath = path.join(target.root, timestamp)
       try {
-        const durablePath = this.backupDestination(target.root, timestamp)
+        const durablePath = this.backupDestination(target.root, timestamp, now.toISOString())
         succeeded.push(target.destination)
         console.log(`[Backup] Backed up to ${durablePath}`)
       } catch (error) {

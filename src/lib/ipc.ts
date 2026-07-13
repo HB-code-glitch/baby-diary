@@ -27,6 +27,7 @@ import {
 import {
   canonicalBabyInfoMutationJson,
   getBabyInfoMutationKey,
+  isValidBabyInfoMutationKey,
   makeLegacyLocalBabyInfoMutation,
   normalizeBabyInfoSyncState,
   resolveLatestBabyInfoMutation,
@@ -53,6 +54,7 @@ declare global {
       commitBabyInfo: (operation: BabyInfoSettingsCommitOperation) => Promise<BabyInfoCommitIpcResponse>
       listPendingBabyInfo: (request: BabyInfoPendingPageRequest) => Promise<BabyInfoPendingPage>
       getBabyInfoSummary: (familyId: string) => Promise<BabyInfoJournalSummary>
+      getBabyInfoMutation: (familyId: string, key: string) => Promise<BabyInfoMutation | undefined>
       exportData: (format: ExportFormat) => Promise<void>
       openBackupFolder: () => Promise<void>
       getDataInfo: () => Promise<DataInfo>
@@ -184,7 +186,10 @@ function mockMigrateLegacy(current: AppSettings, state: MockJournalState): AppSe
       const key = getBabyInfoMutationKey(mutation)
       if (!pending.has(key) && !state.acknowledgedKeys.includes(key)) state.acknowledgedKeys.push(key)
     }
-  } else if (current.familyId && !state.mutations.some(item => item.familyId === current.familyId)) {
+  } else if (current.familyId
+    && current.babyInfoJournal === undefined
+    && state.mutations.length === 0
+    && state.acknowledgedKeys.length === 0) {
     const legacy = makeLegacyLocalBabyInfoMutation(
       current.familyId,
       current.baby.name,
@@ -193,17 +198,44 @@ function mockMigrateLegacy(current: AppSettings, state: MockJournalState): AppSe
     if (legacy) mockAppendMutation(state, legacy)
   }
   const summary = current.familyId ? mockSummary(state, current.familyId) : undefined
+  const winner = summary?.winner
   return {
     ...current,
-    baby: summary?.winner
-      ? { ...current.baby, name: summary.winner.babyName, birthdate: summary.winner.babyBirthdate }
-      : current.baby,
+    baby: winner
+      ? { ...current.baby, name: winner.babyName, birthdate: winner.babyBirthdate }
+      : current.familyId
+        ? { ...current.baby, name: '', birthdate: '' }
+        : current.baby,
     babyInfoSync: undefined,
     babyInfoJournal: {
       version: 1,
       projectedFamilyId: current.familyId,
+      projectedWinnerKey: winner ? getBabyInfoMutationKey(winner) : undefined,
+    },
+  }
+}
+
+function mockProjectFamily(
+  current: AppSettings,
+  state: MockJournalState,
+  familyId: string,
+): AppSettings {
+  const summary = familyId ? mockSummary(state, familyId) : undefined
+  return {
+    ...current,
+    familyId,
+    baby: {
+      ...current.baby,
+      name: summary?.winner?.babyName ?? '',
+      birthdate: summary?.winner?.babyBirthdate ?? '',
+    },
+    babyInfoSync: undefined,
+    babyInfoJournal: {
+      version: 1,
+      projectedFamilyId: familyId,
       projectedWinnerKey: summary?.winner ? getBabyInfoMutationKey(summary.winner) : undefined,
     },
+    babyInfoRevision: incrementBabyInfoRevision(current),
   }
 }
 
@@ -211,6 +243,35 @@ function mockCommit(rawOperation: unknown): BabyInfoSettingsCommitResult {
   const operation = parseBabyInfoSettingsCommitOperation(rawOperation)
   const journal = mockGetJournal()
   let current = mockMigrateLegacy(mockGetSettings(), journal)
+
+  if (operation.kind === 'family-transition') {
+    if (operation.mode === 'create' && current.familyId !== '') {
+      throw new BabyInfoSettingsCommitError('FAMILY_MISMATCH', 'family creation requires no family')
+    }
+    let mutation: BabyInfoMutation | undefined
+    if (operation.mode === 'create') {
+      mutation = makeLegacyLocalBabyInfoMutation(
+        operation.familyId,
+        current.baby.name,
+        current.baby.birthdate,
+      )
+      if (mutation) mockAppendMutation(journal, mutation)
+    }
+    current = mockProjectFamily(current, journal, operation.familyId)
+    mockWriteJournal(journal)
+    mockWriteSettings(current)
+    const summary = mockSummary(journal, operation.familyId)
+    return {
+      kind: 'family-transition',
+      settings: current,
+      babyInfo: summary.pendingCount > 0 ? 'pending' : 'unchanged',
+      mutation,
+      pendingCount: mockTotalPending(journal),
+      activePendingCount: summary.pendingCount,
+      winner: summary.winner,
+    }
+  }
+
   if (operation.familyId !== current.familyId) {
     throw new BabyInfoSettingsCommitError('FAMILY_MISMATCH', 'baby info family mismatch')
   }
@@ -325,12 +386,22 @@ const mockBabyDiary: Window['babyDiary'] = {
     return 'ok'
   },
   getSettings: async () => mockGetSettings(),
-  saveSettings: async settings => mockWriteSettings(
-    applyManagedSettingsSave(mockGetSettings(), settings),
-  ),
-  mergeSettings: async partial => mockWriteSettings(
-    applyManagedSettingsMerge(mockGetSettings(), partial),
-  ),
+  saveSettings: async settings => {
+    const journal = mockGetJournal()
+    const current = mockMigrateLegacy(mockGetSettings(), journal)
+    let next = applyManagedSettingsSave(current, settings)
+    if (next.familyId !== current.familyId) next = mockProjectFamily(next, journal, next.familyId)
+    mockWriteJournal(journal)
+    return mockWriteSettings(next)
+  },
+  mergeSettings: async partial => {
+    const journal = mockGetJournal()
+    const current = mockMigrateLegacy(mockGetSettings(), journal)
+    let next = applyManagedSettingsMerge(current, partial)
+    if (next.familyId !== current.familyId) next = mockProjectFamily(next, journal, next.familyId)
+    mockWriteJournal(journal)
+    return mockWriteSettings(next)
+  },
   commitBabyInfo: async operation => {
     try {
       return { ok: true, value: mockCommit(operation) }
@@ -374,6 +445,12 @@ const mockBabyDiary: Window['babyDiary'] = {
     }
   },
   getBabyInfoSummary: async familyId => mockSummary(mockGetJournal(), familyId),
+  getBabyInfoMutation: async (familyId, key) => {
+    const validFamilyId = assertFamilyId(familyId)
+    if (!isValidBabyInfoMutationKey(key)) throw new Error('invalid baby info mutation key')
+    const candidate = mockGetJournal().mutations.find(item => getBabyInfoMutationKey(item) === key)
+    return candidate?.familyId === validFamilyId ? candidate : undefined
+  },
   exportData: async () => { throw new Error('ELECTRON_ONLY') },
   openBackupFolder: async () => { throw new Error('ELECTRON_ONLY') },
   getDataInfo: async () => ({
@@ -446,6 +523,8 @@ export const ipc = {
     getApi().listPendingBabyInfo(request),
   getBabyInfoSummary: (familyId: string): Promise<BabyInfoJournalSummary> =>
     getApi().getBabyInfoSummary(familyId),
+  getBabyInfoMutation: (familyId: string, key: string): Promise<BabyInfoMutation | undefined> =>
+    getApi().getBabyInfoMutation(familyId, key),
   exportData: (format: ExportFormat) => getApi().exportData(format),
   openBackupFolder: (): Promise<void> => getApi().openBackupFolder(),
   getDataInfo: (): Promise<DataInfo> => getApi().getDataInfo(),

@@ -38,16 +38,19 @@ describe('baby info mutation resolver', () => {
 
   it('creates a deterministic legacy-cloud bridge bound to the prior winner key', () => {
     const prior = mutation({ babyName: 'Prior', logicalClock: 8 })
+    const priorKey = getBabyInfoMutationKey(prior)
     const first = makeLegacyCloudBridgeBabyInfoMutation(
       FAMILY_ID,
       'Old client edit',
       '2026-06-06',
+      priorKey,
       prior,
     )
     const second = makeLegacyCloudBridgeBabyInfoMutation(
       FAMILY_ID,
       'Old client edit',
       '2026-06-06',
+      priorKey,
       { ...prior },
     )
 
@@ -64,8 +67,16 @@ describe('baby info mutation resolver', () => {
       FAMILY_ID,
       prior.babyName,
       prior.babyBirthdate,
+      priorKey,
       prior,
     )).toBeUndefined()
+    expect(() => makeLegacyCloudBridgeBabyInfoMutation(
+      FAMILY_ID,
+      'Old client edit',
+      '2026-06-06',
+      getBabyInfoMutationKey(mutation({ mutationId: '00000000-0000-4000-8000-000000000002' })),
+      prior,
+    )).toThrow(/marker key mismatch/i)
   })
   it('treats a missing state as the empty versioned state', () => {
     expect(normalizeBabyInfoSyncState(undefined)).toEqual({

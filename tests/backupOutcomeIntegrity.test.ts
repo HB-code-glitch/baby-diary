@@ -2,6 +2,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { BabyInfoJournal } from '../electron/store/babyInfoJournal'
+import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
+import type { AppSettings, BabyInfoMutation } from '../shared/types'
 
 const electronPath = vi.hoisted(() => ({ documents: '' }))
 vi.mock('electron', () => ({
@@ -23,7 +26,30 @@ function writeSourceData(userData: string) {
   const data = path.join(userData, 'data')
   fs.mkdirSync(data, { recursive: true })
   fs.writeFileSync(path.join(data, '2026-07.jsonl'), '{"safe":true}\n', 'utf8')
-  fs.writeFileSync(path.join(userData, 'settings.json'), '{"familyId":"keep"}', 'utf8')
+  const mutation: BabyInfoMutation = {
+    mutationId: '30000000-0000-4000-8000-000000000002',
+    familyId: 'keep',
+    babyName: 'Safe',
+    babyBirthdate: '2026-01-01',
+    logicalClock: 1,
+    updatedAt: FIRST_NOW.toISOString(),
+    authorId: 'user-1',
+    origin: 'user',
+  }
+  new BabyInfoJournal(userData).ingest('keep', [mutation], [])
+  const settings: AppSettings = {
+    baby: { name: 'Safe', birthdate: '2026-01-01' },
+    profile: { uid: 'user-1', name: 'Parent', role: 'mom' },
+    familyId: 'keep',
+    firebase: null,
+    babyInfoJournal: {
+      version: 1,
+      projectedFamilyId: 'keep',
+      projectedWinnerKey: getBabyInfoMutationKey(mutation),
+    },
+    babyInfoRevision: 1,
+  }
+  fs.writeFileSync(path.join(userData, 'settings.json'), JSON.stringify(settings), 'utf8')
 }
 
 function precreateCollision(directory: string, stamp: string, value: string) {
@@ -87,8 +113,9 @@ describe('BackupManager destination outcomes and durability state', () => {
     expect(result.succeeded).toEqual(['userData'])
     expect(result.failed.map(failure => failure.destination)).toEqual(['documents'])
     expect(manager.getLastBackupTime()).toBe(FIRST_NOW.toISOString())
-    expect(fs.readFileSync(path.join(paths.userDataBackupDir, FIRST_STAMP, '2026-07.jsonl'), 'utf8')).toBe('{"safe":true}\n')
-    expect(fs.readFileSync(path.join(paths.userDataBackupDir, FIRST_STAMP, 'settings.json'), 'utf8')).toBe('{"familyId":"keep"}')
+    expect(fs.readFileSync(path.join(paths.userDataBackupDir, FIRST_STAMP, 'data', '2026-07.jsonl'), 'utf8')).toBe('{"safe":true}\n')
+    expect(JSON.parse(fs.readFileSync(path.join(paths.userDataBackupDir, FIRST_STAMP, 'settings.json'), 'utf8')).familyId).toBe('keep')
+    expect(fs.existsSync(path.join(paths.userDataBackupDir, FIRST_STAMP, 'manifest.json'))).toBe(true)
     expect(fs.readFileSync(path.join(blockedDocuments, 'sentinel.txt'), 'utf8')).toBe('do-not-overwrite')
     expect(fs.readdirSync(paths.userDataBackupDir).some(name => name.includes('.tmp-'))).toBe(false)
   })
@@ -131,8 +158,8 @@ describe('BackupManager destination outcomes and durability state', () => {
 
     await expect(manager.backup()).rejects.toBeInstanceOf(BackupAllDestinationsError)
     expect(manager.getLastBackupTime()).toBe(FIRST_NOW.toISOString())
-    expect(fs.readFileSync(path.join(paths.userDataBackupDir, FIRST_STAMP, '2026-07.jsonl'), 'utf8')).toBe('{"safe":true}\n')
-    expect(fs.readFileSync(path.join(paths.documentsBackupDir, FIRST_STAMP, 'settings.json'), 'utf8')).toBe('{"familyId":"keep"}')
+    expect(fs.readFileSync(path.join(paths.userDataBackupDir, FIRST_STAMP, 'data', '2026-07.jsonl'), 'utf8')).toBe('{"safe":true}\n')
+    expect(JSON.parse(fs.readFileSync(path.join(paths.documentsBackupDir, FIRST_STAMP, 'settings.json'), 'utf8')).familyId).toBe('keep')
   })
 
   it('coalesces overlapping backup requests so they cannot collide on the same timestamp', async () => {

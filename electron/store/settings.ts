@@ -17,17 +17,20 @@ import {
   BabyInfoSettingsCommitError,
   incrementBabyInfoRevision,
   parseAppSettings,
+  parseAppSettingsWithLegacyDefaults,
   parseBabyInfoSettingsCommitOperation,
   type DeepPartial,
 } from '../../shared/babyInfoSettingsCommit'
 import {
   canonicalBabyInfoMutationJson,
   getBabyInfoMutationKey,
+  isValidBabyInfoMutationKey,
   makeLegacyLocalBabyInfoMutation,
   normalizeBabyInfoSyncState,
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
 import { BabyInfoJournal } from './babyInfoJournal'
+import { recoverSettingsAndJournalPair, SettingsRecoveryError } from './backupSnapshot'
 import { atomicReplaceFileSync } from './durableFs'
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -57,16 +60,6 @@ function tryParse(raw: string): AppSettings | null {
   }
 }
 
-function mergeDefaults(parsed: AppSettings): AppSettings {
-  return {
-    ...DEFAULT_SETTINGS,
-    ...parsed,
-    baby: { ...DEFAULT_SETTINGS.baby, ...(parsed.baby ?? {}) },
-    profile: { ...DEFAULT_SETTINGS.profile, ...(parsed.profile ?? {}) },
-    firebase: parsed.firebase ?? DEFAULT_SETTINGS.firebase,
-  }
-}
-
 function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
@@ -85,7 +78,7 @@ function parsePendingPageRequest(value: unknown): BabyInfoPendingPageRequest {
   if (keys.some(key => key !== 'familyId' && key !== 'limit' && key !== 'afterKey')
     || typeof record.familyId !== 'string'
     || !Number.isInteger(record.limit)
-    || (record.afterKey !== undefined && typeof record.afterKey !== 'string')) {
+    || (record.afterKey !== undefined && !isValidBabyInfoMutationKey(record.afterKey))) {
     throw new Error('baby info pending page request is invalid')
   }
   return {
@@ -102,67 +95,41 @@ export class SettingsStore {
 
   constructor(userDataPath: string) {
     this.settingsPath = path.join(userDataPath, 'settings.json')
+    recoverSettingsAndJournalPair(userDataPath)
     this.load()
     this.journal = new BabyInfoJournal(userDataPath)
     this.recoverJournalProjection()
   }
 
   private load(): void {
-    if (!fs.existsSync(this.settingsPath)) return
+    if (!fs.existsSync(this.settingsPath)) {
+      this.settings = {
+        ...DEFAULT_SETTINGS,
+        baby: { ...DEFAULT_SETTINGS.baby },
+        profile: { ...DEFAULT_SETTINGS.profile },
+      }
+      return
+    }
     let raw: string
     try {
       raw = fs.readFileSync(this.settingsPath, 'utf8')
-    } catch {
-      return
+    } catch (error) {
+      throw new SettingsRecoveryError(
+        `Unable to read settings.json: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
 
     const parsed = tryParse(raw)
-    if (parsed !== null) {
-      this.settings = mergeDefaults(parsed)
-      return
+    if (parsed === null) {
+      throw new SettingsRecoveryError('settings.json became invalid after startup recovery')
     }
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const backupPath = `${this.settingsPath}.corrupt-${timestamp}.bak`
     try {
-      fs.copyFileSync(this.settingsPath, backupPath)
-      console.error(`[Settings] Corrupt settings.json - saved backup to ${backupPath}`)
+      this.settings = parseAppSettingsWithLegacyDefaults(parsed)
     } catch (error) {
-      console.error('[Settings] Could not write corrupt-settings backup:', error)
+      throw new SettingsRecoveryError(
+        `settings.json failed strict validation: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
-
-    const restored = this.tryRestoreFromBackups(path.join(path.dirname(this.settingsPath), 'backups'))
-    if (restored !== null) {
-      this.settings = restored
-      return
-    }
-    this.settings = { ...DEFAULT_SETTINGS }
-  }
-
-  private tryRestoreFromBackups(backupsDir: string): AppSettings | null {
-    if (!fs.existsSync(backupsDir)) return null
-    let entries: fs.Dirent[]
-    try {
-      entries = fs.readdirSync(backupsDir, { withFileTypes: true })
-    } catch {
-      return null
-    }
-    const directories = entries
-      .filter(entry => entry.isDirectory())
-      .map(entry => entry.name)
-      .sort()
-      .reverse()
-    for (const directory of directories) {
-      const candidate = path.join(backupsDir, directory, 'settings.json')
-      try {
-        if (!fs.existsSync(candidate)) continue
-        const parsed = tryParse(fs.readFileSync(candidate, 'utf8'))
-        if (parsed !== null) return mergeDefaults(parsed)
-      } catch {
-        // Continue to the next independently persisted snapshot.
-      }
-    }
-    return null
   }
 
   get(): AppSettings {
@@ -204,12 +171,29 @@ export class SettingsStore {
     }
   }
 
+  private projectFamily(settings: AppSettings, familyId: string): AppSettings {
+    const winner = familyId ? this.journal.getSummary(familyId).winner : undefined
+    return {
+      ...settings,
+      familyId,
+      baby: {
+        ...settings.baby,
+        name: winner?.babyName ?? '',
+        birthdate: winner?.babyBirthdate ?? '',
+      },
+      babyInfoSync: undefined,
+      babyInfoJournal: this.projectionMetadata(familyId, winner),
+      babyInfoRevision: incrementBabyInfoRevision(settings),
+    }
+  }
+
   /**
    * Import the legacy settings source only after the journal is durable, then
    * recover a possibly interrupted settings projection from the journal index.
    */
   private recoverJournalProjection(): void {
     const current = parseAppSettings(this.settings)
+    const journalWasEmpty = !this.journal.hasAnyRecords()
     let sourceRemoved = false
 
     if (current.babyInfoSync !== undefined) {
@@ -222,7 +206,10 @@ export class SettingsStore {
     if (current.familyId) {
       assertFamilyId(current.familyId)
       let summary = this.journal.getSummary(current.familyId)
-      if (summary.mutationCount === 0 && current.babyInfoSync === undefined) {
+      if (summary.mutationCount === 0
+        && current.babyInfoSync === undefined
+        && current.babyInfoJournal === undefined
+        && journalWasEmpty) {
         const legacy = makeLegacyLocalBabyInfoMutation(
           current.familyId,
           current.baby.name,
@@ -234,18 +221,16 @@ export class SettingsStore {
     }
 
     const metadata = this.projectionMetadata(current.familyId, winner)
-    const pairChanged = Boolean(winner) && (
-      current.baby.name !== winner!.babyName
-      || current.baby.birthdate !== winner!.babyBirthdate
-    )
+    const desiredName = winner?.babyName ?? (current.familyId ? '' : current.baby.name)
+    const desiredBirthdate = winner?.babyBirthdate ?? (current.familyId ? '' : current.baby.birthdate)
+    const pairChanged = current.baby.name !== desiredName
+      || current.baby.birthdate !== desiredBirthdate
     const metadataChanged = !sameValue(current.babyInfoJournal, metadata)
     if (!sourceRemoved && !pairChanged && !metadataChanged) return
 
     const next: AppSettings = {
       ...current,
-      baby: winner
-        ? { ...current.baby, name: winner.babyName, birthdate: winner.babyBirthdate }
-        : current.baby,
+      baby: { ...current.baby, name: desiredName, birthdate: desiredBirthdate },
       babyInfoSync: undefined,
       babyInfoJournal: metadata,
       babyInfoRevision: incrementBabyInfoRevision(current),
@@ -256,7 +241,9 @@ export class SettingsStore {
   save(settings: AppSettings): AppSettings {
     this.load()
     this.recoverJournalProjection()
-    const next = applyManagedSettingsSave(this.settings, settings)
+    const currentFamilyId = this.settings.familyId
+    let next = applyManagedSettingsSave(this.settings, settings)
+    if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
     this.write(next)
     return this.get()
   }
@@ -264,7 +251,9 @@ export class SettingsStore {
   merge(partial: DeepPartial<AppSettings>): AppSettings {
     this.load()
     this.recoverJournalProjection()
-    const next = applyManagedSettingsMerge(this.settings, partial)
+    const currentFamilyId = this.settings.familyId
+    let next = applyManagedSettingsMerge(this.settings, partial)
+    if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
     this.write(next)
     return this.get()
   }
@@ -281,10 +270,45 @@ export class SettingsStore {
     return this.journal.getSummary(assertFamilyId(familyId))
   }
 
+  getBabyInfoMutation(familyId: string, key: string): BabyInfoMutation | undefined {
+    return this.journal.getMutation(assertFamilyId(familyId), key)
+  }
+
   commitBabyInfo(rawOperation: unknown): BabyInfoSettingsCommitResult {
-    this.load()
     const operation = parseBabyInfoSettingsCommitOperation(rawOperation)
     let current = parseAppSettings(this.settings)
+
+    if (operation.kind === 'family-transition') {
+      this.recoverJournalProjection()
+      current = parseAppSettings(this.settings)
+      if (operation.mode === 'create' && current.familyId !== '') {
+        throw new BabyInfoSettingsCommitError(
+          'FAMILY_MISMATCH',
+          'family creation can adopt only an unlinked local pair',
+        )
+      }
+      let mutation: BabyInfoMutation | undefined
+      if (operation.mode === 'create') {
+        mutation = makeLegacyLocalBabyInfoMutation(
+          operation.familyId,
+          current.baby.name,
+          current.baby.birthdate,
+        )
+        if (mutation) this.journal.ingest(operation.familyId, [mutation], [])
+      }
+      const next = this.projectFamily(current, operation.familyId)
+      this.write(next)
+      const summary = this.journal.getSummary(operation.familyId)
+      return {
+        kind: 'family-transition',
+        settings: this.get(),
+        babyInfo: summary.pendingCount > 0 ? 'pending' : 'unchanged',
+        mutation,
+        pendingCount: this.journal.getTotalPendingCount(),
+        activePendingCount: summary.pendingCount,
+        winner: summary.winner,
+      }
+    }
 
     if (operation.familyId !== current.familyId) {
       throw new BabyInfoSettingsCommitError('FAMILY_MISMATCH', 'baby info family mismatch')

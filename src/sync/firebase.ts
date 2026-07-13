@@ -19,10 +19,13 @@ import { AppSettings } from '../../shared/types'
 import { ipc } from '../lib/ipc'
 
 const APP_NAME = 'baby-diary'
+const OWNED_APP_SESSION = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 
 let _app: FirebaseApp | null = null
 let _db: Firestore | null = null
 let _auth: Auth | null = null
+let _ownerToken: string | null = null
+let _requestVersion = 0
 
 export type FirebaseConfig = NonNullable<AppSettings['firebase']>
 
@@ -35,21 +38,32 @@ export type FirebaseConfig = NonNullable<AppSettings['firebase']>
  * is fetched only when this function is first called (after first paint).
  */
 export async function initFirebase(
-  config: FirebaseConfig | null
+  config: FirebaseConfig | null,
+  ownerToken = 'default',
 ): Promise<{ db: Firestore; auth: Auth } | null> {
   if (!config) {
     return null
   }
 
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(ownerToken)) {
+    throw new Error('invalid Firebase owner token')
+  }
+
   // 이미 동일 projectId로 초기화되어 있으면 재사용
-  if (_app && _db && _auth) {
+  if (_app && _db && _auth && _ownerToken === ownerToken) {
     return { db: _db, auth: _auth }
   }
+
+  const requestVersion = ++_requestVersion
+  const appName = ownerToken === 'default'
+    ? APP_NAME
+    : `${APP_NAME}-${OWNED_APP_SESSION}-${ownerToken}`
 
   // The main process exposes emulator endpoints only for an explicitly
   // isolated E2E profile. Validate before initializeApp so a malformed test
   // configuration can never fall through to production Firebase.
   const emulator = await ipc.getFirebaseEmulator()
+  if (requestVersion !== _requestVersion) return null
   if (emulator && !emulator.enabled) {
     throw new Error(`Firebase emulator configuration rejected: ${emulator.reason}`)
   }
@@ -71,14 +85,16 @@ export async function initFirebase(
     getAuth,
     connectAuthEmulator,
   } = await import('firebase/auth')
+  if (requestVersion !== _requestVersion) return null
 
   // 기존 앱이 있으면 삭제 후 재생성 (설정 변경 시)
-  const existing = getApps().find(a => a.name === APP_NAME)
+  const existing = getApps().find(a => a.name === appName)
   if (existing) {
     await deleteApp(existing)
+    if (requestVersion !== _requestVersion) return null
   }
 
-  const app = initializeApp(config, APP_NAME)
+  const app = initializeApp(config, appName)
 
   // Electron renderer에서는 IndexedDB 기반 persistentLocalCache 사용
   // 오프라인에서도 캐시된 데이터 읽기/쓰기 가능
@@ -112,9 +128,19 @@ export async function initFirebase(
     throw error
   }
 
+  if (requestVersion !== _requestVersion) {
+    void deleteApp(app).catch(() => undefined)
+    return null
+  }
+
+  const previousApp = _app
   _app = app
   _db = db
   _auth = auth
+  _ownerToken = ownerToken
+  if (previousApp && previousApp !== app) {
+    void deleteApp(previousApp).catch(() => undefined)
+  }
 
   return { db: _db, auth: _auth }
 }
@@ -177,11 +203,14 @@ export async function fbSignOut(auth: Auth): Promise<void> {
 
 /** Firebase 앱 종료 (설정 변경 또는 앱 종료 시) */
 export async function teardownFirebase(): Promise<void> {
-  if (_app) {
-    const { deleteApp } = await import('firebase/app')
-    await deleteApp(_app)
-  }
+  ++_requestVersion
+  const app = _app
   _app = null
   _db = null
   _auth = null
+  _ownerToken = null
+  if (app) {
+    const { deleteApp } = await import('firebase/app')
+    await deleteApp(app)
+  }
 }

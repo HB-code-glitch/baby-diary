@@ -87,6 +87,15 @@ export function getBabyInfoMutationKey(mutation: BabyInfoMutation): string {
   return `baby-info:${mutation.mutationId}:${contentId}`
 }
 
+export function isValidBabyInfoMutationKey(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 160) return false
+  const parts = value.split(':')
+  return parts.length === 3
+    && parts[0] === 'baby-info'
+    && isValidMutationId(parts[1])
+    && isValidMutationId(parts[2])
+}
+
 function originRank(origin: BabyInfoMutationOrigin): number {
   if (origin === 'legacy-cloud') return 0
   if (origin === 'legacy-local') return 1
@@ -207,11 +216,16 @@ export function makeLegacyCloudBridgeBabyInfoMutation(
   familyId: string,
   babyName: string,
   babyBirthdate: string,
+  priorWinnerKey: string,
   priorWinner: BabyInfoMutation,
 ): BabyInfoMutation | undefined {
   canonicalBabyInfoMutationJson(priorWinner)
   if (!isValidFamilyId(familyId) || priorWinner.familyId !== familyId) {
     throw new Error('legacy cloud bridge family mismatch')
+  }
+  if (!isValidBabyInfoMutationKey(priorWinnerKey)
+    || getBabyInfoMutationKey(priorWinner) !== priorWinnerKey) {
+    throw new Error('legacy cloud bridge marker key mismatch')
   }
   if (babyName === priorWinner.babyName && babyBirthdate === priorWinner.babyBirthdate) {
     return undefined
@@ -220,7 +234,6 @@ export function makeLegacyCloudBridgeBabyInfoMutation(
     throw new Error('legacy cloud bridge logical clock exhausted')
   }
 
-  const priorWinnerKey = getBabyInfoMutationKey(priorWinner)
   const canonicalSource = JSON.stringify({
     familyId,
     babyName,
