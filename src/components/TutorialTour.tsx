@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { Page } from './Sidebar'
 import { TutorialCard } from './TutorialCard'
 import {
@@ -36,6 +37,75 @@ const SPOTLIGHT_PADDING = 6
 const CARD_WIDTH = 400
 const EDGE_GAP = 12
 const TARGET_GAP = 12
+const TARGET_REVEAL_DELAY_MS = 180
+const TARGET_WAIT_TIMEOUT_MS = 2500
+
+interface WaitForTutorialTargetOptions<Target> {
+  findTarget: () => Target | null
+  observe: (onMutation: () => void) => () => void
+  scheduleFallback: (onTimeout: () => void) => () => void
+  onResolve: (target: Target | null) => void
+}
+
+interface TutorialPresentation {
+  stepIndex: number
+  targetRect: Rect | null
+}
+
+export function presentationForTutorialStep<Presentation extends { stepIndex: number }>(
+  presentation: Presentation | null,
+  stepIndex: number,
+): Presentation | null {
+  return presentation?.stepIndex === stepIndex ? presentation : null
+}
+
+export function waitForTutorialTarget<Target>({
+  findTarget,
+  observe,
+  scheduleFallback,
+  onResolve,
+}: WaitForTutorialTargetOptions<Target>): () => void {
+  let settled = false
+  let stopObserving: (() => void) | null = null
+  let cancelFallback: (() => void) | null = null
+
+  const releaseResources = () => {
+    const stop = stopObserving
+    const cancel = cancelFallback
+    stopObserving = null
+    cancelFallback = null
+    stop?.()
+    cancel?.()
+  }
+
+  const settle = (target: Target | null) => {
+    if (settled) return
+    settled = true
+    releaseResources()
+    onResolve(target)
+  }
+
+  const findAndResolve = () => {
+    const target = findTarget()
+    if (target) settle(target)
+  }
+
+  findAndResolve()
+  if (!settled) {
+    stopObserving = observe(findAndResolve)
+    if (settled) releaseResources()
+  }
+  if (!settled) {
+    cancelFallback = scheduleFallback(() => settle(null))
+    if (settled) releaseResources()
+  }
+
+  return () => {
+    if (settled) return
+    settled = true
+    releaseResources()
+  }
+}
 
 function currentViewport(): Viewport {
   if (typeof window === 'undefined') return { width: 960, height: 640 }
@@ -142,16 +212,17 @@ function isBlockedInteractiveTarget(target: EventTarget | null, primary: HTMLBut
 
 export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
   const [stepIndex, setStepIndex] = useState(0)
-  const [targetRect, setTargetRect] = useState<Rect | null>(null)
+  const [resolvedPresentation, setResolvedPresentation] = useState<TutorialPresentation | null>(null)
   const [cardHeight, setCardHeight] = useState(0)
-  const [visible, setVisible] = useState(false)
   const [viewport, setViewport] = useState<Viewport>(currentViewport)
   const cardRef = useRef<HTMLElement>(null)
-  const measureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const measureFrameRef = useRef<number | null>(null)
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previousPageRef = useRef<Page | null>(null)
 
   const step = TUTORIAL_STEPS[stepIndex]
+  const presentation = presentationForTutorialStep(resolvedPresentation, stepIndex)
+  const targetRect = presentation?.targetRect ?? null
+  const visible = presentation !== null
   const compact = viewport.width <= 720 || viewport.height <= 600
 
   const handleSkip = useCallback(() => {
@@ -172,44 +243,33 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
     setStepIndex(index => Math.max(0, index - 1))
   }, [])
 
-  const measureTarget = useCallback(() => {
-    if (!step.targetSelector) {
-      setTargetRect(null)
-      setVisible(true)
-      return
-    }
-
-    const target = document.querySelector(step.targetSelector)
-    if (!target) {
-      setTargetRect(null)
-      setVisible(true)
-      return
-    }
-
-    setTargetRect(measureTutorialTarget(target, currentViewport()))
-    setVisible(true)
-  }, [step.targetSelector])
+  const measureCurrentTarget = useCallback(() => {
+    const target = step.targetSelector
+      ? document.querySelector<HTMLElement>(step.targetSelector)
+      : null
+    setResolvedPresentation({
+      stepIndex,
+      targetRect: target ? measureTutorialTarget(target, currentViewport()) : null,
+    })
+  }, [step.targetSelector, stepIndex])
 
   useIsomorphicLayoutEffect(() => {
-    const background = Array.from(document.querySelectorAll<HTMLElement>('.sidebar, .main-content'))
-    const previousInert = background.map(element => ({
-      element,
-      value: element.getAttribute('inert'),
-    }))
+    const background = document.getElementById('root')
+    const previousInert = background?.getAttribute('inert') ?? null
     const previousOverflow = document.body.style.overflow
     const previouslyFocused = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null
     const restoreReplayFocus = previouslyFocused?.matches('[data-tutorial-replay]') ?? false
 
-    background.forEach(element => element.setAttribute('inert', ''))
+    background?.setAttribute('inert', '')
     document.body.style.overflow = 'hidden'
 
     return () => {
-      previousInert.forEach(({ element, value }) => {
-        if (value === null) element.removeAttribute('inert')
-        else element.setAttribute('inert', value)
-      })
+      if (background) {
+        if (previousInert === null) background.removeAttribute('inert')
+        else background.setAttribute('inert', previousInert)
+      }
       document.body.style.overflow = previousOverflow
       if (previouslyFocused?.isConnected) {
         previouslyFocused.focus()
@@ -222,7 +282,7 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
   }, [])
 
   useEffect(() => {
-    setVisible(false)
+    setResolvedPresentation(null)
     setCardHeight(0)
 
     if (step.page !== previousPageRef.current) {
@@ -230,20 +290,46 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
       onNavigate(step.page)
     }
 
-    if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
-    measureTimerRef.current = setTimeout(() => {
-      if (measureFrameRef.current !== null) cancelAnimationFrame(measureFrameRef.current)
-      measureFrameRef.current = requestAnimationFrame(() => {
-        measureFrameRef.current = null
-        measureTarget()
+    let cancelTargetWait: () => void = () => undefined
+    let revealFrame: number | null = null
+    const revealTimer = setTimeout(() => {
+      if (!step.targetSelector) {
+        revealFrame = requestAnimationFrame(() => {
+          revealFrame = null
+          setResolvedPresentation({ stepIndex, targetRect: null })
+        })
+        return
+      }
+
+      cancelTargetWait = waitForTutorialTarget<HTMLElement>({
+        findTarget: () => document.querySelector<HTMLElement>(step.targetSelector!),
+        observe: onMutation => {
+          const observer = new MutationObserver(onMutation)
+          observer.observe(document.body, { childList: true, subtree: true })
+          return () => observer.disconnect()
+        },
+        scheduleFallback: onTimeout => {
+          const timeout = setTimeout(onTimeout, TARGET_WAIT_TIMEOUT_MS)
+          return () => clearTimeout(timeout)
+        },
+        onResolve: target => {
+          revealFrame = requestAnimationFrame(() => {
+            revealFrame = null
+            setResolvedPresentation({
+              stepIndex,
+              targetRect: target ? measureTutorialTarget(target, currentViewport()) : null,
+            })
+          })
+        },
       })
-    }, 180)
+    }, TARGET_REVEAL_DELAY_MS)
 
     return () => {
-      if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
-      if (measureFrameRef.current !== null) cancelAnimationFrame(measureFrameRef.current)
+      clearTimeout(revealTimer)
+      cancelTargetWait()
+      if (revealFrame !== null) cancelAnimationFrame(revealFrame)
     }
-  }, [measureTarget, onNavigate, step.page, stepIndex])
+  }, [onNavigate, step.page, step.targetSelector, stepIndex])
 
   useIsomorphicLayoutEffect(() => {
     if (!visible || !cardRef.current) return
@@ -261,15 +347,18 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
 
   useEffect(() => {
     const handler = () => {
-      if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
-      measureTimerRef.current = setTimeout(() => {
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      resizeTimerRef.current = setTimeout(() => {
         setViewport(currentViewport())
-        measureTarget()
+        if (visible) measureCurrentTarget()
       }, 100)
     }
     window.addEventListener('resize', handler)
-    return () => window.removeEventListener('resize', handler)
-  }, [measureTarget])
+    return () => {
+      window.removeEventListener('resize', handler)
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+    }
+  }, [measureCurrentTarget, visible])
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -301,7 +390,7 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
     ? spotlightGeometry(targetRect)
     : null
 
-  return (
+  const stage = (
     <div className="tour-stage" data-tutorial-active="true">
       {spotlightStyle ? (
         <>
@@ -343,4 +432,6 @@ export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
       )}
     </div>
   )
+
+  return typeof document === 'undefined' ? stage : createPortal(stage, document.body)
 }

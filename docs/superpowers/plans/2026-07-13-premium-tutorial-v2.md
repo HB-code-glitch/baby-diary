@@ -531,7 +531,7 @@ Expected: all tests and type checks PASS; Vite/Electron production build complet
 Build or point the existing E2E harness at the packaged Windows app, then run:
 
 ```powershell
-$env:BABY_DIARY_E2E_APP='C:\path\to\Baby Diary.exe'
+$env:BABYDIARY_E2E_EXECUTABLE='C:\path\to\Baby Diary.exe'
 npm run test:e2e
 ```
 

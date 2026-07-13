@@ -84,6 +84,45 @@ function isInsideViewport(bounds, width, height) {
     && bounds.y + bounds.height <= height
 }
 
+/** Verify every persistent tutorial surface fits a compact viewport without horizontal scrolling. */
+async function assertTourFitsViewport(page, label, width = 720, height = 560) {
+  await page.waitForFunction(() => {
+    const card = document.querySelector('.tour-card')
+    return card && card.getAnimations().every(animation =>
+      animation.playState === 'finished' || animation.playState === 'idle'
+    )
+  }, undefined, { timeout: 2000 })
+
+  const [cardBounds, headerBounds, actionBounds] = await Promise.all([
+    page.locator('.tour-card').boundingBox(),
+    page.locator('.tour-card-header').boundingBox(),
+    page.locator('.tour-actions').boundingBox(),
+  ])
+  assert(isInsideViewport(cardBounds, width, height), `${label} card is inside the compact viewport`)
+  assert(isInsideViewport(headerBounds, width, height), `${label} header is inside the compact viewport`)
+  assert(isInsideViewport(actionBounds, width, height), `${label} actions are inside the compact viewport`)
+
+  const overflow = await page.evaluate(() => {
+    const root = document.documentElement
+    const body = document.body
+    const card = document.querySelector('.tour-card')
+    return {
+      rootClientWidth: root.clientWidth,
+      rootScrollWidth: root.scrollWidth,
+      bodyClientWidth: body.clientWidth,
+      bodyScrollWidth: body.scrollWidth,
+      cardClientWidth: card?.clientWidth ?? 0,
+      cardScrollWidth: card?.scrollWidth ?? Number.POSITIVE_INFINITY,
+    }
+  })
+  assert(
+    overflow.rootScrollWidth <= overflow.rootClientWidth
+      && overflow.bodyScrollWidth <= overflow.bodyClientWidth
+      && overflow.cardScrollWidth <= overflow.cardClientWidth,
+    `${label} has no horizontal overflow`,
+  )
+}
+
 /** Soft-assert: record failures instead of throwing immediately */
 function assert(cond, msg) {
   if (!cond) {
@@ -274,29 +313,53 @@ async function main() {
       'Japanese six-step completion persists tutorial v2 final state',
     )
 
-    // Compact replay: card/actions remain visible and the page does not overflow.
+    // Compact replay: persistent card surfaces fit at representative steps and background stays inert.
     await page.click('[data-tour="nav-settings"]')
     await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
     await page.setViewportSize({ width: 720, height: 560 })
+    const rootInertBeforeTour = await page.locator('#root').evaluate(root => ({
+      property: root.inert,
+      attribute: root.getAttribute('inert'),
+    }))
     await page.click('[data-tutorial-replay]')
     await waitForTourTitle(page, '必要なところから、ゆっくり')
-    const compactBounds = await page.locator('.tour-card').boundingBox()
-    const compactActionBounds = await page.locator('.tour-actions').boundingBox()
-    assert(compactBounds && compactBounds.x >= 0 && compactBounds.y >= 0, 'compact tutorial starts inside viewport')
-    assert(compactBounds && compactBounds.x + compactBounds.width <= 720 && compactBounds.y + compactBounds.height <= 560, 'compact tutorial actions stay visible')
-    assert(isInsideViewport(compactActionBounds, 720, 560), 'compact action row stays inside viewport')
-    const compactOverflow = await page.evaluate(() => ({
-      rootClientWidth: document.documentElement.clientWidth,
-      rootScrollWidth: document.documentElement.scrollWidth,
-      bodyClientWidth: document.body.clientWidth,
-      bodyScrollWidth: document.body.scrollWidth,
-    }))
+    const inertFocusState = await page.evaluate(() => {
+      const root = document.getElementById('root')
+      const primary = document.querySelector('.tour-primary-button')
+      const backgroundButton = document.querySelector('[data-tour="nav-settings"]')
+      const card = document.querySelector('.tour-card')
+      primary?.focus()
+      const primaryReceivedFocus = document.activeElement === primary
+      backgroundButton?.focus()
+      return {
+        rootInert: root?.inert === true && root.hasAttribute('inert'),
+        primaryReceivedFocus,
+        backgroundReceivedFocus: document.activeElement === backgroundButton,
+        focusRemainedInTour: !!card?.contains(document.activeElement),
+      }
+    })
+    assert(inertFocusState.rootInert, '#root is inert while the tutorial is open')
+    assert(inertFocusState.primaryReceivedFocus, 'tutorial primary action receives focus outside the inert root')
     assert(
-      compactOverflow.rootScrollWidth <= compactOverflow.rootClientWidth
-        && compactOverflow.bodyScrollWidth <= compactOverflow.bodyClientWidth,
-      `compact tutorial has no horizontal overflow (${compactOverflow.rootScrollWidth}/${compactOverflow.rootClientWidth}, ${compactOverflow.bodyScrollWidth}/${compactOverflow.bodyClientWidth})`,
+      !inertFocusState.backgroundReceivedFocus && inertFocusState.focusRemainedInTour,
+      'background controls cannot receive programmatic focus while the tutorial is open',
     )
+    await assertTourFitsViewport(page, 'compact welcome')
     await shot(page, 'tutorial-ja-compact-720x560')
+
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-quick-record', { timeout: 5000 })
+    await assertTourFitsViewport(page, 'compact quick-record')
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-today-overview', { timeout: 5000 })
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-navigation', { timeout: 5000 })
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-settings-family', { timeout: 5000 })
+    await assertTourFitsViewport(page, 'compact settings-family')
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-ready', { timeout: 5000 })
+    await assertTourFitsViewport(page, 'compact ready')
 
     // Escape from a Settings replay skips the tour and restores Settings/focus.
     await page.keyboard.press('Escape')
@@ -304,7 +367,15 @@ async function main() {
     await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
     assert(await page.locator('[data-tour="settings-main"]').isVisible(), 'Escape returns a Settings replay to Settings')
     await page.waitForFunction(() => document.activeElement?.matches('[data-tutorial-replay]'))
-    assert(true, 'Escape restores focus to the Settings replay button')
+    const restoredAfterTour = await page.evaluate(before => {
+      const root = document.getElementById('root')
+      return {
+        inertRestored: root?.inert === before.property && root?.getAttribute('inert') === before.attribute,
+        replayFocused: document.activeElement?.matches('[data-tutorial-replay]') === true,
+      }
+    }, rootInertBeforeTour)
+    assert(restoredAfterTour.inertRestored, '#root inert state is restored after the tutorial closes')
+    assert(restoredAfterTour.replayFocused, 'Escape restores focus to the Settings replay button')
 
     // Dark-mode tutorial capture at the full 1200×800 review viewport.
     await page.setViewportSize({ width: 1200, height: 800 })

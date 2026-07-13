@@ -152,4 +152,159 @@ describe('tutorial v2 content', () => {
     expect(oversizedReads).toBe(1)
     expect(oversizedScrolls).toBe(0)
   })
+
+  it('does not reuse a previous step presentation while the next target is unresolved', async () => {
+    const tour = await import('../src/components/TutorialTour')
+    type PresentationForTutorialStep = <Presentation extends { stepIndex: number }>(
+      presentation: Presentation | null,
+      stepIndex: number,
+    ) => Presentation | null
+    const presentationForTutorialStep = (tour as typeof tour & {
+      presentationForTutorialStep?: PresentationForTutorialStep
+    }).presentationForTutorialStep
+    expect(presentationForTutorialStep).toBeTypeOf('function')
+
+    const previousStep = {
+      stepIndex: 3,
+      targetRect: { top: 20, left: 20, width: 180, height: 320 },
+    }
+    const currentStep = {
+      stepIndex: 4,
+      targetRect: { top: 40, left: 520, width: 320, height: 160 },
+    }
+
+    expect(presentationForTutorialStep!(previousStep, 4)).toBeNull()
+    expect(presentationForTutorialStep!(currentStep, 4)).toBe(currentStep)
+    expect(presentationForTutorialStep!(null, 4)).toBeNull()
+  })
+
+  it('waits for a contextual target that appears after the first lookup', async () => {
+    const tour = await import('../src/components/TutorialTour')
+    type WaitForTutorialTarget = <Target>(options: {
+      findTarget: () => Target | null
+      observe: (onMutation: () => void) => () => void
+      scheduleFallback: (onTimeout: () => void) => () => void
+      onResolve: (target: Target | null) => void
+    }) => () => void
+    const waitForTutorialTarget = (tour as typeof tour & {
+      waitForTutorialTarget?: WaitForTutorialTarget
+    }).waitForTutorialTarget
+    expect(waitForTutorialTarget).toBeTypeOf('function')
+
+    const lateTarget = { id: 'settings-sync' }
+    let currentTarget: typeof lateTarget | null = null
+    let notifyMutation: (() => void) | null = null
+    let notifyTimeout: (() => void) | null = null
+    let observerDisconnects = 0
+    let timeoutCancels = 0
+    const resolutions: Array<typeof lateTarget | null> = []
+
+    const cancel = waitForTutorialTarget!({
+      findTarget: () => currentTarget,
+      observe: onMutation => {
+        notifyMutation = onMutation
+        return () => { observerDisconnects += 1 }
+      },
+      scheduleFallback: onTimeout => {
+        notifyTimeout = onTimeout
+        return () => { timeoutCancels += 1 }
+      },
+      onResolve: target => resolutions.push(target),
+    })
+
+    expect(resolutions).toEqual([])
+    currentTarget = lateTarget
+    ;(notifyMutation as (() => void) | null)?.()
+
+    expect(resolutions).toEqual([lateTarget])
+    expect(observerDisconnects).toBe(1)
+    expect(timeoutCancels).toBe(1)
+
+    ;(notifyTimeout as (() => void) | null)?.()
+    cancel()
+    expect(resolutions).toEqual([lateTarget])
+    expect(observerDisconnects).toBe(1)
+    expect(timeoutCancels).toBe(1)
+  })
+
+  it('ignores observer and timeout callbacks after target waiting is cancelled', async () => {
+    const tour = await import('../src/components/TutorialTour')
+    type WaitForTutorialTarget = <Target>(options: {
+      findTarget: () => Target | null
+      observe: (onMutation: () => void) => () => void
+      scheduleFallback: (onTimeout: () => void) => () => void
+      onResolve: (target: Target | null) => void
+    }) => () => void
+    const waitForTutorialTarget = (tour as typeof tour & {
+      waitForTutorialTarget?: WaitForTutorialTarget
+    }).waitForTutorialTarget
+    expect(waitForTutorialTarget).toBeTypeOf('function')
+
+    let notifyMutation: (() => void) | null = null
+    let notifyTimeout: (() => void) | null = null
+    let observerDisconnects = 0
+    let timeoutCancels = 0
+    const resolutions: Array<{ id: string } | null> = []
+
+    const cancel = waitForTutorialTarget!({
+      findTarget: () => null,
+      observe: onMutation => {
+        notifyMutation = onMutation
+        return () => { observerDisconnects += 1 }
+      },
+      scheduleFallback: onTimeout => {
+        notifyTimeout = onTimeout
+        return () => { timeoutCancels += 1 }
+      },
+      onResolve: target => resolutions.push(target),
+    })
+
+    cancel()
+    ;(notifyMutation as (() => void) | null)?.()
+    ;(notifyTimeout as (() => void) | null)?.()
+
+    expect(resolutions).toEqual([])
+    expect(observerDisconnects).toBe(1)
+    expect(timeoutCancels).toBe(1)
+  })
+
+  it('resolves a missing target to the centered fallback when the timeout wins', async () => {
+    const tour = await import('../src/components/TutorialTour')
+    type WaitForTutorialTarget = <Target>(options: {
+      findTarget: () => Target | null
+      observe: (onMutation: () => void) => () => void
+      scheduleFallback: (onTimeout: () => void) => () => void
+      onResolve: (target: Target | null) => void
+    }) => () => void
+    const waitForTutorialTarget = (tour as typeof tour & {
+      waitForTutorialTarget?: WaitForTutorialTarget
+    }).waitForTutorialTarget
+    expect(waitForTutorialTarget).toBeTypeOf('function')
+
+    let notifyMutation: (() => void) | null = null
+    let notifyTimeout: (() => void) | null = null
+    let observerDisconnects = 0
+    let timeoutCancels = 0
+    const resolutions: Array<{ id: string } | null> = []
+
+    waitForTutorialTarget!({
+      findTarget: () => null,
+      observe: onMutation => {
+        notifyMutation = onMutation
+        return () => { observerDisconnects += 1 }
+      },
+      scheduleFallback: onTimeout => {
+        notifyTimeout = onTimeout
+        return () => { timeoutCancels += 1 }
+      },
+      onResolve: target => resolutions.push(target),
+    })
+
+    ;(notifyTimeout as (() => void) | null)?.()
+    ;(notifyMutation as (() => void) | null)?.()
+
+    expect(resolutions).toEqual([null])
+    expect(observerDisconnects).toBe(1)
+    expect(timeoutCancels).toBe(1)
+  })
 })
