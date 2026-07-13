@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DiaryEvent, EventData, EventType } from '../shared/types'
 import i18n from '../src/i18n'
 import { HistoryPage } from '../src/pages/HistoryPage'
-import { useAppStore } from '../src/store/useAppStore'
+import { formatTime, useAppStore } from '../src/store/useAppStore'
 
 const NOW = new Date(2026, 6, 13, 12, 0, 0)
 
@@ -184,7 +184,22 @@ describe('History interactions', () => {
     const preview = container.querySelector<HTMLElement>('[data-history-preview]')!
     expect(preview.textContent).toContain('선택한 날 기록')
     expect(preview.textContent).toContain('총 4건')
-    expect(preview.querySelectorAll('.timeline-item')).toHaveLength(3)
+    const previewItems = Array.from(preview.querySelectorAll<HTMLElement>('.timeline-item'))
+    expect(previewItems).toHaveLength(3)
+
+    const eventByLabel = new Map(events.map(event => [i18n.t(`event.${event.type}`), event]))
+    const renderedPreviewOrder = previewItems.map(item => {
+      const label = item.querySelector('.timeline-content span')?.textContent?.trim() ?? ''
+      return {
+        id: eventByLabel.get(label)?.id,
+        displayedTime: item.querySelector('.timeline-time')?.textContent?.trim(),
+      }
+    })
+    const expectedPreviewOrder = [...events]
+      .sort((a, b) => b.at.localeCompare(a.at))
+      .slice(0, 3)
+      .map(event => ({ id: event.id, displayedTime: formatTime(event.at) }))
+    expect(renderedPreviewOrder).toEqual(expectedPreviewOrder)
 
     const weekTab = container.querySelector<HTMLButtonElement>('[data-history-view="week"]')!
     await act(async () => weekTab.click())

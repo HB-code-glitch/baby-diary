@@ -682,15 +682,16 @@ async function main() {
       'History uses full Korean view labels',
     )
 
-    const historyHitTargets = await page.locator(
-      '[role="tablist"] button[data-history-view], .history-period-nav button, .cal-day .timeline-action-button',
+    const historyToolbarHitTargets = await page.locator(
+      '[role="tablist"] button[data-history-view], .history-period-nav button',
     ).evaluateAll(buttons => buttons.map(button => {
       const rect = button.getBoundingClientRect()
       return { width: rect.width, height: rect.height }
     }))
     assert(
-      historyHitTargets.every(({ width, height }) => width >= 40 && height >= 40),
-      'History toolbar and timeline action hit targets are at least 40px',
+      historyToolbarHitTargets.length >= 6
+        && historyToolbarHitTargets.every(({ width, height }) => width >= 40 && height >= 40),
+      'History toolbar hit targets are at least 40px',
     )
 
     // Selecting a month cell updates only the selected date; it does not drill down.
@@ -711,6 +712,57 @@ async function main() {
     assert(/선택한 날 기록/.test(await historyPreview.textContent()), 'selected-date preview title is localized')
     const previewTimelineCount = await historyPreview.locator('.timeline-item').count()
     assert(previewTimelineCount > 0 && previewTimelineCount <= 3, `preview shows newest three or fewer records (${previewTimelineCount})`)
+
+    const todayEvents = await page.evaluate(async () => {
+      const localDayKey = value => {
+        const date = new Date(value)
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      }
+      const todayKey = localDayKey(new Date())
+      return (await window.babyDiary.listEvents())
+        .filter(event => !event.deleted && localDayKey(event.at) === todayKey)
+    })
+    const previewRows = await historyPreview.locator('.timeline-item').evaluateAll(items => items.map(item => ({
+      label: item.querySelector('.timeline-content span')?.textContent?.trim() ?? '',
+      displayedTime: item.querySelector('.timeline-time')?.textContent?.trim() ?? '',
+    })))
+    const eventTypeByKoreanLabel = {
+      '소변': 'pee',
+      '대변': 'poop',
+      '체온': 'temp',
+      '모유': 'breast',
+      '분유': 'formula',
+      '일기': 'diary',
+      '아기에게': 'message',
+      '수면': 'sleep',
+      '성장': 'growth',
+    }
+    const toDisplayedTime = value => {
+      const date = new Date(value)
+      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+    }
+    const renderedPreviewOrder = previewRows.map(row => {
+      const type = eventTypeByKoreanLabel[row.label]
+      const matchingEvents = todayEvents.filter(event => event.type === type)
+      return {
+        id: matchingEvents.length === 1 ? matchingEvents[0].id : null,
+        displayedTime: row.displayedTime,
+        matchCount: matchingEvents.length,
+      }
+    })
+    const expectedPreviewOrder = [...todayEvents]
+      .sort((a, b) => b.at.localeCompare(a.at))
+      .slice(0, 3)
+      .map(event => ({ id: event.id, displayedTime: toDisplayedTime(event.at) }))
+    assert(
+      renderedPreviewOrder.every(item => item.matchCount === 1),
+      'preview rows map unambiguously to persisted event IDs',
+    )
+    assert(
+      JSON.stringify(renderedPreviewOrder.map(({ id, displayedTime }) => ({ id, displayedTime })))
+        === JSON.stringify(expectedPreviewOrder),
+      'preview exposes the newest three event IDs and displayed times in descending order',
+    )
     await shot(page, 'history-month')
 
     // Week rows also update selection without changing view and contain no time teaser.
@@ -735,6 +787,17 @@ async function main() {
     assert(/전체\s+\d+/.test((await dayAllFilter.textContent()) ?? ''), 'day all-filter includes its count')
     assert(await page.locator('[data-history-filter="sleep"]').count() === 0, 'day hides absent sleep filter')
     assert(await page.locator('[data-history-filter="growth"]').count() === 0, 'day hides absent growth filter')
+    const dayTimelineActions = page.locator('.cal-day .timeline-action-button')
+    const dayTimelineActionCount = await dayTimelineActions.count()
+    assert(dayTimelineActionCount >= 2, `day timeline exposes at least two event actions (${dayTimelineActionCount})`)
+    const dayTimelineActionHitTargets = await dayTimelineActions.evaluateAll(buttons => buttons.map(button => {
+      const rect = button.getBoundingClientRect()
+      return { width: rect.width, height: rect.height }
+    }))
+    assert(
+      dayTimelineActionHitTargets.every(({ width, height }) => width >= 40 && height >= 40),
+      'day timeline action hit targets are at least 40px',
+    )
     await shot(page, 'history-day')
 
     const peeFilter = page.locator('[data-history-filter="pee"]')
