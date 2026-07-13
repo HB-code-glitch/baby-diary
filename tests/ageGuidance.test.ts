@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { HEALTH_EVIDENCE_SOURCES } from '../src/lib/healthEvidence'
@@ -302,6 +303,30 @@ describe('AGE_GUIDANCE_ITEMS', () => {
     }
   })
 
+  it('keeps CDC picky-eater copy within repeated offering and child choices in both languages', () => {
+    for (const id of ['two-years-family-food-oral', 'three-four-nutrition-oral', 'five-years-nutrition-oral']) {
+      const item = AGE_GUIDANCE_ITEMS.find(candidate => candidate.id === id)!
+      const ko = `${item.summaryKo} ${item.actionsKo.join(' ')}`
+      const ja = `${item.summaryJa} ${item.actionsJa.join(' ')}`
+
+      expect(ko, `${id} ko repeated offering`).toMatch(/반복.*제공/)
+      expect(ja, `${id} ja repeated offering`).toMatch(/繰り返.*出/)
+      expect(ko, `${id} ko choices`).toMatch(/선택|고르/)
+      expect(ja, `${id} ja choices`).toMatch(/選択|選/)
+      expect(ko, `${id} ko unsupported force claim`).not.toMatch(/먹는 양.*강요|편식.*강압/)
+      expect(ja, `${id} ja unsupported force claim`).not.toMatch(/食べる量.*強要|好き嫌い.*無理/)
+    }
+
+    const audit = readFileSync(
+      join(process.cwd(), 'docs', 'health-guidance-who-cdc-audit-2026-07-13.md'),
+      'utf8',
+    )
+    const pickyRow = audit.split(/\r?\n/).find(line => line.includes('`cdc-picky-eaters`')) ?? ''
+    expect(pickyRow).toMatch(/반복.*제공/)
+    expect(pickyRow).toMatch(/선택|고르/)
+    expect(pickyRow).not.toMatch(/억지|강요|강압/)
+  })
+
   it('keeps key Korean and Japanese safety actions semantically paired', () => {
     const sleep = AGE_GUIDANCE_ITEMS.find(item => item.id === 'infant-safe-sleep')!
     expect(`${sleep.summaryKo} ${sleep.actionsKo.join(' ')}`).toMatch(/등을 대고|등으로/)
@@ -389,6 +414,48 @@ describe('development checkpoint selector', () => {
       expect(item.actionsJa.join(' '), `${item.completedMonth}m ja`).toContain('まだできていない項目')
       expect(item.actionsKo.join(' '), `${item.completedMonth}m ko`).toContain('진단이 아니')
       expect(item.actionsJa.join(' '), `${item.completedMonth}m ja`).toContain('診断ではありませ')
+    }
+  })
+
+  it('preserves the meaningful CDC qualifiers in Korean, Japanese, duplicated stages, and audit rows', () => {
+    const qualifiers = [
+      {
+        month: 15,
+        ko: [/엄마.*아빠.*보호자 호칭 외/, /한두 낱말/],
+        ja: [/ママ.*パパ.*保護者の呼び名以外/, /1〜2語/],
+      },
+      { month: 18, ko: [/몸짓 없이/, /한 단계 지시/], ja: [/身振りなし/, /一段階の指示/] },
+      { month: 24, ko: [/도움을 받거나 받지 않고/, /계단 몇 칸.*걸어서/], ja: [/助けがあってもなくても/, /数段の階段.*歩いて/] },
+      { month: 30, ko: [/동작 낱말을 포함/, /두 낱말 이상/], ja: [/動作を表す語を含/, /2語以上/] },
+      { month: 36, ko: [/적어도 두 차례.*주고받/, /시범을 본 뒤.*원/], ja: [/少なくとも2回.*やり取り/, /見本を見た後.*円/] },
+      { month: 60, ko: [/사건이 두 가지 이상.*이야기/], ja: [/出来事が2つ以上.*話/] },
+    ] as const
+
+    for (const expected of qualifiers) {
+      const checkpoint = DEVELOPMENT_CHECKPOINTS.find(item => item.completedMonth === expected.month)!
+      const ko = checkpoint.actionsKo.join(' ')
+      const ja = checkpoint.actionsJa.join(' ')
+      for (const pattern of expected.ko) expect(ko, `${expected.month}m ko ${pattern}`).toMatch(pattern)
+      for (const pattern of expected.ja) expect(ja, `${expected.month}m ja ${pattern}`).toMatch(pattern)
+    }
+
+    const stage15 = AGE_GUIDANCE_ITEMS.find(item => item.id === 'twelve-seventeen-development')!
+    expect(stage15.actionsKo.join(' ')).toMatch(/엄마.*아빠.*보호자 호칭 외.*한두 낱말/)
+    expect(stage15.actionsJa.join(' ')).toMatch(/ママ.*パパ.*保護者の呼び名以外.*1〜2語/)
+
+    const audit = readFileSync(
+      join(process.cwd(), 'docs', 'health-guidance-who-cdc-audit-2026-07-13.md'),
+      'utf8',
+    )
+    const auditRows = new Map(
+      audit
+        .split(/\r?\n/)
+        .filter(line => /^\| (?:15|18|24|30|36|60)개월 \|/.test(line))
+        .map(line => [Number(line.match(/^\| (\d+)개월/)?.[1]), line]),
+    )
+    for (const expected of qualifiers) {
+      const row = auditRows.get(expected.month) ?? ''
+      for (const pattern of expected.ko) expect(row, `${expected.month}m audit ${pattern}`).toMatch(pattern)
     }
   })
 

@@ -4,7 +4,7 @@
 
 `src/lib/ageGuidance.ts`에서 WHO 또는 미국 CDC 출처 ID를 연결한 보호자용 건강·발달 문구를 2026-07-13 현재 공식 1차 자료와 대조했다. 연령, 횟수, 시간, 선별검사 시점처럼 오해 위험이 큰 구체 주장과 그 주변의 안전 문구를 우선 확인했다.
 
-감사 결과, 공식 자료와 어긋나는 보호자용 주장을 찾지 못했다. 따라서 최소 수정 원칙에 따라 `ageGuidance.ts`의 문구와 숫자는 변경하지 않았다. 이 감사가 일반 의료 조언을 새로 추가하지 않으며, 앱의 “진단이 아님”, “걱정되거나 하던 기술을 잃으면 의료진과 상의”라는 안전 경계도 그대로 유지한다.
+후속 독립 검토에서 CDC 발달 이정표 여섯 곳의 의미 있는 한정어가 느슨하게 축약됐고, picky-eater 문구 일부가 연결된 CDC 페이지보다 넓다는 점을 확인했다. 아래 표와 `ageGuidance.ts`의 한국어·일본어 쌍을 공식 범위에 맞게 최소 수정했으며, 다른 연령·숫자 주장은 유지했다. 일반 의료 조언을 새로 추가하지 않았고, 앱의 “진단이 아님”, “걱정되거나 하던 기술을 잃으면 의료진과 상의”라는 안전 경계도 그대로 유지한다.
 
 이 문서는 WHO/CDC가 근거인 문구만 다룬다. NICE, AAP, KDCA, CFA, NIAID 등 다른 기관 출처의 재감사는 이번 범위가 아니며 관련 문구를 변경하지 않았다.
 
@@ -38,7 +38,7 @@
 | `cdc-choking` | [Choking Hazards](https://www.cdc.gov/infant-toddler-nutrition/foods-and-drinks/choking-hazards.html) | 앉은 자세에서 관찰하며 먹이고 크기·모양·질감을 발달에 맞게 조정 | 일치 |
 | `cdc-foods-to-avoid` | [Foods and Drinks to Avoid or Limit](https://www.cdc.gov/infant-toddler-nutrition/foods-and-drinks/foods-and-drinks-to-avoid-or-limit.html) | 12개월 전 꿀·주음료로서 우유·주스 제한, 비살균 식품 회피, 24개월 전 첨가당 회피 | 일치 |
 | `cdc-child-oral-health` | [Oral Health Tips for Children](https://www.cdc.gov/oral-health/prevention/oral-health-tips-for-children.html) | 첫 치아부터 양치, 첫돌까지 치과 방문, 불소 사용은 전문 지침 확인 | 일치 |
-| `cdc-picky-eaters` | [Picky Eaters and What to Do](https://www.cdc.gov/infant-toddler-nutrition/foods-and-drinks/picky-eaters.html) | 새 음식을 반복 노출하고 선택권을 주되 억지로 먹이지 않음 | 일치 |
+| `cdc-picky-eaters` | [Picky Eaters and What to Do](https://www.cdc.gov/infant-toddler-nutrition/foods-and-drinks/picky-eaters.html) | 새 음식을 반복해 제공하고 준비한 음식 중 고르게 함 | 일치 |
 
 ## CDC 발달 이정표·선별검사 확인 결과
 
@@ -51,13 +51,13 @@
 | 6개월 | [6 Months](https://www.cdc.gov/act-early/milestones/6-months.html) | 익숙한 사람, 웃음·소리, 뒤집기, 앉을 때 손 지지 | 일치 |
 | 9개월 | [9 Months](https://www.cdc.gov/act-early/milestones/9-months.html) | 이름 반응, 표정, 혼자 앉기, 양손 사이 물건 옮기기 | 일치 |
 | 12개월 | [1 Year](https://www.cdc.gov/act-early/milestones/1-year.html) | 함께하는 놀이, 손 흔들기, 의미 있는 호칭, 붙잡고 일어서기 | 일치 |
-| 15개월 | [15 Months](https://www.cdc.gov/act-early/milestones/15-months.html) | 물건 보여주기, 도움을 위한 가리키기, 몇 걸음, 1–2단어 | 일치 |
-| 18개월 | [18 Months](https://www.cdc.gov/act-early/milestones/18-months.html) | 흥미 공유 가리키기, 한 단계 지시, 독립 보행 | 일치 |
-| 24개월 | [2 Years](https://www.cdc.gov/act-early/milestones/2-years.html) | 두 단어 연결, 타인 감정 알아차리기, 달리기, 계단 걷기 | 일치 |
-| 30개월 | [30 Months](https://www.cdc.gov/act-early/milestones/30-months.html) | 또래 옆·함께 놀기, 약 50단어, 두 단어 이상 연결, 두 발 뛰기 | 일치 |
-| 36개월 | [3 Years](https://www.cdc.gov/act-early/milestones/3-years.html) | 놀이 참여, 대화 주고받기, 질문, 원 그리기 | 일치 |
+| 15개월 | [15 Months](https://www.cdc.gov/act-early/milestones/15-months.html) | 물건 보여주기, 도움을 위한 가리키기, 몇 걸음, 엄마·아빠 같은 보호자 호칭 외에 한두 낱말 말해 보기 | 일치 |
+| 18개월 | [18 Months](https://www.cdc.gov/act-early/milestones/18-months.html) | 흥미 공유 가리키기, 몸짓 없이 한 단계 지시 따르기, 독립 보행 | 일치 |
+| 24개월 | [2 Years](https://www.cdc.gov/act-early/milestones/2-years.html) | 두 단어 연결, 타인 감정 알아차리기, 달리기, 도움을 받거나 받지 않고 계단 몇 칸을 걸어서 오르기 | 일치 |
+| 30개월 | [30 Months](https://www.cdc.gov/act-early/milestones/30-months.html) | 또래 옆·함께 놀기, 약 50단어, 동작 낱말을 포함해 두 낱말 이상 연결하기, 두 발 뛰기 | 일치 |
+| 36개월 | [3 Years](https://www.cdc.gov/act-early/milestones/3-years.html) | 놀이 참여, 적어도 두 차례 말을 주고받는 대화, 질문, 시범을 본 뒤 원 그리기 | 일치 |
 | 48개월 | [4 Years](https://www.cdc.gov/act-early/milestones/4-years.html) | 역할놀이, 네 단어 이상 문장·경험 말하기, 큰 공 받기, 단추 풀기 | 일치 |
-| 60개월 | [5 Years](https://www.cdc.gov/act-early/milestones/5-years.html) | 규칙·차례, 두 사건 이상 이야기, 한 발 뛰기 | 일치 |
+| 60개월 | [5 Years](https://www.cdc.gov/act-early/milestones/5-years.html) | 규칙·차례, 사건이 두 가지 이상 이어지는 이야기, 한 발 뛰기 | 일치 |
 
 `cdc-developmental-screening`은 [Developmental Monitoring and Screening](https://www.cdc.gov/act-early/about/developmental-monitoring-and-screening.html)과 대조했다. 앱의 표준 발달 선별검사 9·18·30개월 및 자폐 선별검사 18·24개월 표시는 공식 안내와 일치한다. CDC도 이정표 자료가 검증된 선별도구나 진단을 대신하지 않으며, 이정표 누락·기술 소실·보호자 우려가 있으면 의료진과 상의하도록 안내한다.
 
@@ -66,14 +66,14 @@
 - 각 항목의 `actionsKo`와 `actionsJa` 개수 및 비어 있지 않은 대응 문구는 기존 테스트가 검증한다.
 - 출처 ID와 선별검사 시점은 언어와 무관한 공통 구조라 두 언어에 동일하게 적용된다.
 - 발달 체크포인트의 한국어·일본어 모두 “진단표가 아님” 또는 의료진 상담 경계를 유지한다.
-- 이번 감사에서 한국어·일본어 문자열 파일을 변경하지 않았으며, 제품 문구도 어느 한 언어만 수정하지 않았다.
+- 후속 정밀 검토에서 CDC의 의미 있는 한정어와 picky-eater 출처 범위에 맞춰 `ageGuidance.ts`의 한국어·일본어 쌍을 함께 수정했다. 별도 i18n JSON 파일은 변경하지 않았다.
 
 ## 검증
 
 다음 테스트가 WHO 매니페스트, 건강 근거 ID, 연령 안내 구조, 한·일 패리티와 안전 문구를 확인한다.
 
 ```powershell
-npx vitest run tests/whoGrowthOfficialData.test.ts tests/whoGrowth.test.ts tests/ageGuidance.test.ts tests/healthEvidence.test.ts tests/healthContentAudit.test.ts
+npx vitest run tests/whoGrowthOfficialWorkbook.test.ts tests/whoGrowthOfficialData.test.ts tests/whoGrowth.test.ts tests/ageGuidance.test.ts tests/ageGuidanceUi.test.tsx tests/healthEvidence.test.ts tests/healthContentAudit.test.ts
 ```
 
-이번 변경은 정적 TypeScript/JSON 테스트와 문서만 추가한다. Electron 런타임, 저장 형식, 동기화, 운영체제 경로 또는 UI/i18n 파일에는 손대지 않았다.
+검증기와 공식 fixture는 테스트·감사 전용이다. Electron 런타임, 저장 형식, 동기화, 운영체제 경로 또는 UI/i18n 파일에는 손대지 않았다.

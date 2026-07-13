@@ -35,6 +35,6 @@
 ## 회귀 방지와 한계
 
 - `tests/healthContentAudit.test.ts`가 한·일 키/자리표시자 동등성, 금지 도메인, 미온수 닦기·고정 수유 쿼터·오래된 발열 기간·효과 백분율 마케팅, Stats/Report 문구, WHO 소스 ID와 이 원장을 검사한다.
-- 성장 LMS 계산과 0~24개월 범위는 기존 `tests/whoGrowth.test.ts`와 `tests/reportModel.test.ts`를 유지한다. 이번 감사는 사용자 해석 문구와 소스 추적성을 다뤘으며, 표의 모든 수치를 WHO 원본 파일과 행별 재대조하지는 않았다.
+- 성장 LMS 계산과 0~24개월 범위는 기존 `tests/whoGrowth.test.ts`와 `tests/reportModel.test.ts`를 유지한다. 추가로 `tests/whoGrowthOfficialWorkbook.test.ts`가 SHA-256으로 고정한 WHO 공식 XLSX 4개를 직접 파싱해 100개 `Month/L/M/S` 행을 매니페스트와 앱 배열 양쪽에 허용 오차 없이 대조한다.
 - 예방접종 일정과 머리둘레 차트는 추가하지 않았다. 동기화 이벤트와 프로필 저장 스키마도 변경하지 않았다.
 - Task 3도 `src/i18n/ko.json`, `src/i18n/ja.json`을 수정할 수 있으므로 통합 시 이 파일은 키 단위로 병합해야 한다. Task 4의 `tempContextNote`, `temperatureContext`, 성장·수면 문구와 dead-key 제거를 보존한다.

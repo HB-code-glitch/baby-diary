@@ -190,13 +190,13 @@ const checkpointDefinitions: readonly DevelopmentCheckpoint[] = [
   { completedMonth: 6, titleKo: '6개월 발달 관찰', titleJa: '6か月の発達観察', actionsKo: ['익숙한 사람을 알아보고 웃거나 소리를 주고받는지, 몸을 뒤집거나 앉을 때 손으로 지지하는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['親しい人を認識して笑う、声を交わす、寝返りをする、座る時に手で支える様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
   { completedMonth: 9, titleKo: '9개월 발달 관찰·선별검사', titleJa: '9か月の発達観察・スクリーニング', actionsKo: ['이름을 부르면 보고, 다양한 표정을 보이며, 혼자 앉거나 물건을 양손 사이로 옮기는지 관찰해요.', '9개월 무렵 권고되는 표준 발달 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['名前を呼ぶと見る、表情が豊か、ひとり座りや物を左右の手に持ち替える様子を見守ります。', '9か月頃に推奨される標準化発達スクリーニングと気になる点を医療者に相談してください。'], screening: ['developmental'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
   { completedMonth: 12, titleKo: '12개월 발달 관찰', titleJa: '12か月の発達観察', actionsKo: ['간단한 놀이를 함께하고, 손을 흔들거나 의미 있는 호칭을 쓰며, 붙잡고 일어서는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['簡単な遊びを一緒にする、手を振る、意味のある呼び名を使う、つかまり立ちをする様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
-  { completedMonth: 15, titleKo: '15개월 발달 관찰', titleJa: '15か月の発達観察', actionsKo: ['보호자에게 물건을 보여주거나 도움을 요청할 때 가리키는지, 몇 걸음 걷고 한두 낱말을 시도하는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['保護者に物を見せる、助けを求めて指さす、数歩歩く、1〜2語を試す様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
-  { completedMonth: 18, titleKo: '18개월 발달 관찰·선별검사', titleJa: '18か月の発達観察・スクリーニング', actionsKo: ['흥미로운 것을 가리켜 함께 보고, 한 단계 지시를 따르며, 혼자 걷는지 관찰해요.', '18개월 무렵 권고되는 표준 발달·자폐 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['興味のある物を指さして共有する、一段階の指示に従う、ひとり歩きする様子を見守ります。', '18か月頃に推奨される標準化発達・自閉症スクリーニングと気になる点を医療者に相談してください。'], screening: ['developmental', 'autism'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
-  { completedMonth: 24, titleKo: '24개월 발달 관찰·선별검사', titleJa: '24か月の発達観察・スクリーニング', actionsKo: ['두 낱말을 이어 말하고, 다른 사람의 감정을 알아차리며, 달리거나 계단을 오르는지 관찰해요.', '24개월 무렵 권고되는 자폐 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['2語をつなげる、他人の気持ちに気づく、走る、階段を上る様子を見守ります。', '24か月頃に推奨される自閉症スクリーニングと気になる点を医療者に相談してください。'], screening: ['autism'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
-  { completedMonth: 30, titleKo: '30개월 발달 관찰·선별검사', titleJa: '30か月の発達観察・スクリーニング', actionsKo: ['또래 옆에서 함께 놀고, 약 50개 낱말과 두 낱말 조합을 쓰며, 두 발로 뛰는지 관찰해요.', '30개월 무렵 권고되는 표준 발달 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['ほかの子のそばで一緒に遊ぶ、約50語と2語文を使う、両足で跳ぶ様子を見守ります。', '30か月頃に推奨される標準化発達スクリーニングと気になる点を医療者に相談してください。'], screening: ['developmental'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
-  { completedMonth: 36, titleKo: '3세 발달 관찰', titleJa: '3歳の発達観察', actionsKo: ['다른 아이와 놀이에 참여하고, 대화를 주고받으며, 질문하거나 원을 그리는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['ほかの子の遊びに加わる、会話を交わす、質問する、円を描く様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
+  { completedMonth: 15, titleKo: '15개월 발달 관찰', titleJa: '15か月の発達観察', actionsKo: ['보호자에게 물건을 보여주거나 도움을 요청할 때 가리키는지, 몇 걸음 걷고 엄마·아빠 같은 보호자 호칭 외에 한두 낱말을 말해 보려 하는지 편안히 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['保護者に物を見せる、助けを求めて指さす、数歩歩く、ママ・パパなどの保護者の呼び名以外に1〜2語を言おうとする様子を無理なく見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
+  { completedMonth: 18, titleKo: '18개월 발달 관찰·선별검사', titleJa: '18か月の発達観察・スクリーニング', actionsKo: ['흥미로운 것을 가리켜 함께 보고, 몸짓 없이 한 단계 지시를 따르며, 혼자 걷는지 관찰해요.', '18개월 무렵 권고되는 표준 발달·자폐 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['興味のある物を指さして共有する、身振りなしで一段階の指示に従う、ひとり歩きする様子を見守ります。', '18か月頃に推奨される標準化発達・自閉症スクリーニングと気になる点を医療者に相談してください。'], screening: ['developmental', 'autism'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
+  { completedMonth: 24, titleKo: '24개월 발달 관찰·선별검사', titleJa: '24か月の発達観察・スクリーニング', actionsKo: ['두 낱말을 이어 말하고, 다른 사람의 감정을 알아차리며, 달리거나 도움을 받거나 받지 않고 계단 몇 칸을 걸어서 오르는지 관찰해요.', '24개월 무렵 권고되는 자폐 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['2語をつなげる、他人の気持ちに気づく、走る、助けがあってもなくても数段の階段を歩いて上る様子を見守ります。', '24か月頃に推奨される自閉症スクリーニングと気になる点を医療者に相談してください。'], screening: ['autism'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
+  { completedMonth: 30, titleKo: '30개월 발달 관찰·선별검사', titleJa: '30か月の発達観察・スクリーニング', actionsKo: ['또래 옆에서 함께 놀고, 약 50개 낱말을 쓰며 동작 낱말을 포함해 두 낱말 이상을 조합하고, 두 발로 뛰는지 관찰해요.', '30개월 무렵 권고되는 표준 발달 선별검사와 걱정되는 점을 의료진과 상의해요.'], actionsJa: ['ほかの子のそばで一緒に遊ぶ、約50語を使い、動作を表す語を含む2語以上を組み合わせ、両足で跳ぶ様子を見守ります。', '30か月頃に推奨される標準化発達スクリーニングと気になる点を医療者に相談してください。'], screening: ['developmental'], sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'] },
+  { completedMonth: 36, titleKo: '3세 발달 관찰', titleJa: '3歳の発達観察', actionsKo: ['다른 아이와 놀이에 참여하고, 적어도 두 차례 말을 주고받는 대화를 하며, 질문하거나 시범을 본 뒤 원을 그리는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['ほかの子の遊びに加わる、少なくとも2回やり取りする会話をする、質問する、見本を見た後に円を描く様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
   { completedMonth: 48, titleKo: '4세 발달 관찰', titleJa: '4歳の発達観察', actionsKo: ['역할놀이를 하고, 네 낱말 이상 문장으로 경험을 말하며, 큰 공을 받거나 단추를 푸는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['ごっこ遊びをする、4語以上の文で出来事を話す、大きなボールを受ける、ボタンを外す様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
-  { completedMonth: 60, titleKo: '5세 발달 관찰', titleJa: '5歳の発達観察', actionsKo: ['규칙을 따르거나 차례를 지키고, 간단한 이야기를 이어 말하며, 한 발로 뛰는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['ルールや順番を守る、簡単な物語を続けて話す、片足で跳ぶ様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
+  { completedMonth: 60, titleKo: '5세 발달 관찰', titleJa: '5歳の発達観察', actionsKo: ['규칙을 따르거나 차례를 지키고, 사건이 두 가지 이상 이어지는 이야기를 하며, 한 발로 뛰는지 관찰해요.', '기술을 잃었거나 걱정되면 의료진과 상의해요.'], actionsJa: ['ルールや順番を守る、出来事が2つ以上ある話をし、片足で跳ぶ様子を見守ります。', 'できていたことを失った、または心配があれば医療者に相談してください。'], screening: [], sourceIds: ['cdc-developmental-milestones'] },
 ]
 
 export const DEVELOPMENT_CHECKPOINTS: readonly DevelopmentCheckpoint[] = Object.freeze(
@@ -467,8 +467,8 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     id: 'twelve-seventeen-development', stageId: 'twelve-to-seventeen-months', category: 'development', priority: 4, urgency: 'routine',
     titleKo: '12·15개월 체크포인트 관찰', titleJa: '12・15か月の目安を観察',
     summaryKo: '현재 완료 개월의 체크포인트만 보여 주고 걱정은 일찍 상의해요.', summaryJa: '完了月齢に合う目安だけを示し、心配は早めに相談します。',
-    actionsKo: ['12개월에는 간단한 놀이를 함께하고 손을 흔들거나 의미 있는 호칭을 쓰며 붙잡고 일어서는지 관찰해요.', '15개월에는 보호자에게 물건을 보여 주고 도움을 요청할 때 가리키며, 몇 걸음을 걷거나 한두 낱말을 시도하는지 관찰해요.'],
-    actionsJa: ['12か月では簡単な遊びを一緒にし、手を振る、意味のある呼び名を使う、つかまり立ちをする様子を見守ります。', '15か月では保護者に物を見せる、助けを求めて指さす、数歩歩く、1〜2語を試す様子を見守ります。'],
+    actionsKo: ['12개월에는 간단한 놀이를 함께하고 손을 흔들거나 의미 있는 호칭을 쓰며 붙잡고 일어서는지 관찰해요.', '15개월에는 보호자에게 물건을 보여 주고 도움을 요청할 때 가리키며, 몇 걸음을 걷거나 엄마·아빠 같은 보호자 호칭 외에 한두 낱말을 말해 보려 하는지 편안히 관찰해요.'],
+    actionsJa: ['12か月では簡単な遊びを一緒にし、手を振る、意味のある呼び名を使う、つかまり立ちをする様子を見守ります。', '15か月では保護者に物を見せる、助けを求めて指さす、数歩歩く、ママ・パパなどの保護者の呼び名以外に1〜2語を言おうとする様子を無理なく見守ります。'],
     sourceIds: ['cdc-developmental-milestones'],
   },
   {
@@ -514,9 +514,9 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   {
     id: 'two-years-family-food-oral', stageId: 'two-years', category: 'oral-health', priority: 3, urgency: 'routine',
     titleKo: '균형 있는 가족 음식과 매일 양치', titleJa: 'バランスのよい家族食と毎日の歯みがき',
-    summaryKo: '신호에 맞춰 다양한 음식을 주고 단 음료를 줄이며 치과 관리를 이어가요.', summaryJa: 'サインに合わせ多様な食品を出し、甘い飲み物を減らし歯科ケアを続けます。',
-    actionsKo: ['먹는 양을 강요하지 않고 물을 기본 음료로 제공해요.'],
-    actionsJa: ['食べる量を強要せず、水を基本の飲み物にします。'],
+    summaryKo: '다양한 음식을 반복해 제공하고 준비한 음식 중 고르게 하며 치과 관리를 이어가요.', summaryJa: '多様な食品を繰り返し出し、用意した食品から選べるようにし、歯科ケアを続けます。',
+    actionsKo: ['새 음식은 익숙한 음식과 함께 다시 제공하고 물을 기본 음료로 삼아요.'],
+    actionsJa: ['新しい食品は慣れた食品と一緒に再び出し、水を基本の飲み物にします。'],
     sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
   },
   {
@@ -546,9 +546,9 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   {
     id: 'three-four-nutrition-oral', stageId: 'three-to-four-years', category: 'oral-health', priority: 4, urgency: 'routine',
     titleKo: '다양한 식사와 구강 관리를 이어가요', titleJa: '多様な食事と口腔ケアを続ける',
-    summaryKo: '가족과 균형 있게 먹고 편식을 강압 없이 다루며 매일 이를 닦아요.', summaryJa: '家族とバランスよく食べ、好き嫌いに無理なく対応し、毎日歯をみがきます。',
-    actionsKo: ['여러 식품군을 반복해 편안히 제공하고 물을 기본 음료로 삼으며, 먹는 양을 강요하지 않아요.', '보호자가 양치를 돕고 정기 치과 검진을 이어가요.'],
-    actionsJa: ['さまざまな食品群を繰り返し気楽に出し、水を基本の飲み物にし、食べる量を強要しません。', '保護者が歯みがきを助け、定期的な歯科受診を続けます。'],
+    summaryKo: '가족과 균형 있게 먹고 새 음식을 반복해 제공하며 선택할 기회를 줘요. 매일 이를 닦아요.', summaryJa: '家族とバランスよく食べ、新しい食品を繰り返し出し、選ぶ機会をつくります。毎日歯をみがきます。',
+    actionsKo: ['여러 식품군을 편안히 제공하고 준비한 음식 중 아이가 고르게 하며 물을 기본 음료로 삼아요.', '보호자가 양치를 돕고 정기 치과 검진을 이어가요.'],
+    actionsJa: ['さまざまな食品群を気楽に出し、用意した食品から子どもが選べるようにし、水を基本の飲み物にします。', '保護者が歯みがきを助け、定期的な歯科受診を続けます。'],
     sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
   },
   {
@@ -570,9 +570,9 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   {
     id: 'five-years-nutrition-oral', stageId: 'five-years', category: 'oral-health', priority: 3, urgency: 'routine',
     titleKo: '균형 있는 식사와 매일 양치', titleJa: 'バランスのよい食事と毎日の歯みがき',
-    summaryKo: '다양한 가족 식사를 제공하고 편식을 강압 없이 다루며 치과 관리를 이어가요.', summaryJa: '多様な家族の食事を出し、好き嫌いに無理なく対応し、歯科ケアを続けます。',
-    actionsKo: ['여러 식품군과 물을 기본으로 제공하고 먹는 양을 강요하지 않아요.', '보호자가 양치 상태를 확인하고 정기 치과 검진을 이어가요.'],
-    actionsJa: ['さまざまな食品群と水を基本にし、食べる量を強要しません。', '保護者が歯みがきの状態を確認し、定期的な歯科受診を続けます。'],
+    summaryKo: '다양한 가족 식사를 반복해 제공하고 준비한 음식 중 선택하게 하며 치과 관리를 이어가요.', summaryJa: '多様な家族の食事を繰り返し出し、用意した食品から選べるようにし、歯科ケアを続けます。',
+    actionsKo: ['여러 식품군과 물을 기본으로 제공하고 새 음식도 다시 편안히 제안해요.', '보호자가 양치 상태를 확인하고 정기 치과 검진을 이어가요.'],
+    actionsJa: ['さまざまな食品群と水を基本にし、新しい食品もまた気楽に勧めます。', '保護者が歯みがきの状態を確認し、定期的な歯科受診を続けます。'],
     sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
   },
   {
