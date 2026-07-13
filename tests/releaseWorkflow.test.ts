@@ -309,7 +309,11 @@ function releaseGateContractErrors(candidate: ReleaseWorkflow): string[] {
   for (const [jobName, job] of Object.entries(candidate.jobs)) {
     for (const step of job.steps) {
       const command = normalizedRun(step)
-      if (command && (/--publish\s+always/.test(command) || /gh\s+release\s+upload/.test(command))) {
+      if (command && (
+        /--publish\s+always/.test(command)
+        || /gh\s+release\s+upload/.test(command)
+        || /node\s+scripts\/upload-release-assets\.mjs/.test(command)
+      )) {
         publishCommands.push({ jobName, command })
       }
     }
@@ -389,22 +393,48 @@ function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
       '--sha "${{ github.sha }}"',
       '--run-id "${{ github.run_id }}"',
       '--run-attempt "${{ github.run_attempt }}"',
-      'gh release upload',
-      '--clobber',
+      `node scripts/upload-release-assets.mjs --platform ${platform}`,
+      '--staging-dir release-upload',
+      '--manifest release-manifest/',
     ]) {
       if (!commandText.includes(fragment)) errors.push(`${jobName} is missing: ${fragment}`)
     }
     if (/--publish\s+always/.test(commandText)) errors.push(`${jobName} must not let electron-builder upload`)
+    const manifestCreators = job.steps.filter(step => /node\s+scripts\/create-release-manifest\.mjs/.test(normalizedRun(step) ?? ''))
+    if (manifestCreators.length !== 1) {
+      errors.push(`${jobName} must create one current-run platform manifest`)
+    } else {
+      const manifestCommand = normalizedRun(manifestCreators[0]) ?? ''
+      for (const fragment of [
+        `--platform ${platform}`,
+        '--source-repository "${{ github.repository }}"',
+        '--sha "${{ github.sha }}"',
+        '--run-id "${{ github.run_id }}"',
+        '--run-attempt "${{ github.run_attempt }}"',
+      ]) {
+        if (!manifestCommand.includes(fragment)) errors.push(`${jobName} manifest creation is missing: ${fragment}`)
+      }
+    }
     const manifestUploads = job.steps.filter(step => (
       step.uses === 'actions/upload-artifact@v4'
       && step.with?.name === artifactName
       && step.with?.['if-no-files-found'] === 'error'
     ))
     if (manifestUploads.length !== 1) errors.push(`${jobName} must upload one run-scoped manifest artifact`)
-    const releaseUploads = job.steps.filter(step => /gh\s+release\s+upload/.test(normalizedRun(step) ?? ''))
+    const releaseUploads = job.steps.filter(step => /node\s+scripts\/upload-release-assets\.mjs/.test(normalizedRun(step) ?? ''))
     if (releaseUploads.length !== 1) errors.push(`${jobName} must upload one exact platform staging set`)
     if (releaseUploads[0]?.env?.GH_TOKEN !== '${{ secrets.RELEASE_TOKEN }}') {
       errors.push(`${jobName} upload must authenticate with RELEASE_TOKEN`)
+    }
+    const uploadCommand = normalizedRun(releaseUploads[0] ?? {}) ?? ''
+    for (const fragment of [
+      `--platform ${platform}`,
+      '--source-repository "${{ github.repository }}"',
+      '--sha "${{ github.sha }}"',
+      '--run-id "${{ github.run_id }}"',
+      '--run-attempt "${{ github.run_attempt }}"',
+    ]) {
+      if (!uploadCommand.includes(fragment)) errors.push(`${jobName} immutable upload is missing: ${fragment}`)
     }
   }
 
@@ -422,11 +452,8 @@ function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
     }
   }
   for (const fragment of [
-    'gh release download',
-    'gh api --paginate --slurp',
-    'node scripts/validate-release-assets.mjs',
+    'node scripts/publish-verified-release.mjs',
     '--manifests-dir',
-    '--assets-dir',
     '--source-repository "${GITHUB_REPOSITORY}"',
     '--release-repository "HB-code-glitch/baby-diary-releases"',
     '--sha "${GITHUB_SHA}"',
@@ -434,6 +461,13 @@ function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
     '--run-attempt "${GITHUB_RUN_ATTEMPT}"',
   ]) {
     if (!publishText.includes(fragment)) errors.push(`final provenance gate is missing: ${fragment}`)
+  }
+  const finalOrchestrators = publish.steps.filter(step => (
+    /node\s+scripts\/publish-verified-release\.mjs/.test(normalizedRun(step) ?? '')
+  ))
+  if (finalOrchestrators.length !== 1) errors.push('publish-release must have one combined final provenance gate')
+  if (finalOrchestrators[0]?.env?.GH_TOKEN !== '${{ secrets.RELEASE_TOKEN }}') {
+    errors.push('publish-release final provenance gate must authenticate with RELEASE_TOKEN')
   }
   if (publish.if !== RELEASE_TAG_CONDITION || /always\s*\(/.test(publish.if ?? '')) {
     errors.push('publish-release must not bypass failed dependencies')
@@ -443,6 +477,97 @@ function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
       errors.push(`publish-release must need ${dependency}`)
     }
   }
+  return errors
+}
+
+function immutableReleaseOrchestrationErrors(candidate: ReleaseWorkflow): string[] {
+  const errors: string[] = []
+  for (const [jobName, platform, manifestName] of [
+    ['release-win', 'windows', 'release-manifest-windows'],
+    ['release-mac', 'mac', 'release-manifest-mac'],
+  ] as const) {
+    const job = candidate.jobs[jobName]
+    if (!job) {
+      errors.push(`missing ${jobName}`)
+      continue
+    }
+    const orchestrators = job.steps.filter(step => (
+      normalizedRun(step)?.includes(`node scripts/upload-release-assets.mjs --platform ${platform}`)
+    ))
+    if (orchestrators.length !== 1) {
+      errors.push(`${jobName} must have exactly one immutable-ID upload orchestrator`)
+      continue
+    }
+    const step = orchestrators[0]
+    const command = normalizedRun(step) ?? ''
+    for (const fragment of [
+      '--manifest',
+      '--staging-dir',
+      '--source-repository "${{ github.repository }}"',
+      '--release-repository "HB-code-glitch/baby-diary-releases"',
+      '--tag "${{ github.ref_name }}"',
+      '--sha "${{ github.sha }}"',
+      '--run-id "${{ github.run_id }}"',
+      '--run-attempt "${{ github.run_attempt }}"',
+    ]) {
+      if (!command.includes(fragment)) errors.push(`${jobName} upload orchestrator is missing: ${fragment}`)
+    }
+    if (step.env?.GH_TOKEN !== '${{ secrets.RELEASE_TOKEN }}') {
+      errors.push(`${jobName} upload orchestrator must authenticate with RELEASE_TOKEN`)
+    }
+    if (step.if != null || Object.prototype.hasOwnProperty.call(step, 'continue-on-error')) {
+      errors.push(`${jobName} upload orchestrator must be unconditional and fail closed`)
+    }
+    const orchestratorIndex = job.steps.indexOf(step)
+    const manifestIndex = job.steps.findIndex(candidateStep => (
+      candidateStep.uses === 'actions/upload-artifact@v4'
+      && String(candidateStep.with?.name).startsWith(manifestName)
+    ))
+    if (manifestIndex <= orchestratorIndex) errors.push(`${jobName} must persist only the post-upload-bound manifest`)
+  }
+
+  const allCommands = Object.values(candidate.jobs)
+    .flatMap(job => job.steps.flatMap(step => normalizedRun(step) ?? []))
+  if (allCommands.some(command => /gh\s+release\s+upload/.test(command))) {
+    errors.push('tag-resolved gh release upload must not remain')
+  }
+  if (allCommands.some(command => /gh\s+release\s+edit/.test(command))) {
+    errors.push('separate tag-resolved release edit must not remain')
+  }
+
+  const publish = candidate.jobs['publish-release']
+  if (!publish) return [...errors, 'missing publish-release']
+  const publishSteps = publish.steps.filter(step => (
+    normalizedRun(step)?.includes('node scripts/publish-verified-release.mjs')
+  ))
+  if (publishSteps.length !== 1) {
+    errors.push('publish-release must have exactly one validation-and-publish orchestrator')
+  } else {
+    const step = publishSteps[0]
+    const command = normalizedRun(step) ?? ''
+    for (const fragment of [
+      '--manifests-dir',
+      '--source-repository "${GITHUB_REPOSITORY}"',
+      '--release-repository "HB-code-glitch/baby-diary-releases"',
+      '--tag "${GITHUB_REF_NAME}"',
+      '--sha "${GITHUB_SHA}"',
+      '--run-id "${GITHUB_RUN_ID}"',
+      '--run-attempt "${GITHUB_RUN_ATTEMPT}"',
+    ]) {
+      if (!command.includes(fragment)) errors.push(`final orchestrator is missing: ${fragment}`)
+    }
+    if (step.env?.GH_TOKEN !== '${{ secrets.RELEASE_TOKEN }}') {
+      errors.push('final orchestrator must authenticate with RELEASE_TOKEN')
+    }
+    if (step.if != null || Object.prototype.hasOwnProperty.call(step, 'continue-on-error')) {
+      errors.push('final orchestrator must be unconditional and fail closed')
+    }
+  }
+  const mutatingSteps = publish.steps.filter(step => {
+    const command = normalizedRun(step) ?? ''
+    return /publish-verified-release|gh\s+release\s+edit|--draft=false/.test(command)
+  })
+  if (mutatingSteps.length !== 1) errors.push('final validation and public transition must be one workflow step')
   return errors
 }
 
@@ -525,17 +650,18 @@ describe('release workflow CI gates', () => {
     }))
     const validationCommands = commands.filter(({ command }) => command.includes('validate-release-assets.mjs'))
     const preUploadValidations = validationCommands.filter(({ command }) => command.includes('--pre-upload'))
-    const finalAssetValidations = validationCommands.filter(({ command }) => !command.includes('--pre-upload'))
-    const publicTransitions = commands.filter(({ command }) => /gh\s+release\s+edit[\s\S]*--draft=false[\s\S]*--latest/.test(command))
+    const platformOrchestrators = commands.filter(({ command }) => command.includes('upload-release-assets.mjs'))
+    const finalOrchestrators = commands.filter(({ command }) => command.includes('publish-verified-release.mjs'))
+    const tagResolvedTransitions = commands.filter(({ command }) => /gh\s+release\s+(?:upload|edit)/.test(command))
 
-    expect(validationCommands).toHaveLength(2)
+    expect(validationCommands).toHaveLength(1)
     expect(preUploadValidations).toHaveLength(1)
     expect(preUploadValidations[0].jobName).toBe('release-preflight')
-    expect(finalAssetValidations).toHaveLength(1)
-    expect(finalAssetValidations[0].jobName).toBe('publish-release')
-    expect(finalAssetValidations[0].command).toContain('gh api --paginate --slurp')
-    expect(publicTransitions).toHaveLength(1)
-    expect(publicTransitions[0].jobName).toBe('publish-release')
+    expect(platformOrchestrators).toHaveLength(2)
+    expect(new Set(platformOrchestrators.map(({ jobName }) => jobName))).toEqual(new Set(['release-win', 'release-mac']))
+    expect(finalOrchestrators).toHaveLength(1)
+    expect(finalOrchestrators[0].jobName).toBe('publish-release')
+    expect(tagResolvedTransitions).toHaveLength(0)
   })
 
   it('rejects job-level and step-level continue-on-error on every release-critical path', () => {
@@ -818,6 +944,36 @@ describe('release workflow CI gates', () => {
     alwaysPublish.jobs['publish-release'].if = `${RELEASE_TAG_CONDITION} && always()`
     expect(releaseProvenanceContractErrors(alwaysPublish)).toContain(
       'publish-release must not bypass failed dependencies',
+    )
+  })
+
+  it('uses immutable release-ID orchestrators for both uploads and the single final transition', () => {
+    expect(immutableReleaseOrchestrationErrors(workflow)).toEqual([])
+  })
+
+  it('rejects tag-resolved upload, split final publish, and token bypass mutations', () => {
+    const tagUpload = structuredClone(workflow)
+    tagUpload.jobs['release-win'].steps.push({
+      run: 'gh release upload "${GITHUB_REF_NAME}" release-upload/* --clobber',
+    })
+    expect(immutableReleaseOrchestrationErrors(tagUpload)).toContain('tag-resolved gh release upload must not remain')
+
+    const splitPublish = structuredClone(workflow)
+    splitPublish.jobs['publish-release'].steps.push({
+      run: 'gh release edit "${GITHUB_REF_NAME}" --draft=false --latest',
+    })
+    expect(immutableReleaseOrchestrationErrors(splitPublish)).toEqual(expect.arrayContaining([
+      'separate tag-resolved release edit must not remain',
+      'final validation and public transition must be one workflow step',
+    ]))
+
+    const wrongToken = structuredClone(workflow)
+    const upload = wrongToken.jobs['release-mac'].steps
+      .find(step => normalizedRun(step)?.includes('upload-release-assets.mjs'))
+    expect(upload).toBeDefined()
+    if (upload) upload.env = { GH_TOKEN: '${{ github.token }}' }
+    expect(immutableReleaseOrchestrationErrors(wrongToken)).toContain(
+      'release-mac upload orchestrator must authenticate with RELEASE_TOKEN',
     )
   })
 })

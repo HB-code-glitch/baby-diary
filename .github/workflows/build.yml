@@ -197,16 +197,15 @@ jobs:
           --tag "${{ github.ref_name }}" --sha "${{ github.sha }}"
           --version "${{ steps.package-version.outputs.version }}"
           --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
-      - name: Upload the exact Windows staging set to the private draft
-        shell: pwsh
-        run: |
-          $remoteSha = gh api "repos/${{ github.repository }}/commits/${{ github.ref_name }}" --jq .sha
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($remoteSha -ne "${{ github.sha }}") { throw "Source tag moved before Windows upload" }
-          $files = @(Get-ChildItem -LiteralPath release-upload -File | ForEach-Object { $_.FullName })
-          if ($files.Count -ne 4) { throw "Expected exactly 4 Windows release assets" }
-          gh release upload "${{ github.ref_name }}" @files --repo HB-code-glitch/baby-diary-releases --clobber
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Revalidate and upload the exact Windows set by immutable release ID
+        run: >-
+          node scripts/upload-release-assets.mjs --platform windows
+          --staging-dir release-upload --manifest release-manifest/windows.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ github.ref_name }}" --sha "${{ github.sha }}"
+          --version "${{ steps.package-version.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
       - uses: actions/upload-artifact@v4
@@ -243,14 +242,15 @@ jobs:
           --tag "${{ github.ref_name }}" --sha "${{ github.sha }}"
           --version "${{ steps.package-version.outputs.version }}"
           --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
-      - name: Upload the exact Mac staging set to the private draft
-        run: |
-          set -euo pipefail
-          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)"
-          test "${remote_sha}" = "${GITHUB_SHA}"
-          assets=(release-upload/*)
-          test "${#assets[@]}" = 10
-          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --repo HB-code-glitch/baby-diary-releases --clobber
+      - name: Revalidate and upload the exact Mac set by immutable release ID
+        run: >-
+          node scripts/upload-release-assets.mjs --platform mac
+          --staging-dir release-upload --manifest release-manifest/mac.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ github.ref_name }}" --sha "${{ github.sha }}"
+          --version "${{ steps.package-version.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
       - uses: actions/upload-artifact@v4
@@ -279,34 +279,14 @@ jobs:
         with:
           name: release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-manifests
-      - name: Verify the complete draft release
-        run: |
-          set -euo pipefail
-          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)"
-          if [ "${remote_sha}" != "${GITHUB_SHA}" ]; then
-            echo "Source tag moved before final publication" >&2
-            exit 1
-          fi
-          mkdir verified-assets
-          gh release download "${GITHUB_REF_NAME}" \
-            --repo HB-code-glitch/baby-diary-releases \
-            --dir verified-assets
-          gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
-            > .release-api.json
-          node scripts/validate-release-assets.mjs \
-            --input .release-api.json \
-            --manifests-dir release-manifests \
-            --assets-dir verified-assets \
-            --source-repository "${GITHUB_REPOSITORY}" \
-            --release-repository "HB-code-glitch/baby-diary-releases" \
-            --tag "${GITHUB_REF_NAME}" \
-            --sha "${GITHUB_SHA}" \
-            --version "$(node -p "require('./package.json').version")" \
-            --run-id "${GITHUB_RUN_ID}" \
-            --run-attempt "${GITHUB_RUN_ATTEMPT}"
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-      - name: Publish the verified draft once
-        run: gh release edit "${GITHUB_REF_NAME}" --repo HB-code-glitch/baby-diary-releases --draft=false --latest
+      - name: Validate, re-fetch, and publish the same immutable release once
+        run: >-
+          node scripts/publish-verified-release.mjs
+          --manifests-dir release-manifests
+          --source-repository "${GITHUB_REPOSITORY}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${GITHUB_REF_NAME}" --sha "${GITHUB_SHA}"
+          --version "$(node -p "require('./package.json').version")"
+          --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
