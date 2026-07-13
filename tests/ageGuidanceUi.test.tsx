@@ -29,6 +29,7 @@ describe('age guidance progressive UI', () => {
   afterEach(async () => {
     await act(async () => root.unmount())
     container.remove()
+    vi.useRealTimers()
   })
 
   it('shows only three priorities initially and reveals the rest in place', async () => {
@@ -115,6 +116,49 @@ describe('age guidance progressive UI', () => {
     expect(getLocalGuidanceDayKey(new Date(2026, 6, 13, 23, 59))).toBe('2026-07-13')
     expect(getLocalGuidanceDayKey('2026-07-13')).toBe('2026-07-13')
     expect(getLocalGuidanceDayKey('not-a-date')).toBe('not-a-date')
+  })
+
+  it('refreshes default guidance after the next local midnight and cleans up its timer', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 6, 13, 23, 59, 59, 500))
+    const { AgeGuidancePanel } = await loadGuidanceUi()
+    await i18n.changeLanguage('ko')
+
+    await act(async () => {
+      root.render(<AgeGuidancePanel birthdate="2026-07-14" variant="home" />)
+    })
+
+    expect(container.querySelector('[data-guidance-birthdate-prompt]')).not.toBeNull()
+    expect(vi.getTimerCount()).toBe(1)
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_499))
+    expect(container.querySelector('[data-guidance-birthdate-prompt]')).not.toBeNull()
+
+    await act(async () => vi.advanceTimersByTimeAsync(1))
+    expect(container.querySelector('[data-guidance-birthdate-prompt]')).toBeNull()
+    expect(container.querySelector('[data-age-stage]')?.getAttribute('data-age-stage')).toBe('newborn')
+    expect(vi.getTimerCount()).toBe(1)
+
+    await act(async () => root.unmount())
+    expect(vi.getTimerCount()).toBe(0)
+    root = createRoot(container)
+  })
+
+  it('keeps an explicit asOf fixed without creating a midnight timer', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 6, 13, 23, 59, 59, 500))
+    const { AgeGuidancePanel } = await loadGuidanceUi()
+
+    await act(async () => {
+      root.render(<AgeGuidancePanel birthdate="2026-07-14" asOf="2026-07-13" variant="home" />)
+    })
+
+    expect(container.querySelector('[data-guidance-birthdate-prompt]')).not.toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+
+    await act(async () => vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000))
+    expect(container.querySelector('[data-guidance-birthdate-prompt]')).not.toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('renders parallel Korean and Japanese labels with semantic disclosures', async () => {

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { HealthContentLocale, HealthEvidenceSourceId } from '../../shared/healthEvidence'
 import {
@@ -42,6 +42,35 @@ export function getLocalGuidanceDayKey(value: string | Date): string {
   if (typeof value === 'string') return value
   if (!Number.isFinite(value.getTime())) return 'invalid-date'
   return `${value.getFullYear()}-${padLocalDatePart(value.getMonth() + 1)}-${padLocalDatePart(value.getDate())}`
+}
+
+function useGuidanceDayKey(asOf?: string | Date): string {
+  const explicitDayKey = useMemo(
+    () => asOf === undefined ? null : getLocalGuidanceDayKey(asOf),
+    [asOf],
+  )
+  const [defaultDayKey, setDefaultDayKey] = useState(() => getLocalGuidanceDayKey(new Date()))
+
+  useEffect(() => {
+    if (asOf !== undefined) return
+
+    let timeoutId: ReturnType<typeof setTimeout>
+    const scheduleNextLocalDay = () => {
+      const now = new Date()
+      const nextLocalDay = new Date(now)
+      nextLocalDay.setHours(24, 0, 1, 0)
+      timeoutId = setTimeout(() => {
+        setDefaultDayKey(getLocalGuidanceDayKey(new Date()))
+        scheduleNextLocalDay()
+      }, Math.max(0, nextLocalDay.getTime() - now.getTime()))
+    }
+
+    setDefaultDayKey(getLocalGuidanceDayKey(new Date()))
+    scheduleNextLocalDay()
+    return () => clearTimeout(timeoutId)
+  }, [asOf])
+
+  return explicitDayKey ?? defaultDayKey
 }
 
 function ControlledDetails({
@@ -124,7 +153,7 @@ export function AgeGuidancePanel({
   const { t, i18n } = useTranslation()
   const locale: HealthContentLocale = i18n.language === 'ja' ? 'ja' : 'ko'
   const [showAll, setShowAll] = useState(false)
-  const asOfDayKey = useMemo(() => getLocalGuidanceDayKey(asOf ?? new Date()), [asOf])
+  const asOfDayKey = useGuidanceDayKey(asOf)
   const categories = Object.fromEntries(
     categoryOrder.map(category => [category, t(`ageGuidance.categories.${category}`)]),
   ) as Record<AgeGuidanceCategory, string>
