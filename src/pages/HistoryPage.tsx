@@ -173,7 +173,7 @@ function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, mi
         dayNum === 0 ? 'cal-sunday' : dayNum === 6 ? 'cal-saturday' : '',
       ].filter(Boolean).join(' ')}
       onClick={() => onSelect(day)}
-      aria-label={format(day, 'yyyy-MM-dd')}
+      aria-label={`${format(day, 'yyyy-MM-dd')}${indicators.hasTempRecord ? ` ${t('history.tempIndicator')}` : ''}`}
     >
       <span className="cal-day-num">{day.getDate()}</span>
       {isCurrentMonth && (

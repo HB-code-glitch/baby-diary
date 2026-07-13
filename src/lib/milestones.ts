@@ -56,7 +56,7 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
     nameKo: '삼칠일',
     nameJa: '三七日（セイレ）',
     descKo: '출생 21일째를 기념해 아기의 건강을 기원해 온 한국 전통 행사예요',
-    descJa: '生後21日目、赤ちゃんを初めてお披露目し健康を祈る韓国の伝統です',
+    descJa: '生後21日目を記念し、赤ちゃんの健康を願ってきた韓国の伝統行事です',
     culture: 'ko',
   })
 

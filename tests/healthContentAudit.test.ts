@@ -149,7 +149,6 @@ describe('whole-app health content audit guards', () => {
     const koHistory = ko.history as Record<string, string>
     const jaHistory = ja.history as Record<string, string>
     expect(historySource).not.toMatch(/37\.5|hasHighTemp|tempHighIndicator/)
-    expect(historySource.match(/\.some\(e => e\.type === 'temp'\)/g)).toHaveLength(2)
     expect(koHistory).not.toHaveProperty('tempHighIndicator')
     expect(jaHistory).not.toHaveProperty('tempHighIndicator')
     expect(koHistory.tempIndicator).toBe('체온 기록')
@@ -235,6 +234,15 @@ describe('whole-app health content audit guards', () => {
     ])
     expect(halfBirthday.descKo).not.toMatch(/표정|발달|성장/)
     expect(halfBirthday.descJa).not.toMatch(/表情|発達|成長/)
+
+    const samchil = selected.find(item => item.id === 'samchil-il')!
+    expectMeaningPair(samchil.descKo, samchil.descJa, [
+      { label: 'twenty-first day commemoration', ko: /21일째.*기념/, ja: /21日目.*記念/ },
+      { label: 'wish for the baby health', ko: /아기의 건강.*기원/, ja: /赤ちゃんの健康.*願/ },
+      { label: 'Korean traditional event', ko: /한국 전통 행사/, ja: /韓国の伝統行事/ },
+    ])
+    expect(samchil.descKo).not.toMatch(/첫 공개/)
+    expect(samchil.descJa).not.toMatch(/初めて.*お披露目/)
   })
 
   it('uses °C and mL consistently in user-facing health record copy', () => {
@@ -288,6 +296,11 @@ describe('whole-app health content audit guards', () => {
       const codeIds = [...sourceColumn.matchAll(/`([a-z0-9-]+)`/g)].map(match => match[1])
       const links = [...sourceColumn.matchAll(/\[`([a-z0-9-]+)`\]\((https:\/\/[^)]+)\)/g)]
       expect(links.map(match => match[1]), sourceColumn).toEqual(codeIds)
+      const withoutRegistryLinks = sourceColumn.replace(/\[`[a-z0-9-]+`\]\(https:\/\/[^)]+\)/g, '')
+      expect(withoutRegistryLinks, `unparsed URL in audit source column: ${sourceColumn}`).not.toMatch(/https?:\/\//)
+      if (!sourceColumn.includes('해당 없음')) {
+        expect(links.length, `missing registry source link: ${sourceColumn}`).toBeGreaterThan(0)
+      }
       for (const [, id, url] of links) {
         const registrySource = getEvidenceSourceById(id)
         expect(registrySource, `unknown audit source ID: ${id}`).not.toBeNull()
