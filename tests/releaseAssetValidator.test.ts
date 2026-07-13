@@ -61,6 +61,10 @@ function runValidator(payload: unknown, {
   if (preUpload) args.push('--pre-upload')
   else args.push('--version', VERSION)
 
+  return runValidatorWithArgs(payload, args)
+}
+
+function runValidatorWithArgs(payload: unknown, args: string[]) {
   return spawnSync(process.execPath, args, {
     cwd: process.cwd(),
     input: JSON.stringify(payload),
@@ -135,6 +139,18 @@ describe('pre-upload release guard', () => {
 
   it('fails closed when the target tag argument is missing', () => {
     const result = runValidator([[]], { preUpload: true, includeTag: false })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('target tag is required')
+    expect(result.stdout).not.toContain('safe to upload')
+  })
+
+  it.each([
+    { label: 'has no following token', args: ['scripts/validate-release-assets.mjs', '--pre-upload', '--tag'] },
+    { label: 'has an empty value', args: ['scripts/validate-release-assets.mjs', '--tag', '', '--pre-upload'] },
+    { label: 'is followed by another option', args: ['scripts/validate-release-assets.mjs', '--tag', '--pre-upload'] },
+  ])('fails closed when --tag $label', ({ args }) => {
+    const result = runValidatorWithArgs([[]], args)
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('target tag is required')

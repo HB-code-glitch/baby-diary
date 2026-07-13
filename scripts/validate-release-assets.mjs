@@ -137,7 +137,11 @@ export function validateReleaseAssets(payload, { tag, version }) {
 
 function readOption(name) {
   const index = process.argv.indexOf(name)
-  return index >= 0 ? process.argv[index + 1] : undefined
+  if (index < 0) return undefined
+
+  const value = process.argv[index + 1]
+  if (typeof value !== 'string' || value.length === 0 || value.startsWith('--')) return undefined
+  return value
 }
 
 async function readStandardInput() {
