@@ -203,6 +203,7 @@ export type BabyInfoCommitErrorCode =
   | 'INVALID_OPERATION'
   | 'FAMILY_MISMATCH'
   | 'STORAGE_FAILURE'
+  | 'RECOVERY_REQUIRED'
   | 'INTERNAL_ERROR'
 
 export type BabyInfoCommitIpcResponse =

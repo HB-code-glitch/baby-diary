@@ -36,7 +36,14 @@ import {
   SettingsRecoveryError,
   type RecoveryOptions,
 } from './backupSnapshot'
-import { atomicReplaceFileSync, type DurableWriteOptions } from './durableFs'
+import {
+  atomicReplaceFileSync,
+  isDurableAppendCommittedError,
+  isDurableAppendUncertainError,
+  isDurableReplaceCommittedError,
+  isDurableTruncateUncertainError,
+  type DurableWriteOptions,
+} from './durableFs'
 
 const DEFAULT_SETTINGS: AppSettings = {
   baby: {
@@ -55,14 +62,88 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 export class SettingsLocalMutationRecoveryError extends SettingsRecoveryError {
   readonly localDataModified = true as const
+  readonly readOnly = true as const
   readonly archiveEvidence: { archiveId: string; durable: true }
 
   constructor(archiveId: string, cause: unknown) {
-    super('A baby-info archive became durable before its settings projection failed.')
+    super(
+      'A baby-info archive became durable before its settings projection failed.',
+      [],
+      false,
+      true,
+    )
     this.name = 'SettingsLocalMutationRecoveryError'
     this.archiveEvidence = { archiveId, durable: true }
     Object.assign(this, { cause })
   }
+}
+
+export class SettingsJournalMutationRecoveryError extends SettingsRecoveryError {
+  readonly localDataModified = true as const
+  readonly readOnly = true as const
+  readonly journalEvidence: {
+    kind: 'legacy-import' | 'legacy-local-pair' | 'user-edit' | 'reconcile'
+    durable: true
+  }
+
+  constructor(
+    kind: 'legacy-import' | 'legacy-local-pair' | 'user-edit' | 'reconcile',
+    cause: unknown,
+  ) {
+    super('Baby-info journal changes became durable before settings projection failed.', [], false, true)
+    this.name = 'SettingsJournalMutationRecoveryError'
+    this.journalEvidence = { kind, durable: true }
+    Object.assign(this, { cause })
+  }
+}
+
+export class SettingsCommittedWriteRecoveryError extends SettingsRecoveryError {
+  readonly localDataModified = true as const
+  readonly readOnly = true as const
+  readonly settingsEvidence = {
+    committed: true as const,
+    fileSynced: true as const,
+    durabilityConfirmed: false as const,
+  }
+
+  constructor(cause: unknown) {
+    super('A settings replacement committed before final durability confirmation failed.', [], false, true)
+    this.name = 'SettingsCommittedWriteRecoveryError'
+    Object.assign(this, { cause })
+  }
+}
+
+export class SettingsJournalStorageRecoveryError extends SettingsRecoveryError {
+  readonly localDataModified = true as const
+  readonly readOnly = true as const
+  readonly journalEvidence: {
+    kind: 'storage-uncertain'
+    durable: boolean
+    committed: boolean
+    uncertain: true
+  }
+
+  constructor(cause: unknown) {
+    const committed = isDurableAppendCommittedError(cause)
+    super('Baby-info journal storage changed but the process could not safely continue.', [], false, true)
+    this.name = 'SettingsJournalStorageRecoveryError'
+    this.journalEvidence = {
+      kind: 'storage-uncertain',
+      durable: committed,
+      committed,
+      uncertain: true,
+    }
+    Object.assign(this, { cause })
+  }
+}
+
+function isJournalStorageRecoveryError(error: unknown): boolean {
+  return isDurableAppendCommittedError(error)
+    || isDurableAppendUncertainError(error)
+    || isDurableTruncateUncertainError(error)
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'BABY_INFO_STORAGE_UNCERTAIN')
 }
 
 function stripBom(value: string): string {
@@ -110,6 +191,7 @@ export class SettingsStore {
   private readonly durableWriteOptions: DurableWriteOptions
   private settings: AppSettings = { ...DEFAULT_SETTINGS }
   private readonly journal: BabyInfoJournal
+  private storageRecoveryError: SettingsRecoveryError | undefined
 
   constructor(userDataPath: string, options: RecoveryOptions = {}) {
     this.settingsPath = path.join(userDataPath, 'settings.json')
@@ -122,8 +204,21 @@ export class SettingsStore {
       startupId: options.startupId ?? uuidv4(),
     })
     this.load()
-    this.journal = new BabyInfoJournal(userDataPath)
-    this.recoverJournalProjection()
+    let journal: BabyInfoJournal
+    try {
+      journal = new BabyInfoJournal(userDataPath, {
+        durableFs: options.durableFs,
+        platform: options.platform,
+      })
+    } catch (error) {
+      throw this.normalizeStorageRecoveryError(error)
+    }
+    this.journal = journal
+    try {
+      this.recoverJournalProjection()
+    } catch (error) {
+      throw this.normalizeStorageRecoveryError(error)
+    }
   }
 
   private load(): void {
@@ -168,11 +263,37 @@ export class SettingsStore {
     }
   }
 
+  private assertStorageWritable(): void {
+    if (this.storageRecoveryError) throw this.storageRecoveryError
+  }
+
+  private normalizeStorageRecoveryError(error: unknown): unknown {
+    if (error instanceof SettingsRecoveryError) {
+      if ((error as SettingsRecoveryError & { localDataModified?: unknown }).localDataModified === true
+        || (error as SettingsRecoveryError & { readOnly?: unknown }).readOnly === true) {
+        this.storageRecoveryError = error
+      }
+      return error
+    }
+    if (isJournalStorageRecoveryError(error)) {
+      const recovery = new SettingsJournalStorageRecoveryError(error)
+      this.storageRecoveryError = recovery
+      return recovery
+    }
+    return error
+  }
+
   private write(settings: AppSettings): void {
+    this.assertStorageWritable()
     const content = Buffer.from(JSON.stringify(settings, null, 2), 'utf8')
     try {
       atomicReplaceFileSync(this.settingsPath, content, this.durableWriteOptions)
     } catch (error) {
+      if (isDurableReplaceCommittedError(error)) {
+        const recovery = new SettingsCommittedWriteRecoveryError(error)
+        this.storageRecoveryError = recovery
+        throw recovery
+      }
       const message = error instanceof Error ? error.message : String(error)
       const structured = new Error(`[Settings] save failed: ${message}`)
       ;(structured as NodeJS.ErrnoException).code = (error as NodeJS.ErrnoException).code
@@ -221,11 +342,13 @@ export class SettingsStore {
     const journalWasEmpty = !this.journal.hasAnyRecords()
     let sourceRemoved = false
     let unlinkedArchiveId: string | undefined
+    let journalMutationKind: 'legacy-import' | 'legacy-local-pair' | undefined
 
     if (current.babyInfoSync !== undefined) {
       const sourceId = legacyImportId(current.babyInfoSync)
       this.journal.importLegacyState(sourceId, current.babyInfoSync)
       sourceRemoved = true
+      journalMutationKind = 'legacy-import'
     }
 
     if (!current.familyId && (current.baby.name !== '' || current.baby.birthdate !== '')) {
@@ -247,7 +370,10 @@ export class SettingsStore {
           current.baby.name,
           current.baby.birthdate,
         )
-        if (legacy) summary = this.journal.ingest(current.familyId, [legacy], [])
+        if (legacy) {
+          summary = this.journal.ingest(current.familyId, [legacy], [])
+          journalMutationKind = 'legacy-local-pair'
+        }
       }
       winner = summary.winner
     }
@@ -273,31 +399,45 @@ export class SettingsStore {
       if (unlinkedArchiveId) {
         throw new SettingsLocalMutationRecoveryError(unlinkedArchiveId, error)
       }
+      if (journalMutationKind) {
+        throw new SettingsJournalMutationRecoveryError(journalMutationKind, error)
+      }
       throw error
     }
   }
 
   save(settings: AppSettings): AppSettings {
-    this.load()
-    this.recoverJournalProjection()
-    const currentFamilyId = this.settings.familyId
-    let next = applyManagedSettingsSave(this.settings, settings)
-    if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
-    this.write(next)
-    return this.get()
+    this.assertStorageWritable()
+    try {
+      this.load()
+      this.recoverJournalProjection()
+      const currentFamilyId = this.settings.familyId
+      let next = applyManagedSettingsSave(this.settings, settings)
+      if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
+      this.write(next)
+      return this.get()
+    } catch (error) {
+      throw this.normalizeStorageRecoveryError(error)
+    }
   }
 
   merge(partial: DeepPartial<AppSettings>): AppSettings {
-    this.load()
-    this.recoverJournalProjection()
-    const currentFamilyId = this.settings.familyId
-    let next = applyManagedSettingsMerge(this.settings, partial)
-    if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
-    this.write(next)
-    return this.get()
+    this.assertStorageWritable()
+    try {
+      this.load()
+      this.recoverJournalProjection()
+      const currentFamilyId = this.settings.familyId
+      let next = applyManagedSettingsMerge(this.settings, partial)
+      if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
+      this.write(next)
+      return this.get()
+    } catch (error) {
+      throw this.normalizeStorageRecoveryError(error)
+    }
   }
 
   listPendingBabyInfo(rawRequest: unknown): BabyInfoPendingPage {
+    this.assertStorageWritable()
     const request = parsePendingPageRequest(rawRequest)
     return this.journal.listPending(request.familyId, {
       limit: request.limit,
@@ -318,6 +458,15 @@ export class SettingsStore {
   }
 
   commitBabyInfo(rawOperation: unknown): BabyInfoSettingsCommitResult {
+    this.assertStorageWritable()
+    try {
+      return this.commitBabyInfoInternal(rawOperation)
+    } catch (error) {
+      throw this.normalizeStorageRecoveryError(error)
+    }
+  }
+
+  private commitBabyInfoInternal(rawOperation: unknown): BabyInfoSettingsCommitResult {
     const operation = parseBabyInfoSettingsCommitOperation(rawOperation)
     let current = parseAppSettings(this.settings)
 
@@ -355,6 +504,7 @@ export class SettingsStore {
       let mutation: BabyInfoMutation | undefined
       let winner: BabyInfoMutation | undefined
       let activePendingCount = 0
+      let journalMutationDurable = false
 
       if (changed && operation.familyId) {
         const before = this.journal.getSummary(operation.familyId)
@@ -374,6 +524,7 @@ export class SettingsStore {
         }
         canonicalBabyInfoMutationJson(mutation)
         const summary = this.journal.ingest(operation.familyId, [mutation], [])
+        journalMutationDurable = true
         winner = summary.winner
         activePendingCount = summary.pendingCount
       } else if (operation.familyId) {
@@ -395,7 +546,14 @@ export class SettingsStore {
           babyInfoJournal: this.projectionMetadata(operation.familyId, winner),
           babyInfoRevision: incrementBabyInfoRevision(current),
         }
-        this.write(settings)
+        try {
+          this.write(settings)
+        } catch (error) {
+          if (journalMutationDurable) {
+            throw new SettingsJournalMutationRecoveryError('user-edit', error)
+          }
+          throw error
+        }
       }
 
       const pendingCount = this.journal.getTotalPendingCount()
@@ -412,11 +570,14 @@ export class SettingsStore {
       }
     }
 
+    const beforeSummary = this.journal.getSummary(operation.familyId)
     const summary = this.journal.ingest(
       operation.familyId,
       operation.discoveredMutations,
       operation.exactAcknowledgedMutationKeys,
     )
+    const journalMutationDurable = beforeSummary.mutationCount !== summary.mutationCount
+      || beforeSummary.pendingCount !== summary.pendingCount
     const metadata = this.projectionMetadata(operation.familyId, summary.winner)
     const projectionChanged = Boolean(summary.winner) && (
       current.baby.name !== summary.winner!.babyName
@@ -424,19 +585,26 @@ export class SettingsStore {
     )
     const metadataChanged = !sameValue(current.babyInfoJournal, metadata)
     if (projectionChanged || metadataChanged || current.babyInfoSync !== undefined) {
-      this.write({
-        ...current,
-        baby: summary.winner
-          ? {
-              ...current.baby,
-              name: summary.winner.babyName,
-              birthdate: summary.winner.babyBirthdate,
-            }
-          : current.baby,
-        babyInfoSync: undefined,
-        babyInfoJournal: metadata,
-        babyInfoRevision: incrementBabyInfoRevision(current),
-      })
+      try {
+        this.write({
+          ...current,
+          baby: summary.winner
+            ? {
+                ...current.baby,
+                name: summary.winner.babyName,
+                birthdate: summary.winner.babyBirthdate,
+              }
+            : current.baby,
+          babyInfoSync: undefined,
+          babyInfoJournal: metadata,
+          babyInfoRevision: incrementBabyInfoRevision(current),
+        })
+      } catch (error) {
+        if (journalMutationDurable) {
+          throw new SettingsJournalMutationRecoveryError('reconcile', error)
+        }
+        throw error
+      }
     }
     const pendingCount = this.journal.getTotalPendingCount()
     return {

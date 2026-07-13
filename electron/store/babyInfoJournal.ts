@@ -26,6 +26,7 @@ import {
 } from '../../shared/babyInfoArchivePaging'
 import {
   appendDurableFileSync,
+  isDurableAppendCommittedError,
   isDurableAppendUncertainError,
   isDurableTruncateUncertainError,
   truncateDurableFileSync,
@@ -331,7 +332,9 @@ export class BabyInfoJournal {
       // The durable primitive either restored the exact pre-append prefix or
       // explicitly reported that it could not confirm rollback. Never ingest
       // bytes from the failed attempt into this process's memory.
-      if (isDurableAppendUncertainError(error) || isDurableTruncateUncertainError(error)) {
+      if (isDurableAppendUncertainError(error)
+        || isDurableAppendCommittedError(error)
+        || isDurableTruncateUncertainError(error)) {
         this.storageUncertain = true
       }
       throw error

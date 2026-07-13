@@ -156,6 +156,50 @@ describe('durable synchronous file writes', () => {
     },
   )
 
+  it.each(['directory-fsync', 'directory-close'] as const)(
+    'reports a structured committed replacement after rename when %s fails',
+    failure => {
+      const file = path.join(tmpDir, 'settings.json')
+      fs.writeFileSync(file, 'old')
+      let openCount = 0
+      const realOpen = fs.openSync.bind(fs)
+      const ops: DurableFileOps = {
+        ...fs,
+        openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+          openCount += 1
+          return realOpen(target, flags, mode)
+        },
+        fsyncSync(fd) {
+          const directoryPhase = openCount >= 2
+          if (failure === 'directory-fsync' && directoryPhase) {
+            throw new Error('injected post-rename directory fsync failure')
+          }
+          fs.fsyncSync(fd)
+        },
+        closeSync(fd) {
+          const directoryPhase = openCount >= 2
+          fs.closeSync(fd)
+          if (failure === 'directory-close' && directoryPhase) {
+            throw new Error('injected post-rename directory close failure')
+          }
+        },
+      }
+
+      let caught: unknown
+      try {
+        atomicReplaceFileSync(file, Buffer.from('new'), { fs: ops, platform: 'linux' })
+      } catch (error) { caught = error }
+
+      expect(caught).toMatchObject({
+        code: 'DURABLE_REPLACE_COMMITTED_WITH_ERROR',
+        committed: true,
+        fileSynced: true,
+        renameCompleted: true,
+      })
+      expect(fs.readFileSync(file, 'utf8')).toBe('new')
+    },
+  )
+
   it('uses the explicit safe Windows contract without claiming a directory fsync', () => {
     const file = path.join(tmpDir, 'settings.json')
     const result = atomicReplaceFileSync(file, Buffer.from('windows'), { platform: 'win32' })

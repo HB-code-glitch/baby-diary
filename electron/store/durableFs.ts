@@ -3,7 +3,7 @@ import * as path from 'path'
 
 export interface DurableFileOps {
   existsSync(target: nodeFs.PathLike): boolean
-  mkdirSync(target: nodeFs.PathLike, options: nodeFs.MakeDirectoryOptions & { recursive: true }): string | undefined
+  mkdirSync(target: nodeFs.PathLike, options?: nodeFs.MakeDirectoryOptions): string | undefined
   openSync(target: nodeFs.PathLike, flags: nodeFs.OpenMode, mode?: nodeFs.Mode): number
   writeSync(
     fd: number,
@@ -55,6 +55,57 @@ export function isDurableAppendUncertainError(error: unknown): error is DurableA
     || (typeof error === 'object'
       && error !== null
       && (error as { code?: unknown }).code === 'DURABLE_APPEND_UNCERTAIN')
+}
+
+export class DurableAppendCommittedError extends Error {
+  readonly code = 'DURABLE_APPEND_COMMITTED_WITH_ERROR' as const
+  readonly committed = true as const
+  readonly fileSynced = true as const
+
+  constructor(
+    readonly target: string,
+    readonly preAppendLength: number,
+    readonly appendedLength: number,
+    readonly postCommitError: unknown,
+  ) {
+    super(
+      `Durable append committed its bytes but a later operation failed: ${postCommitError instanceof Error ? postCommitError.message : String(postCommitError)}`,
+    )
+    this.name = 'DurableAppendCommittedError'
+    Object.assign(this, { cause: postCommitError })
+  }
+}
+
+export function isDurableAppendCommittedError(error: unknown): error is DurableAppendCommittedError {
+  return error instanceof DurableAppendCommittedError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'DURABLE_APPEND_COMMITTED_WITH_ERROR')
+}
+
+export class DurableReplaceCommittedError extends Error {
+  readonly code = 'DURABLE_REPLACE_COMMITTED_WITH_ERROR' as const
+  readonly committed = true as const
+  readonly fileSynced = true as const
+  readonly renameCompleted = true as const
+
+  constructor(
+    readonly target: string,
+    readonly postCommitError: unknown,
+  ) {
+    super(
+      `Atomic replacement committed the renamed file but a later operation failed: ${postCommitError instanceof Error ? postCommitError.message : String(postCommitError)}`,
+    )
+    this.name = 'DurableReplaceCommittedError'
+    Object.assign(this, { cause: postCommitError })
+  }
+}
+
+export function isDurableReplaceCommittedError(error: unknown): error is DurableReplaceCommittedError {
+  return error instanceof DurableReplaceCommittedError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'DURABLE_REPLACE_COMMITTED_WITH_ERROR')
 }
 
 export class DurableTruncateUncertainError extends Error {
@@ -137,16 +188,23 @@ export function appendDurableFileSync(
   const platform = options.platform ?? process.platform
   ensureParent(target, ops)
   const created = !ops.existsSync(target)
+  const payload = asBuffer(data)
   const fd = ops.openSync(target, created ? 'wx+' : 'r+', 0o600)
+
+  let appendCommitted = false
+  let preAppendLength = 0
+  let operationFailed = false
+  let operationError: unknown
   try {
     const stat = ops.fstatSync(fd)
     if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
       throw new Error('durable append target length is invalid')
     }
-    const preAppendLength = stat.size
+    preAppendLength = stat.size
     try {
-      writeAllSync(fd, asBuffer(data), ops, preAppendLength)
+      writeAllSync(fd, payload, ops, preAppendLength)
       ops.fsyncSync(fd)
+      appendCommitted = true
     } catch (appendError) {
       try {
         ops.ftruncateSync(fd, preAppendLength)
@@ -161,12 +219,47 @@ export function appendDurableFileSync(
       }
       throw appendError
     }
-  } finally {
+  } catch (error) {
+    operationFailed = true
+    operationError = error
+  }
+
+  let closeFailed = false
+  let closeError: unknown
+  try {
     ops.closeSync(fd)
+  } catch (error) {
+    closeFailed = true
+    closeError = error
+  }
+
+  if (appendCommitted && closeFailed) {
+    throw new DurableAppendCommittedError(
+      target,
+      preAppendLength,
+      payload.byteLength,
+      closeError,
+    )
+  }
+  if (operationFailed) throw operationError
+  if (closeFailed) throw closeError
+
+  let directorySynced = false
+  if (created) {
+    try {
+      directorySynced = syncParentDirectory(target, ops, platform)
+    } catch (error) {
+      throw new DurableAppendCommittedError(
+        target,
+        preAppendLength,
+        payload.byteLength,
+        error,
+      )
+    }
   }
   return {
     fileSynced: true,
-    directorySynced: created ? syncParentDirectory(target, ops, platform) : false,
+    directorySynced,
   }
 }
 
@@ -192,9 +285,15 @@ export function atomicReplaceFileSync(
     }
     ops.renameSync(temporary, target)
     temporaryExists = false
+    let directorySynced: boolean
+    try {
+      directorySynced = syncParentDirectory(target, ops, platform)
+    } catch (error) {
+      throw new DurableReplaceCommittedError(target, error)
+    }
     return {
       fileSynced: true,
-      directorySynced: syncParentDirectory(target, ops, platform),
+      directorySynced,
     }
   } catch (error) {
     if (temporaryExists) {

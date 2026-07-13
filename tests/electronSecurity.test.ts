@@ -260,6 +260,61 @@ describe('Electron BrowserWindow security boundary', () => {
     })
   })
 
+  it('locks runtime mutations and pending drain after committed settings recovery is required', async () => {
+    const mainWindow = await loadMainWindow()
+    const commit = ipcHandlers.get('settings:commitBabyInfo')
+    const save = ipcHandlers.get('settings:save')
+    const merge = ipcHandlers.get('settings:merge')
+    const listPending = ipcHandlers.get('babyInfo:listPending')
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+    electron.app.exit.mockClear()
+    settingsStoreMocks.commitBabyInfo.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted committed settings failure'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        readOnly: true,
+        localDataModified: true,
+        settingsEvidence: { committed: true, durabilityConfirmed: false },
+      })
+    })
+
+    await expect(commit!({}, { kind: 'user-edit' })).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_REQUIRED',
+        message: 'Baby Diary must restart to revalidate local settings.',
+      },
+    })
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/may already have changed/i),
+    )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/cloud synchronization may already have been in progress/i),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/no cloud data was changed/i),
+    )
+    expect(electron.app.exit).toHaveBeenCalledWith(1)
+    expect(mainWindow.webContents.send.mock.calls.some(call => call[0] === 'settings:changed')).toBe(false)
+
+    await expect(listPending!({}, { familyId: 'family-A', limit: 10 }))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' })
+    await expect(save!({}, {})).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' })
+    await expect(merge!({}, {})).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' })
+    await expect(commit!({}, { kind: 'user-edit' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'RECOVERY_REQUIRED' },
+    })
+    expect(settingsStoreMocks.commitBabyInfo).toHaveBeenCalledTimes(1)
+    expect(settingsStoreMocks.listPendingBabyInfo).not.toHaveBeenCalled()
+    expect(settingsStoreMocks.save).not.toHaveBeenCalled()
+    expect(settingsStoreMocks.merge).not.toHaveBeenCalled()
+  })
+
   it('fails closed with a user-visible recovery message when settings and journal cannot be verified', async () => {
     settingsStoreMocks.construct.mockImplementationOnce(() => {
       throw Object.assign(new Error('C:\\private\\settings.json contains secrets'), {
@@ -343,6 +398,44 @@ describe('Electron BrowserWindow security boundary', () => {
     )
   })
 
+  it('reports an applied Windows restore before requiring its final verification startup', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        restartRequired: true,
+        restoreApplied: true,
+        localDataModified: true,
+        primaryUntouched: false,
+        originalsPreserved: true,
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/verified.+pair was applied locally/i),
+    )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/one more|once more|final independent/i),
+    )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/cloud synchronization was not started/i),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/could not be verified or restored/i),
+    )
+    expect(electron.app.exit).toHaveBeenCalledWith(1)
+    expect(MockBrowserWindow.instances).toHaveLength(0)
+  })
+
   it('admits a durable local archive-only mutation in startup copy', async () => {
     settingsStoreMocks.construct.mockImplementationOnce(() => {
       throw Object.assign(new Error('redacted'), {
@@ -364,6 +457,98 @@ describe('Electron BrowserWindow security boundary', () => {
     expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
       'Baby Diary recovery required',
       expect.stringMatching(/local baby-info archive was durably added/i),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/no local data was modified/i),
+    )
+  })
+
+  it('admits a durable linked journal migration in startup copy', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        localDataModified: true,
+        journalEvidence: {
+          kind: 'legacy-import',
+          durable: true,
+        },
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/journal migration was durably recorded/i),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/no local data was modified/i),
+    )
+  })
+
+  it('describes a committed journal update without calling it a migration', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        localDataModified: true,
+        journalEvidence: {
+          kind: 'storage-uncertain',
+          durable: true,
+          committed: true,
+          uncertain: true,
+        },
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/journal update reached local storage/i),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/journal migration/i),
+    )
+  })
+
+  it('reports uncertain journal bytes without denying local changes', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        localDataModified: true,
+        journalEvidence: {
+          kind: 'storage-uncertain',
+          durable: false,
+          committed: false,
+          uncertain: true,
+        },
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/journal bytes may have changed/i),
+    )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/cloud synchronization was not started/i),
     )
     expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
       expect.anything(),

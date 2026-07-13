@@ -60,13 +60,22 @@ let eventLog: EventLog
 let settingsStore: SettingsStore
 let backupManager: BackupManager
 let settingsChangeSequence = 0
+let runtimeRecoveryLocked = false
 
 type StartupRecoveryEvidence = {
   originalsPreserved?: unknown
   restartRequired?: unknown
+  restoreApplied?: unknown
   primaryUntouched?: unknown
   localDataModified?: unknown
   archiveEvidence?: { archiveId?: unknown; durable?: unknown }
+  journalEvidence?: {
+    kind?: unknown
+    durable?: unknown
+    committed?: unknown
+    uncertain?: unknown
+  }
+  settingsEvidence?: { committed?: unknown; durabilityConfirmed?: unknown }
 }
 
 function startupFailureMessage(error: unknown, recoveryRequired: boolean): string {
@@ -75,17 +84,77 @@ function startupFailureMessage(error: unknown, recoveryRequired: boolean): strin
     : {}
   const originalsPreserved = recoveryRequired && evidence.originalsPreserved === true
   const restartRequired = recoveryRequired && evidence.restartRequired === true
+  const restoreApplied = recoveryRequired
+    && restartRequired
+    && evidence.restoreApplied === true
   const primaryUntouched = recoveryRequired && evidence.primaryUntouched === true
   const durableLocalArchive = recoveryRequired
     && evidence.localDataModified === true
     && evidence.archiveEvidence?.durable === true
     && typeof evidence.archiveEvidence.archiveId === 'string'
+  const journalKind = typeof evidence.journalEvidence?.kind === 'string'
+    ? evidence.journalEvidence.kind
+    : undefined
+  const durableLocalJournalMigration = recoveryRequired
+    && evidence.localDataModified === true
+    && evidence.journalEvidence?.durable === true
+    && (journalKind === 'legacy-import' || journalKind === 'legacy-local-pair')
+  const committedLocalJournal = recoveryRequired
+    && evidence.localDataModified === true
+    && journalKind === 'storage-uncertain'
+    && evidence.journalEvidence?.durable === true
+    && evidence.journalEvidence?.committed === true
+    && evidence.journalEvidence?.uncertain === true
+  const uncertainLocalJournal = recoveryRequired
+    && evidence.localDataModified === true
+    && journalKind === 'storage-uncertain'
+    && evidence.journalEvidence?.uncertain === true
+    && !committedLocalJournal
+  const committedLocalSettings = recoveryRequired
+    && evidence.localDataModified === true
+    && evidence.settingsEvidence?.committed === true
+    && evidence.settingsEvidence?.durabilityConfirmed === false
 
+  if (restoreApplied) {
+    return [
+      'A verified settings and baby journal pair was applied locally. Baby Diary did not open the app UI. Restart Baby Diary once more so an independent startup can verify the restored pair. Cloud synchronization was not started in this launch.',
+      '검증된 설정 및 아기 기록 쌍이 로컬에 적용되었습니다. 앱 화면은 열리지 않았습니다. 별도의 시작 과정에서 복원된 쌍을 확인할 수 있도록 Baby Diary를 한 번 더 다시 시작해 주세요. 이번 실행에서는 클라우드 동기화가 시작되지 않았습니다.',
+      '検証済みの設定と赤ちゃん記録のペアをローカルに適用しました。アプリ画面は開いていません。別の起動で復元済みペアを確認するため、Baby Diaryをもう一度再起動してください。この起動ではクラウド同期は開始されていません。',
+    ].join('\n\n')
+  }
   if (durableLocalArchive) {
     return [
       'A local baby-info archive was durably added before settings projection failed. No cloud data was changed. Restart Baby Diary so the saved archive can be reconciled.',
       '설정 반영에 실패하기 전에 로컬 아기 정보 보관본이 안전하게 저장되었습니다. 클라우드 데이터는 변경되지 않았습니다. 저장된 보관본을 정리하려면 아기 일기를 다시 시작해 주세요.',
       '設定への反映に失敗する前に、ローカルの赤ちゃん情報アーカイブが安全に保存されました。クラウドデータは変更されていません。保存済みアーカイブを整合するため、ベビーダイアリーを再起動してください。',
+    ].join('\n\n')
+  }
+  if (committedLocalJournal) {
+    return [
+      'A local baby-info journal update reached local storage, but final file-handle confirmation failed. Journal bytes changed and must be revalidated before more work. The app UI did not open, and cloud synchronization was not started in this launch. Restart Baby Diary.',
+      '로컬 아기 정보 기록 업데이트가 저장소에 반영되었지만 파일 핸들의 최종 확인에 실패했습니다. 기록 바이트가 변경되었으므로 추가 작업 전에 다시 검증해야 합니다. 앱 화면은 열리지 않았고 이번 실행에서는 클라우드 동기화가 시작되지 않았습니다. Baby Diary를 다시 시작해 주세요.',
+      'ローカルの赤ちゃん情報記録の更新はストレージに反映されましたが、ファイルハンドルの最終確認に失敗しました。記録バイトは変更されているため、続行前に再検証が必要です。アプリ画面は開かれず、この起動ではクラウド同期も開始されていません。Baby Diaryを再起動してください。',
+    ].join('\n\n')
+  }
+  if (uncertainLocalJournal) {
+    return [
+      'Local baby-info journal bytes may have changed, and final durability is unknown. The app UI did not open, and cloud synchronization was not started in this launch. Restart Baby Diary so local storage can be revalidated before any more changes.',
+      '로컬 아기 정보 기록 바이트가 변경되었을 수 있으며 최종 내구성은 확인되지 않았습니다. 앱 화면은 열리지 않았고 이번 실행에서는 클라우드 동기화가 시작되지 않았습니다. 추가 변경 전에 로컬 저장소를 다시 검증할 수 있도록 Baby Diary를 다시 시작해 주세요.',
+      'ローカルの赤ちゃん情報記録バイトが変更された可能性があり、最終的な耐久性は不明です。アプリ画面は開かれず、この起動ではクラウド同期も開始されていません。追加変更の前にローカルストレージを再検証するため、Baby Diaryを再起動してください。',
+    ].join('\n\n')
+  }
+  if (durableLocalJournalMigration) {
+    return [
+      'A local baby-info journal migration was durably recorded before settings projection failed. No cloud data was changed. Restart Baby Diary so the saved journal can be reconciled.',
+      '설정 반영에 실패하기 전에 로컬 아기 정보 기록 마이그레이션이 안전하게 저장되었습니다. 클라우드 데이터는 변경되지 않았습니다. 저장된 기록을 정리하려면 아기 일기를 다시 시작해 주세요.',
+      '設定への反映に失敗する前に、ローカルの赤ちゃん情報記録の移行が安全に保存されました。クラウドデータは変更されていません。保存済みの記録を整合するため、Baby Diary を再起動してください。',
+    ].join('\n\n')
+  }
+  if (committedLocalSettings) {
+    return [
+      'A settings replacement reached local storage, but final directory durability confirmation failed. Local data may have changed; no cloud data was changed. Restart Baby Diary before making more changes.',
+      '설정 교체가 로컬 저장소에 반영되었지만 디렉터리 내구성의 최종 확인에 실패했습니다. 로컬 데이터가 변경되었을 수 있으며 클라우드 데이터는 변경되지 않았습니다. 추가 변경 전에 아기 일기를 다시 시작해 주세요.',
+      '設定の置換はローカルストレージに反映されましたが、ディレクトリ永続性の最終確認に失敗しました。ローカルデータが変更された可能性がありますが、クラウドデータは変更されていません。追加の変更を行う前に Baby Diary を再起動してください。',
     ].join('\n\n')
   }
   if (originalsPreserved) {
@@ -114,6 +183,39 @@ function startupFailureMessage(error: unknown, recoveryRequired: boolean): strin
     '아기 일기를 시작할 수 없습니다. 시작 실패 이후 로컬 데이터는 변경되지 않았습니다.',
     'ベビーダイアリーを起動できませんでした。起動失敗後にローカルデータは変更されていません。',
   ].join('\n\n')
+}
+
+function isRecoveryRequiredError(error: unknown): boolean {
+  return error instanceof SettingsRecoveryError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'SETTINGS_RECOVERY_REQUIRED')
+}
+
+function runtimeRecoveryMessage(): string {
+  return [
+    'Local settings may already have changed, and final durability could not be confirmed. Further settings and baby-info changes, including cloud pending drain, are blocked. Baby Diary will close; restart it to revalidate local data. Cloud synchronization may already have been in progress.',
+    '로컬 설정이 이미 변경되었을 수 있으며 최종 내구성을 확인하지 못했습니다. 클라우드 대기 항목 전송을 포함한 추가 설정 및 아기 정보 변경을 차단했습니다. 로컬 데이터를 다시 검증하기 위해 아기 일기를 종료하므로 다시 시작해 주세요. 클라우드 동기화가 이미 진행 중이었을 수 있습니다.',
+    'ローカル設定はすでに変更されている可能性があり、最終的な永続性を確認できませんでした。クラウド保留項目の送信を含む設定・赤ちゃん情報の追加変更を停止しました。ローカルデータを再検証するため Baby Diary を終了します。再起動してください。クラウド同期がすでに進行していた可能性があります。',
+  ].join('\n\n')
+}
+
+function recoveryRequiredIpcError(): Error & { code: 'RECOVERY_REQUIRED'; recoverable: true } {
+  return Object.assign(new Error('Baby Diary must restart to revalidate local settings.'), {
+    code: 'RECOVERY_REQUIRED' as const,
+    recoverable: true as const,
+  })
+}
+
+function enterRuntimeRecoveryLock(): void {
+  if (runtimeRecoveryLocked) return
+  runtimeRecoveryLocked = true
+  dialog.showErrorBox('Baby Diary recovery required', runtimeRecoveryMessage())
+  app.exit(1)
+}
+
+function assertRuntimeRecoveryUnlocked(): void {
+  if (runtimeRecoveryLocked) throw recoveryRequiredIpcError()
 }
 
 function publishAuthoritativeSettings(settings: AppSettings): void {
@@ -192,19 +294,46 @@ function setupIPC(): void {
   })
 
   ipcMain.handle('settings:save', async (_, settings: AppSettings) => {
-    const saved = settingsStore.save(settings)
-    publishAuthoritativeSettings(saved)
-    return saved
+    try {
+      assertRuntimeRecoveryUnlocked()
+      const saved = settingsStore.save(settings)
+      publishAuthoritativeSettings(saved)
+      return saved
+    } catch (error) {
+      if (isRecoveryRequiredError(error)) {
+        enterRuntimeRecoveryLock()
+        throw recoveryRequiredIpcError()
+      }
+      throw error
+    }
   })
 
   ipcMain.handle('settings:merge', async (_, partial: Partial<AppSettings>) => {
-    const saved = settingsStore.merge(partial)
-    publishAuthoritativeSettings(saved)
-    return saved
+    try {
+      assertRuntimeRecoveryUnlocked()
+      const saved = settingsStore.merge(partial)
+      publishAuthoritativeSettings(saved)
+      return saved
+    } catch (error) {
+      if (isRecoveryRequiredError(error)) {
+        enterRuntimeRecoveryLock()
+        throw recoveryRequiredIpcError()
+      }
+      throw error
+    }
   })
 
   ipcMain.handle('babyInfo:listPending', async (_, request: unknown) => {
-    return settingsStore.listPendingBabyInfo(request)
+    try {
+      assertRuntimeRecoveryUnlocked()
+      return settingsStore.listPendingBabyInfo(request)
+    } catch (error) {
+      if (isRecoveryRequiredError(error)) {
+        enterRuntimeRecoveryLock()
+        throw recoveryRequiredIpcError()
+      }
+      throw error
+    }
   })
 
   ipcMain.handle('babyInfo:getSummary', async (_, familyId: string) => {
@@ -224,10 +353,24 @@ function setupIPC(): void {
     operation: BabyInfoSettingsCommitOperation,
   ): Promise<BabyInfoCommitIpcResponse> => {
     try {
+      assertRuntimeRecoveryUnlocked()
       const value = settingsStore.commitBabyInfo(operation)
       publishAuthoritativeSettings(value.settings)
       return { ok: true, value }
     } catch (error) {
+      if (isRecoveryRequiredError(error)
+        || (typeof error === 'object'
+          && error !== null
+          && (error as { code?: unknown }).code === 'RECOVERY_REQUIRED')) {
+        enterRuntimeRecoveryLock()
+        return {
+          ok: false,
+          error: {
+            code: 'RECOVERY_REQUIRED',
+            message: 'Baby Diary must restart to revalidate local settings.',
+          },
+        }
+      }
       if (error instanceof BabyInfoSettingsCommitError) {
         return {
           ok: false,

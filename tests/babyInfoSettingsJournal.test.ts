@@ -3,7 +3,7 @@ import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SettingsStore } from '../electron/store/settings'
-import { BabyInfoJournal } from '../electron/store/babyInfoJournal'
+import { BABY_INFO_JOURNAL_FILE, BabyInfoJournal } from '../electron/store/babyInfoJournal'
 import type { DurableFileOps } from '../electron/store/durableFs'
 import type {
   AppSettings,
@@ -220,17 +220,218 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     fs.rmSync(settingsPath)
     fs.mkdirSync(settingsPath)
 
-    expect(() => commit(store, {
+    let failure: unknown
+    try { commit(store, {
       kind: 'user-edit',
       familyId: 'family-A',
       babyName: 'Durable but not projected',
       babyBirthdate: '2026-04-04',
-    })).toThrow()
+    }) } catch (error) { failure = error }
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      readOnly: true,
+      journalEvidence: { kind: 'user-edit', durable: true },
+    })
     expect(store.get()).toEqual(before)
+    const journalAfterFailure = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+    expect(() => listPending(store)).toThrow(expect.objectContaining({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+    }))
+    expect(() => commit(store, {
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'Must remain blocked',
+      babyBirthdate: '2026-05-05',
+    })).toThrow(expect.objectContaining({ code: 'SETTINGS_RECOVERY_REQUIRED' }))
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(journalAfterFailure)
 
     fs.rmSync(settingsPath, { recursive: true, force: true })
     writeSettings(tmpDir, before)
     expect(new SettingsStore(tmpDir).get().baby.name).toBe('Durable but not projected')
+  })
+
+  it('locks after reconcile journaling becomes durable but its projection replacement fails', () => {
+    writeSettings(tmpDir, baseSettings())
+    let failProjection = false
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const durableFs = Object.create(fs) as DurableFileOps
+    durableFs.renameSync = (oldPath, newPath) => {
+      if (failProjection && path.resolve(String(newPath)) === path.resolve(settingsPath)) {
+        throw Object.assign(new Error('injected reconcile projection failure'), { code: 'EIO' })
+      }
+      fs.renameSync(oldPath, newPath)
+    }
+    const store = new SettingsStore(tmpDir, { durableFs })
+    const discovered = mutation(906)
+    failProjection = true
+
+    let failure: unknown
+    try {
+      commit(store, {
+        kind: 'reconcile',
+        familyId: 'family-A',
+        discoveredMutations: [discovered],
+        exactAcknowledgedMutationKeys: [],
+      })
+    } catch (error) { failure = error }
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      readOnly: true,
+      journalEvidence: { kind: 'reconcile', durable: true },
+    })
+    const journalAfterFailure = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+    expect(() => listPending(store)).toThrow(expect.objectContaining({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+    }))
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(journalAfterFailure)
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({
+      name: discovered.babyName,
+      birthdate: discovered.babyBirthdate,
+    })
+    expect(restarted.getBabyInfoSummary('family-A').winner).toEqual(discovered)
+  })
+
+  it('locks SettingsStore when a user-edit journal append commits but close fails', () => {
+    writeSettings(tmpDir, baseSettings())
+    const targets = new Map<number, { path: string; flags: fs.OpenMode }>()
+    const realOpen = fs.openSync.bind(fs)
+    let failJournalClose = false
+    let failedClose = false
+    let writeCalls = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target, flags, mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, { path: String(target), flags })
+        return fd
+      },
+      writeSync(fd, buffer, offset, length, position) {
+        writeCalls += 1
+        return fs.writeSync(fd, buffer, offset, length, position)
+      },
+      closeSync(fd) {
+        const target = targets.get(fd)
+        targets.delete(fd)
+        fs.closeSync(fd)
+        if (failJournalClose
+          && !failedClose
+          && target?.path.endsWith(BABY_INFO_JOURNAL_FILE)
+          && target.flags === 'r+') {
+          failedClose = true
+          throw new Error('injected committed journal close failure')
+        }
+      },
+    }
+    const store = new SettingsStore(tmpDir, { durableFs })
+    failJournalClose = true
+
+    let failure: unknown
+    try {
+      commit(store, {
+        kind: 'user-edit',
+        familyId: 'family-A',
+        babyName: 'Committed journal suffix',
+        babyBirthdate: '2026-06-06',
+      })
+    } catch (error) { failure = error }
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      readOnly: true,
+      journalEvidence: {
+        kind: 'storage-uncertain',
+        durable: true,
+        committed: true,
+        uncertain: true,
+      },
+    })
+    const writesAfterFailure = writeCalls
+    expect(() => listPending(store)).toThrow(expect.objectContaining({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+    }))
+    expect(() => store.save(store.get())).toThrow(expect.objectContaining({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+    }))
+    expect(() => commit(store, {
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'Blocked',
+      babyBirthdate: '2026-07-07',
+    })).toThrow(expect.objectContaining({ code: 'SETTINGS_RECOVERY_REQUIRED' }))
+    expect(writeCalls).toBe(writesAfterFailure)
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({
+      name: 'Committed journal suffix',
+      birthdate: '2026-06-06',
+    })
+  })
+
+  it('reports and replays a legacy import whose journal append committed before close failed', () => {
+    const pending = mutation(907)
+    writeSettings(tmpDir, baseSettings({
+      babyInfoSync: {
+        version: 1,
+        mutations: [pending],
+        pendingMutationKeys: [getBabyInfoMutationKey(pending)],
+      },
+    }))
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), '')
+    const targets = new Map<number, { path: string; flags: fs.OpenMode }>()
+    const realOpen = fs.openSync.bind(fs)
+    let failedClose = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target, flags, mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, { path: String(target), flags })
+        return fd
+      },
+      closeSync(fd) {
+        const target = targets.get(fd)
+        targets.delete(fd)
+        fs.closeSync(fd)
+        if (!failedClose
+          && target?.path.endsWith(BABY_INFO_JOURNAL_FILE)
+          && target.flags === 'r+') {
+          failedClose = true
+          throw new Error('injected legacy journal close failure')
+        }
+      },
+    }
+
+    let failure: unknown
+    try { new SettingsStore(tmpDir, { durableFs }) } catch (error) { failure = error }
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      readOnly: true,
+      journalEvidence: {
+        kind: 'storage-uncertain',
+        durable: true,
+        committed: true,
+        uncertain: true,
+      },
+    })
+    expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).babyInfoSync)
+      .toBeDefined()
+    expect(new BabyInfoJournal(tmpDir).getSummary('family-A')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: pending,
+    })
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().babyInfoSync).toBeUndefined()
+    expect(restarted.getBabyInfoSummary('family-A')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: pending,
+    })
   })
 
   it('isolates projections across A -> B -> restart and restores A when switching back', () => {
@@ -372,6 +573,8 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     expect(failure).toMatchObject({
       code: 'SETTINGS_RECOVERY_REQUIRED',
       localDataModified: true,
+      readOnly: true,
+      restartRequired: true,
       archiveEvidence: {
         archiveId: expect.any(String),
         durable: true,
@@ -387,6 +590,112 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     const restarted = new SettingsStore(tmpDir)
     expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
     expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
+  })
+
+  it('replays an unlinked archive whose journal append committed before close failed', () => {
+    writeSettings(tmpDir, baseSettings({
+      familyId: '',
+      baby: { name: 'Archive committed before close', birthdate: '2026-08-08', gender: 'girl' },
+    }))
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), '')
+    const targets = new Map<number, { path: string; flags: fs.OpenMode }>()
+    const realOpen = fs.openSync.bind(fs)
+    let failedClose = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target, flags, mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, { path: String(target), flags })
+        return fd
+      },
+      closeSync(fd) {
+        const target = targets.get(fd)
+        targets.delete(fd)
+        fs.closeSync(fd)
+        if (!failedClose
+          && target?.path.endsWith(BABY_INFO_JOURNAL_FILE)
+          && target.flags === 'r+') {
+          failedClose = true
+          throw new Error('injected unlinked archive close failure')
+        }
+      },
+    }
+
+    let failure: unknown
+    try { new SettingsStore(tmpDir, { durableFs }) } catch (error) { failure = error }
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      readOnly: true,
+      restartRequired: true,
+      journalEvidence: {
+        kind: 'storage-uncertain',
+        durable: true,
+        committed: true,
+        uncertain: true,
+      },
+    })
+    expect(new BabyInfoJournal(tmpDir).listUnlinkedArchivePage({ limit: 10 }).items).toEqual([
+      expect.objectContaining({
+        babyName: 'Archive committed before close',
+        babyBirthdate: '2026-08-08',
+      }),
+    ])
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
+  })
+
+  it('reports durable linked legacy migration evidence when settings projection fails', () => {
+    const pending = mutation(905)
+    writeSettings(tmpDir, baseSettings({
+      babyInfoSync: {
+        version: 1,
+        mutations: [pending],
+        pendingMutationKeys: [getBabyInfoMutationKey(pending)],
+      },
+    }))
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const durableFs = Object.create(fs) as DurableFileOps
+    durableFs.renameSync = (oldPath, newPath) => {
+      if (path.resolve(String(newPath)) === path.resolve(settingsPath)) {
+        throw Object.assign(new Error('injected linked migration projection failure'), { code: 'EIO' })
+      }
+      fs.renameSync(oldPath, newPath)
+    }
+
+    let failure: unknown
+    try {
+      new SettingsStore(tmpDir, { durableFs })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      journalEvidence: {
+        kind: 'legacy-import',
+        durable: true,
+      },
+    })
+    const journal = new BabyInfoJournal(tmpDir)
+    expect(journal.getSummary('family-A')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: pending,
+    })
+    const journalBeforeRestart = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().babyInfoSync).toBeUndefined()
+    expect(restarted.getBabyInfoSummary('family-A')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: pending,
+    })
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(journalBeforeRestart)
   })
 
   it('does not create an archive or cloud pending record for a blank unscoped pair', () => {

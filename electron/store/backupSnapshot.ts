@@ -33,6 +33,8 @@ const MAX_DATA_BYTES = 512 * 1024 * 1024
 const MAX_TRANSACTION_BYTES = 1024 * 1024
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 const STREAM_CHUNK_BYTES = 64 * 1024
+const MAX_FORENSIC_ARCHIVE_ALLOCATION_ATTEMPTS = 64
+const MAX_FORENSIC_ARCHIVES = 64
 
 export const DEFAULT_BACKUP_RESOURCE_LIMITS = Object.freeze({
   maxSnapshotFiles: 4_096,
@@ -160,6 +162,22 @@ export class SettingsRecoveryError extends Error {
   ) {
     super(message)
     this.name = 'SettingsRecoveryError'
+  }
+}
+
+export class SettingsRestoreFinalizationError extends SettingsRecoveryError {
+  readonly restoreApplied = true as const
+  readonly localDataModified = true as const
+
+  constructor() {
+    super(
+      'The verified restore pair was written locally. One final independent application restart is required before the restored data can be opened.',
+      [],
+      true,
+      true,
+      false,
+    )
+    this.name = 'SettingsRestoreFinalizationError'
   }
 }
 
@@ -615,7 +633,7 @@ export function verifyBackupSnapshot(
   assertSnapshotDirectory(snapshotDir)
   const manifestPath = path.join(snapshotDir, BACKUP_MANIFEST_FILE)
   if (!fs.existsSync(manifestPath)) {
-    const entries = fs.readdirSync(snapshotDir, { withFileTypes: true })
+    const entries = boundedDirectoryEntries(snapshotDir, 2, 'legacy backup entry')
     if (entries.length !== 1
       || entries[0].name !== SETTINGS_FILE
       || !entries[0].isFile()
@@ -967,6 +985,43 @@ function sameTransactionIdentity(left: RestoreTransactionFile, right: RestoreTra
         && sameDescriptor(left.forensicManifest, right.forensicManifest))
 }
 
+function sameTransactionControls(left: RestoreTransactionFile, right: RestoreTransactionFile): boolean {
+  return left.phase === right.phase
+    && left.windowsVerifiedStartups === right.windowsVerifiedStartups
+    && left.lastWindowsStartupId === right.lastWindowsStartupId
+}
+
+function stagingIsExactlyOnePublicationAhead(
+  intent: RestoreTransactionFile,
+  staging: RestoreTransactionFile,
+  platform: NodeJS.Platform,
+): boolean {
+  if (intent.phase === 'allocated'
+    && staging.phase === (platform === 'win32' ? 'awaiting-windows-confirmation' : 'prepared')) {
+    return staging.windowsVerifiedStartups === intent.windowsVerifiedStartups
+      && staging.lastWindowsStartupId === intent.lastWindowsStartupId
+  }
+  if (platform === 'win32'
+    && intent.phase === 'awaiting-windows-confirmation'
+    && staging.phase === 'awaiting-windows-confirmation') {
+    return staging.windowsVerifiedStartups === intent.windowsVerifiedStartups + 1
+      && staging.windowsVerifiedStartups <= 2
+      && staging.lastWindowsStartupId.length > 0
+      && staging.lastWindowsStartupId !== intent.lastWindowsStartupId
+  }
+  if (intent.phase === 'awaiting-windows-confirmation'
+    && staging.phase === 'prepared') {
+    return staging.windowsVerifiedStartups === intent.windowsVerifiedStartups
+      && staging.lastWindowsStartupId === intent.lastWindowsStartupId
+      && (platform !== 'win32' || staging.windowsVerifiedStartups === 2)
+  }
+  if (intent.phase === 'prepared' && staging.phase === 'primary-verified') {
+    return staging.windowsVerifiedStartups === 0
+      && staging.lastWindowsStartupId === intent.lastWindowsStartupId
+  }
+  return false
+}
+
 function windowsRestartError(message: string): SettingsRecoveryError {
   return new SettingsRecoveryError(message, [], false, true, true)
 }
@@ -1002,12 +1057,29 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       if (!sameTransactionIdentity(stageMetadata, intentTransaction)) {
         throw new Error('restore intent and staging metadata differ')
       }
-      transaction = stageMetadata
+      if (sameTransactionControls(stageMetadata, intentTransaction)) {
+        transaction = intentTransaction
+      } else if (stagingIsExactlyOnePublicationAhead(intentTransaction, stageMetadata, platform)) {
+        transaction = stageMetadata
+      } else {
+        throw new Error('restore intent and staging transaction controls diverge')
+      }
       pair = verifyPairDirectory(stagingPath, transaction, { platform })
     } else {
       // A surviving exact outer intent is the only authority allowed to
       // reconstruct missing stage metadata.
       writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+    }
+
+    if (transaction.phase === 'primary-verified') {
+      if (!livePairMatches(userDataPath, transaction, pair, { platform })) {
+        throw new Error('primary-verified staging does not match the live settings/journal pair')
+      }
+      verifyForensicEvidence(userDataPath, transaction, { platform, now: options.now })
+      forensicConfirmed = true
+      removeIntentDurably(userDataPath, platform, ops)
+      removeStagingDurably(userDataPath, platform, ops)
+      return true
     }
 
     if (transaction.phase === 'allocated') {
@@ -1057,12 +1129,14 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     transaction = { ...transaction, phase: 'primary-verified', windowsVerifiedStartups: 0 }
     writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
     writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+    if (platform === 'win32') {
+      throw new SettingsRestoreFinalizationError()
+    }
     removeIntentDurably(userDataPath, platform, ops)
 
-    // POSIX can commit the directory-entry removal with parent fsync. Windows
-    // retains completed staging until a later independent startup verifies the
-    // primary pair and garbage-collects it.
-    if (platform !== 'win32') removeStagingDurably(userDataPath, platform, ops)
+    // This branch is POSIX-only because Windows returned through the dedicated
+    // final-verification restart gate above.
+    removeStagingDurably(userDataPath, platform, ops)
     return true
   } catch (error) {
     if (error instanceof SettingsRecoveryError) throw error
@@ -1097,20 +1171,44 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
       removeStagingDurably(userDataPath, platform, ops)
       return false
     }
+    if (parsed.phase === 'primary-verified') {
+      let exactRestoredLive = false
+      try {
+        verifyPairDirectory(userDataPath, parsed, { platform })
+        exactRestoredLive = true
+      } catch { /* distinguish valid later advancement below */ }
+      if (exactRestoredLive) {
+        verifyForensicEvidence(userDataPath, parsed, { platform, now: options.now })
+        removeStagingDurably(userDataPath, platform, ops)
+        return true
+      }
+      if (fs.existsSync(path.join(userDataPath, SETTINGS_FILE))
+        && livePairIsReadable(userDataPath, options)) {
+        removeStagingDurably(userDataPath, platform, ops)
+        return true
+      }
+      throw new Error('orphan primary-verified staging does not match the live settings/journal pair')
+    }
+
     const pair = verifyPairDirectory(stagingPath, parsed, { platform })
-
-    if (parsed.phase === 'primary-verified'
-      && livePairMatches(userDataPath, parsed, pair, { platform })) {
-      if (platform === 'win32') verifyForensicEvidence(userDataPath, parsed, { platform, now: options.now })
-      removeStagingDurably(userDataPath, platform, ops)
-      return true
-    }
-
-    const prepared: RestoreTransactionFile = {
-      ...parsed,
-      settings: descriptor(pair.settingsBytes),
-      journal: descriptor(pair.journalBytes),
-    }
+    const prepared: RestoreTransactionFile = platform === 'win32'
+      ? {
+          ...parsed,
+          settings: descriptor(pair.settingsBytes),
+          journal: descriptor(pair.journalBytes),
+          phase: 'awaiting-windows-confirmation',
+          windowsVerifiedStartups: 0,
+          lastWindowsStartupId: options.startupId ?? '',
+        }
+      : {
+          ...parsed,
+          settings: descriptor(pair.settingsBytes),
+          journal: descriptor(pair.journalBytes),
+          phase: 'prepared',
+          windowsVerifiedStartups: 0,
+          lastWindowsStartupId: '',
+        }
+    verifyForensicEvidence(userDataPath, prepared, { platform, now: options.now })
     writeDurably(metadataPath, transactionBytes(prepared), platform, ops)
     writeDurably(
       path.join(userDataPath, RESTORE_INTENT_FILE),
@@ -1167,6 +1265,139 @@ interface ForensicEvidence {
   preserved: boolean
 }
 
+interface BoundDirectoryIdentity {
+  absolute: string
+  real: string
+  parentReal: string
+  stat: fs.Stats
+  label: string
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  return path.relative(left, right) === '' && path.relative(right, left) === ''
+}
+
+function bindDirectChildDirectory(
+  directory: string,
+  parentReal: string,
+  label: string,
+): BoundDirectoryIdentity {
+  const absolute = path.resolve(directory)
+  const stat = fs.lstatSync(absolute)
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`${label} is not a regular directory`)
+  }
+  const real = fs.realpathSync.native(absolute)
+  if (!sameCanonicalPath(path.dirname(real), parentReal)) {
+    throw new Error(`${label} resolves outside its expected parent`)
+  }
+  return { absolute, real, parentReal, stat, label }
+}
+
+function assertBoundDirectory(identity: BoundDirectoryIdentity): void {
+  const stat = fs.lstatSync(identity.absolute)
+  if (stat.isSymbolicLink()
+    || !stat.isDirectory()
+    || stat.dev !== identity.stat.dev
+    || stat.ino !== identity.stat.ino
+    || stat.mode !== identity.stat.mode) {
+    throw new Error(`${identity.label} identity changed`)
+  }
+  const real = fs.realpathSync.native(identity.absolute)
+  if (!sameCanonicalPath(real, identity.real)
+    || !sameCanonicalPath(path.dirname(real), identity.parentReal)) {
+    throw new Error(`${identity.label} escaped its expected parent`)
+  }
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as NodeJS.ErrnoException).code === 'EEXIST'
+}
+
+function tryReuseForensicEvidence(
+  forensicsRoot: string,
+  rootIdentity: BoundDirectoryIdentity,
+  archiveId: string,
+  originals: Map<string, Buffer>,
+  options: BackupReadOptions,
+): ForensicEvidence | undefined {
+  try {
+    const archiveDir = path.join(forensicsRoot, archiveId)
+    const archiveIdentity = bindDirectChildDirectory(
+      archiveDir,
+      rootIdentity.real,
+      'reusable forensic preservation archive',
+    )
+    const assertForensicDirectories = () => {
+      assertBoundDirectory(rootIdentity)
+      assertBoundDirectory(archiveIdentity)
+    }
+    assertForensicDirectories()
+
+    const expectedNames = [BACKUP_MANIFEST_FILE, ...Array.from(originals.keys())].sort()
+    const actualEntries = boundedDirectoryEntries(
+      archiveDir,
+      3,
+      'forensic archive entry',
+    )
+    const actualNames = actualEntries.map(entry => entry.name).sort()
+    if (actualNames.length !== expectedNames.length
+      || actualNames.some((name, index) => name !== expectedNames[index])
+      || actualEntries.some(entry => !entry.isFile())) {
+      return undefined
+    }
+
+    assertForensicDirectories()
+    const manifestBytes = readRegularFileOnce(archiveDir, BACKUP_MANIFEST_FILE, options)
+    let raw: unknown
+    try {
+      raw = JSON.parse(manifestBytes.toString('utf8'))
+    } catch {
+      return undefined
+    }
+    if (!isRecord(raw)
+      || !exactKeys(raw, ['version', 'source', 'archivedAt', 'files'])
+      || raw.version !== 1
+      || raw.source !== 'baby-diary-recovery'
+      || typeof raw.archivedAt !== 'string'
+      || !Array.isArray(raw.files)
+      || raw.files.length !== originals.size) {
+      return undefined
+    }
+    strictTimestamp(raw.archivedAt, options.now ?? new Date())
+
+    const seen = new Set<string>()
+    for (const value of raw.files) {
+      if (!isRecord(value)
+        || !exactKeys(value, ['path', 'size', 'sha256'])
+        || typeof value.path !== 'string'
+        || seen.has(value.path)
+        || !validDigestDescriptor({ size: value.size, sha256: value.sha256 })) {
+        return undefined
+      }
+      const original = originals.get(value.path)
+      if (!original) return undefined
+      const expected = descriptor(original)
+      if (value.size !== expected.size || value.sha256 !== expected.sha256) return undefined
+      assertForensicDirectories()
+      const archived = readRegularFileOnce(archiveDir, value.path, options)
+      if (!archived.equals(original)) return undefined
+      seen.add(value.path)
+    }
+    if (seen.size !== originals.size) return undefined
+    assertForensicDirectories()
+    return {
+      archiveId,
+      manifest: descriptor(manifestBytes),
+      preserved: true,
+    }
+  } catch {
+    return undefined
+  }
+}
+
 function preserveOriginals(
   userDataPath: string,
   options: RecoveryOptions,
@@ -1186,31 +1417,87 @@ function preserveOriginals(
   }
 
   const forensicsRoot = path.join(userDataPath, RECOVERY_FORENSICS_DIR)
-  if (!ops.existsSync(forensicsRoot)) {
-    ops.mkdirSync(forensicsRoot, { recursive: true })
+  let forensicsRootCreated = false
+  try {
+    ops.mkdirSync(forensicsRoot)
+    forensicsRootCreated = true
+  } catch (error) {
+    if (!isAlreadyExistsError(error)) throw error
+  }
+  if (forensicsRootCreated) {
     syncDirectory(userDataPath, platform, ops)
   }
-  const forensicsStat = fs.lstatSync(forensicsRoot)
-  if (forensicsStat.isSymbolicLink() || !forensicsStat.isDirectory()) {
-    throw new Error('forensic preservation root is not a regular directory')
-  }
+  const userDataReal = fs.realpathSync.native(path.resolve(userDataPath))
+  const rootIdentity = bindDirectChildDirectory(
+    forensicsRoot,
+    userDataReal,
+    'forensic preservation root',
+  )
   const evidenceDigest = sha256(Buffer.concat(Array.from(originals.entries()).flatMap(
     ([name, bytes]) => [Buffer.from(name, 'utf8'), bytes],
   ))).slice(0, 16)
+  assertBoundDirectory(rootIdentity)
+  const existingArchives = boundedDirectoryEntries(
+    forensicsRoot,
+    MAX_FORENSIC_ARCHIVES,
+    'forensic archive entry',
+  )
+  const digestSuffix = new RegExp(`-${evidenceDigest}(?:-\\d+)?$`)
+  for (const entry of existingArchives) {
+    if (!entry.isDirectory() || !digestSuffix.test(entry.name)) continue
+    const reused = tryReuseForensicEvidence(
+      forensicsRoot,
+      rootIdentity,
+      entry.name,
+      originals,
+      { platform, now },
+    )
+    if (reused) return reused
+  }
+  assertBoundDirectory(rootIdentity)
+  if (existingArchives.length >= MAX_FORENSIC_ARCHIVES) {
+    throw new Error('forensic archive capacity is exhausted')
+  }
   const baseId = `${archivedAt.replace(/[:.]/g, '-')}-${evidenceDigest}`
-  let archiveId = baseId
-  let suffix = 0
-  while (ops.existsSync(path.join(forensicsRoot, archiveId))) {
-    suffix += 1
-    archiveId = `${baseId}-${suffix}`
+  let archiveId: string | undefined
+  let archiveIdentity: BoundDirectoryIdentity | undefined
+  for (let suffix = 0; suffix < MAX_FORENSIC_ARCHIVE_ALLOCATION_ATTEMPTS; suffix += 1) {
+    const candidate = suffix === 0 ? baseId : `${baseId}-${suffix}`
+    const candidatePath = path.join(forensicsRoot, candidate)
+    try {
+      ops.mkdirSync(candidatePath)
+      archiveId = candidate
+      archiveIdentity = bindDirectChildDirectory(
+        candidatePath,
+        rootIdentity.real,
+        'forensic preservation archive',
+      )
+      break
+    } catch (error) {
+      if (isAlreadyExistsError(error)) continue
+      throw error
+    }
+  }
+  if (!archiveId || !archiveIdentity) {
+    throw new Error('forensic archive allocation attempts exhausted')
   }
   const archiveDir = path.join(forensicsRoot, archiveId)
-  ops.mkdirSync(archiveDir, { recursive: true })
+  assertBoundDirectory(rootIdentity)
+  assertBoundDirectory(archiveIdentity)
   syncDirectory(forensicsRoot, platform, ops)
+  assertBoundDirectory(rootIdentity)
+  assertBoundDirectory(archiveIdentity)
+
+  const assertForensicDirectories = () => {
+    assertBoundDirectory(rootIdentity)
+    assertBoundDirectory(archiveIdentity!)
+  }
 
   const entries: BackupManifestEntry[] = []
   for (const [relativePath, bytes] of Array.from(originals.entries())) {
+    assertForensicDirectories()
     writeDurably(path.join(archiveDir, relativePath), bytes, platform, ops)
+    assertForensicDirectories()
     entries.push({ path: relativePath, ...descriptor(bytes) })
   }
   const manifest: ForensicManifest = {
@@ -1220,18 +1507,23 @@ function preserveOriginals(
     files: entries,
   }
   const forensicManifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf8')
+  assertForensicDirectories()
   writeDurably(
     path.join(archiveDir, BACKUP_MANIFEST_FILE),
     forensicManifestBytes,
     platform,
     ops,
   )
+  assertForensicDirectories()
   syncDirectory(archiveDir, platform, ops)
+  assertForensicDirectories()
 
   // Confirm the durable archive from one-handle reads before any primary write.
   for (const entry of entries) {
+    assertForensicDirectories()
     assertDescriptor(readRegularFileOnce(archiveDir, entry.path, { platform }), entry, `forensic ${entry.path}`)
   }
+  assertForensicDirectories()
   const manifestBytes = readRegularFileOnce(archiveDir, BACKUP_MANIFEST_FILE, { platform })
   if (!manifestBytes.equals(forensicManifestBytes)) {
     throw new Error('forensic preservation manifest bytes changed before confirmation')
@@ -1241,6 +1533,17 @@ function preserveOriginals(
     || verifiedManifest.files.length !== entries.length) {
     throw new Error('forensic preservation manifest verification failed')
   }
+  const expectedNames = [BACKUP_MANIFEST_FILE, ...entries.map(entry => entry.path)].sort()
+  const actualNames = boundedDirectoryEntries(
+    archiveDir,
+    3,
+    'forensic archive entry',
+  ).map(entry => entry.name).sort()
+  if (actualNames.length !== expectedNames.length
+    || actualNames.some((name, index) => name !== expectedNames[index])) {
+    throw new Error('forensic preservation archive contains an unexpected entry')
+  }
+  assertForensicDirectories()
   return {
     archiveId,
     manifest: descriptor(forensicManifestBytes),
@@ -1311,7 +1614,11 @@ function verifyForensicEvidence(
       `forensic ${entry.path}`,
     )
   }
-  const actualNames = fs.readdirSync(archiveDir).sort()
+  const actualNames = boundedDirectoryEntries(
+    archiveDir,
+    3,
+    'forensic archive entry',
+  ).map(entry => entry.name).sort()
   const manifestNames = [BACKUP_MANIFEST_FILE, ...Array.from(seen)].sort()
   if (actualNames.length !== manifestNames.length
     || actualNames.some((name, index) => name !== manifestNames[index])) {

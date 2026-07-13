@@ -125,6 +125,20 @@ function simulatedPosixOps(): DurableFileOps {
   }
 }
 
+function forensicFootprint(root: string): { archives: number; bytes: number } {
+  const forensicRoot = path.join(root, 'recovery-forensics')
+  if (!fs.existsSync(forensicRoot)) return { archives: 0, bytes: 0 }
+  const archiveNames = fs.readdirSync(forensicRoot)
+  let bytes = 0
+  for (const archiveName of archiveNames) {
+    const archive = path.join(forensicRoot, archiveName)
+    for (const fileName of fs.readdirSync(archive)) {
+      bytes += fs.statSync(path.join(archive, fileName)).size
+    }
+  }
+  return { archives: archiveNames.length, bytes }
+}
+
 describe('verified settings/journal pair recovery', () => {
   let tmpDir: string
 
@@ -263,11 +277,15 @@ describe('verified settings/journal pair recovery', () => {
       platform: 'win32',
       startupId: 'buffer-boot-1',
     })).toThrow(expect.objectContaining({ restartRequired: true }))
-    recoverSettingsAndJournalPair(tmpDir, {
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
       durableFs,
       platform: 'win32',
       startupId: 'buffer-boot-2',
-    })
+    })).toThrow(expect.objectContaining({
+      restartRequired: true,
+      restoreApplied: true,
+      primaryUntouched: false,
+    }))
 
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(originalSettings)
     expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).profile.name)
@@ -307,6 +325,49 @@ describe('verified settings/journal pair recovery', () => {
     }
   })
 
+  it('rejects an archive-directory junction swap before writing outside the forensic root', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(121)])
+    const original = writeCorruptLivePair(tmpDir)
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-forensic-race-'))
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    let swapped = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      mkdirSync(target, options) {
+        const result = fs.mkdirSync(target, options)
+        const resolved = path.resolve(String(target))
+        if (!swapped && path.dirname(resolved) === path.resolve(forensicRoot)) {
+          swapped = true
+          fs.rmSync(resolved, { recursive: true, force: true })
+          fs.symlinkSync(outside, resolved, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+        return result
+      },
+    }
+
+    try {
+      let caught: unknown
+      try {
+        recoverSettingsAndJournalPair(tmpDir, {
+          platform: 'win32',
+          durableFs,
+          startupId: 'archive-race-boot-0',
+        })
+      } catch (error) { caught = error }
+
+      expect(caught).toMatchObject({
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        originalsPreserved: false,
+      })
+      expect(swapped).toBe(true)
+      expect(fs.readdirSync(outside)).toEqual([])
+      expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+      expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   it('aborts before overwriting either primary when a forensic archive write cannot become durable', () => {
     writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(2)])
     const original = writeCorruptLivePair(tmpDir)
@@ -337,6 +398,114 @@ describe('verified settings/journal pair recovery', () => {
     ) => void)(tmpDir, { durableFs })).toThrow(/forensic|preserv/i)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+  })
+
+  it('bounds deterministic forensic archive allocation when every suffix is occupied', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(120)])
+    const original = writeCorruptLivePair(tmpDir)
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    fs.mkdirSync(forensicRoot)
+    let allocationChecks = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      mkdirSync(target, options) {
+        const resolved = path.resolve(String(target))
+        if (path.dirname(resolved) === path.resolve(forensicRoot)) {
+          allocationChecks += 1
+          if (allocationChecks > 64) throw new Error('unbounded forensic allocation probe')
+          throw Object.assign(new Error('occupied forensic archive'), { code: 'EEXIST' })
+        }
+        return fs.mkdirSync(target, options)
+      },
+    }
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'allocation-boot-0',
+    })).toThrow(/forensic archive allocation attempts exhausted/i)
+    expect(allocationChecks).toBe(64)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+  })
+
+  it('reuses exact forensic evidence across repeated no-backup startups', () => {
+    const original = writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'no-backup-0',
+      now: new Date('2026-07-14T00:00:00.000Z'),
+    })).toThrow(expect.objectContaining({ primaryUntouched: true }))
+    const first = forensicFootprint(tmpDir)
+    expect(first.archives).toBe(1)
+
+    for (const [startupId, now] of [
+      ['no-backup-1', '2026-07-14T01:00:00.000Z'],
+      ['no-backup-2', '2026-07-14T02:00:00.000Z'],
+    ] as const) {
+      expect(() => recoverSettingsAndJournalPair(tmpDir, {
+        platform: 'win32',
+        startupId,
+        now: new Date(now),
+      })).toThrow(expect.objectContaining({
+        originalsPreserved: true,
+        primaryUntouched: true,
+      }))
+      expect(forensicFootprint(tmpDir)).toEqual(first)
+      expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+      expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+    }
+  })
+
+  it('does not reuse a same-digest forensic archive whose exact evidence changed', () => {
+    writeCorruptLivePair(tmpDir)
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'invalid-reuse-0',
+      now: new Date('2026-07-14T00:00:00.000Z'),
+    })).toThrow()
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    const firstArchive = fs.readdirSync(forensicRoot)[0]
+    fs.appendFileSync(path.join(forensicRoot, firstArchive, 'settings.json'), 'tampered')
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'invalid-reuse-1',
+      now: new Date('2026-07-14T01:00:00.000Z'),
+    })).toThrow(expect.objectContaining({ primaryUntouched: true }))
+    expect(fs.readdirSync(forensicRoot)).toHaveLength(2)
+  })
+
+  it('fails closed when the forensic archive root has reached its bounded capacity', () => {
+    const original = writeCorruptLivePair(tmpDir)
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    fs.mkdirSync(forensicRoot)
+    for (let index = 0; index < 64; index += 1) {
+      fs.mkdirSync(path.join(forensicRoot, `unrelated-${index}`))
+    }
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'forensic-capacity',
+    })).toThrow(/forensic archive capacity/i)
+    expect(fs.readdirSync(forensicRoot)).toHaveLength(64)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+  })
+
+  it('bounds forensic root enumeration before considering an over-capacity root', () => {
+    writeCorruptLivePair(tmpDir)
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    fs.mkdirSync(forensicRoot)
+    for (let index = 0; index < 65; index += 1) {
+      fs.mkdirSync(path.join(forensicRoot, `hostile-${index}`))
+    }
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'forensic-overflow',
+    })).toThrow(/forensic archive entry count exceeds its configured bound/i)
   })
 
   it.each([
@@ -397,7 +566,7 @@ describe('verified settings/journal pair recovery', () => {
     },
   )
 
-  it('keeps a verified committed Windows staging copy through one later successful startup', () => {
+  it('requires a final independent Windows startup after publishing the restored primaries', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(3)])
     const original = writeCorruptLivePair(tmpDir)
     const primaryWrites: string[] = []
@@ -436,14 +605,52 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
 
-    recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', durableFs, startupId: 'boot-2' })
+    let third: unknown
+    try {
+      recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', durableFs, startupId: 'boot-2' })
+    } catch (error) { third = error }
+    expect(third).toMatchObject({
+      restartRequired: true,
+      restoreApplied: true,
+      localDataModified: true,
+      originalsPreserved: true,
+      primaryUntouched: false,
+    })
     expect(primaryWrites).toHaveLength(2)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(
       fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
     )
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
     recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', durableFs, startupId: 'boot-3' })
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+  })
+
+  it('blocks SettingsStore on restore publication, then preserves later valid advancement', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(126)])
+    writeCorruptLivePair(tmpDir)
+
+    expect(() => new SettingsStore(tmpDir, { platform: 'win32', startupId: 'gate-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true, primaryUntouched: true }))
+    expect(() => new SettingsStore(tmpDir, { platform: 'win32', startupId: 'gate-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true, primaryUntouched: true }))
+    expect(() => new SettingsStore(tmpDir, { platform: 'win32', startupId: 'gate-boot-2' }))
+      .toThrow(expect.objectContaining({
+        restartRequired: true,
+        restoreApplied: true,
+        primaryUntouched: false,
+      }))
+
+    const opened = new SettingsStore(tmpDir, { platform: 'win32', startupId: 'gate-boot-3' })
+    const changed = opened.get()
+    changed.profile.name = 'Changed after successful restore'
+    opened.save(changed)
+
+    const nextBoot = new SettingsStore(tmpDir, { platform: 'win32', startupId: 'gate-boot-4' })
+    expect(nextBoot.get().profile.name).toBe('Changed after successful restore')
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
   })
 
   it('fails closed on a later Windows startup when forensic evidence changed', () => {
@@ -458,6 +665,96 @@ describe('verified settings/journal pair recovery', () => {
 
     expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'boot-1' }))
       .toThrow(expect.objectContaining({ restartRequired: true, originalsPreserved: false }))
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+  })
+
+  it('rejects divergent Windows transaction controls before a forged completed phase can overwrite primaries', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(122)])
+    const original = writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'control-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    const metadataPath = path.join(tmpDir, RESTORE_STAGING_DIR, 'restore-transaction.json')
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+    metadata.phase = 'primary-verified'
+    metadata.windowsVerifiedStartups = 2
+    metadata.lastWindowsStartupId = 'forged-control'
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'control-boot-1' }))
+      .toThrow(/transaction controls|metadata differ|shape is invalid/i)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+  })
+
+  it('accepts only an exact one-publication-ahead Windows verification transition', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(123)])
+    const original = writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'ahead-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    const metadataPath = path.join(tmpDir, RESTORE_STAGING_DIR, 'restore-transaction.json')
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+    metadata.windowsVerifiedStartups = 1
+    metadata.lastWindowsStartupId = 'ahead-crashed-boot'
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'ahead-crashed-boot',
+    })).toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'ahead-boot-2',
+    })).toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(
+      fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
+    )
+  })
+
+  it('will not adopt primary-verified staging unless the live pair and forensic evidence both verify', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(124)])
+    writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'primary-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'primary-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'primary-boot-2',
+    })).toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const forensicArchive = path.join(
+      tmpDir,
+      'recovery-forensics',
+      fs.readdirSync(path.join(tmpDir, 'recovery-forensics'))[0],
+    )
+    fs.appendFileSync(path.join(forensicArchive, 'settings.json'), 'tampered')
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'primary-boot-3' }))
+      .toThrow(/forensic|checksum/i)
+    expect(fs.existsSync(intentPath)).toBe(true)
+  })
+
+  it('bounds forensic archive enumeration before rejecting hostile extra entries', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(119)])
+    const original = writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'bounded-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true, originalsPreserved: false }))
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    const archive = path.join(forensicRoot, fs.readdirSync(forensicRoot)[0])
+    for (let index = 0; index < 8; index += 1) {
+      fs.writeFileSync(path.join(archive, `hostile-${index}.bin`), 'noise')
+    }
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'bounded-boot-1' }))
+      .toThrow(/forensic archive entry count exceeds its configured bound/i)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
   })
@@ -509,27 +806,131 @@ describe('verified settings/journal pair recovery', () => {
     expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32' })).not.toThrow()
   })
 
-  it('repairs a mixed primary from orphan Windows staging after the outer intent is gone', () => {
+  it('preserves a valid advanced live pair when completed Windows staging is orphaned', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(103)])
     writeCorruptLivePair(tmpDir)
     expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'mixed-boot-0' }))
       .toThrow(expect.objectContaining({ restartRequired: true }))
     expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'mixed-boot-1' }))
       .toThrow(expect.objectContaining({ restartRequired: true }))
-    recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'mixed-boot-2' })
-    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'mixed-boot-2',
+    })).toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
 
-    fs.writeFileSync(path.join(tmpDir, 'settings.json'), '{mixed primary')
+    fs.unlinkSync(path.join(tmpDir, RESTORE_INTENT_FILE))
+    const advanced = JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')) as AppSettings
+    advanced.profile.name = 'valid advancement after an old restore'
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify(advanced, null, 2))
     recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'mixed-boot-3' })
 
+    expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).profile.name)
+      .toBe('valid advancement after an old restore')
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(snapshot.journal)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+  })
+
+  it('does not overwrite an unreadable live mismatch from orphan primary-verified staging', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(127)])
+    writeCorruptLivePair(tmpDir)
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'bad-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'bad-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'bad-boot-2' }))
+      .toThrow(expect.objectContaining({ restoreApplied: true }))
+    fs.unlinkSync(path.join(tmpDir, RESTORE_INTENT_FILE))
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), '{mixed primary')
+    const beforeJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'bad-boot-3',
+    })).toThrow(/orphan|live settings\/journal pair/i)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).toBe('{mixed primary')
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(beforeJournal)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+  })
+
+  it('does not discard orphan completed staging when both live primaries are missing', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(128)])
+    writeCorruptLivePair(tmpDir)
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'missing-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'missing-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'missing-boot-2' }))
+      .toThrow(expect.objectContaining({ restoreApplied: true }))
+    fs.unlinkSync(path.join(tmpDir, RESTORE_INTENT_FILE))
+    fs.unlinkSync(path.join(tmpDir, 'settings.json'))
+    fs.unlinkSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'missing-boot-3',
+    })).toThrow(/orphan|live settings\/journal pair/i)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+  })
+
+  it('cleans partial completed staging when the exact restored live pair survives', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(129)])
+    writeCorruptLivePair(tmpDir)
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'partial-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'partial-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'partial-boot-2' }))
+      .toThrow(expect.objectContaining({ restoreApplied: true }))
+    fs.unlinkSync(path.join(tmpDir, RESTORE_INTENT_FILE))
+    fs.unlinkSync(path.join(tmpDir, RESTORE_STAGING_DIR, 'settings.json'))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'partial-boot-3',
+    })).not.toThrow()
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(
       fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
     )
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(snapshot.journal)
-    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
-    recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'mixed-boot-4' })
-    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+  })
+
+  it('resets untrusted non-primary orphan controls and repeats two independent Windows confirmations', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(125)])
+    const original = writeCorruptLivePair(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'orphan-boot-0' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    fs.unlinkSync(path.join(tmpDir, RESTORE_INTENT_FILE))
+    const metadataPath = path.join(tmpDir, RESTORE_STAGING_DIR, 'restore-transaction.json')
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+    metadata.phase = 'awaiting-windows-confirmation'
+    metadata.windowsVerifiedStartups = 2
+    metadata.lastWindowsStartupId = 'forged-orphan'
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'orphan-boot-1' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(JSON.parse(fs.readFileSync(metadataPath, 'utf8'))).toMatchObject({
+      phase: 'awaiting-windows-confirmation',
+      windowsVerifiedStartups: 0,
+      lastWindowsStartupId: 'orphan-boot-1',
+    })
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'win32', startupId: 'orphan-boot-2' }))
+      .toThrow(expect.objectContaining({ restartRequired: true }))
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'orphan-boot-3',
+    })).toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(
+      fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
+    )
   })
 
   it('commits intent removal with parent-directory fsync before POSIX staging cleanup', () => {
@@ -735,6 +1136,18 @@ describe('verified settings/journal pair recovery', () => {
       mutationCount: 1,
       pendingCount: 1,
     })
+  })
+
+  it('bounds manifest-less legacy snapshot enumeration before validating its exact shape', () => {
+    const snapshot = path.join(tmpDir, 'backups', '2025-01-01_00-00-00')
+    fs.mkdirSync(snapshot, { recursive: true })
+    fs.writeFileSync(path.join(snapshot, 'settings.json'), '{}', 'utf8')
+    for (let index = 0; index < 8; index += 1) {
+      fs.writeFileSync(path.join(snapshot, `hostile-${index}.bin`), 'noise')
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot))
+      .toThrow(/legacy backup entry count exceeds its configured bound/i)
   })
 
   it.each(['before-settings', 'after-settings', 'after-journal'] as const)(

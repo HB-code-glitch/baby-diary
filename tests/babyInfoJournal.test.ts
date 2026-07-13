@@ -404,6 +404,7 @@ describe('main-process baby-info append-only journal', () => {
     const targets = new Map<number, string>()
     let injectFailure = false
     let appendFsyncFailed = false
+    let closeFailedAfterRollback = false
     const durableFs: DurableFileOps = {
       ...fs,
       openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
@@ -427,8 +428,16 @@ describe('main-process baby-info append-only journal', () => {
         fs.ftruncateSync(fd, length)
       },
       closeSync(fd) {
+        const target = targets.get(fd)
         targets.delete(fd)
         fs.closeSync(fd)
+        if (injectFailure
+          && appendFsyncFailed
+          && !closeFailedAfterRollback
+          && target?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          closeFailedAfterRollback = true
+          throw new Error('injected close failure after uncertain rollback')
+        }
       },
     }
     const journal = new (BabyInfoJournal as unknown as new (
@@ -442,6 +451,7 @@ describe('main-process baby-info append-only journal', () => {
     try { journal.ingest('family-uncertain', [item], []) } catch (error) { caught = error }
 
     expect(caught).toMatchObject({ code: 'DURABLE_APPEND_UNCERTAIN' })
+    expect(closeFailedAfterRollback).toBe(true)
     expect(journal.getSummary('family-uncertain')).toMatchObject({
       mutationCount: 0,
       pendingCount: 0,
@@ -534,6 +544,85 @@ describe('main-process baby-info append-only journal', () => {
       mutationCount: 2,
       pendingCount: 2,
       winner: candidate,
+    })
+  })
+
+  it('fails closed when an append is durable but its handle close reports an error', () => {
+    const confirmed = mutation(70_006, 'family-close')
+    const committed = mutation(70_007, 'family-close')
+    const later = mutation(70_008, 'family-close')
+    new BabyInfoJournal(tmpDir).ingest('family-close', [confirmed], [])
+
+    const realOpen = fs.openSync.bind(fs)
+    const targets = new Map<number, string>()
+    let appendFsyncCompleted = false
+    let injectCloseFailure = true
+    let journalWrites = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, String(target))
+        return fd
+      },
+      writeSync(fd, buffer, offset, length, position) {
+        if (targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) journalWrites += 1
+        return fs.writeSync(fd, buffer, offset, length, position)
+      },
+      fsyncSync(fd) {
+        fs.fsyncSync(fd)
+        if (targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE) && journalWrites > 0) {
+          appendFsyncCompleted = true
+        }
+      },
+      closeSync(fd) {
+        const target = targets.get(fd)
+        targets.delete(fd)
+        fs.closeSync(fd)
+        if (injectCloseFailure
+          && appendFsyncCompleted
+          && target?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          injectCloseFailure = false
+          throw new Error('injected post-fsync close failure')
+        }
+      },
+    }
+    const journal = new (BabyInfoJournal as unknown as new (
+      root: string,
+      options: { durableFs: DurableFileOps },
+    ) => BabyInfoJournal)(tmpDir, { durableFs })
+
+    let caught: unknown
+    try { journal.ingest('family-close', [committed], []) } catch (error) { caught = error }
+
+    expect(caught).toMatchObject({
+      code: 'DURABLE_APPEND_COMMITTED_WITH_ERROR',
+      committed: true,
+    })
+    expect(journal.getSummary('family-close')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: confirmed,
+    })
+    expect(() => journal.listPending('family-close', { limit: 10 }))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+
+    journalWrites = 0
+    expect(() => journal.ingest('family-close', [later], []))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+    expect(journalWrites).toBe(0)
+
+    const restarted = new BabyInfoJournal(tmpDir)
+    expect(restarted.getSummary('family-close')).toMatchObject({
+      mutationCount: 2,
+      pendingCount: 2,
+      winner: committed,
+    })
+    restarted.ingest('family-close', [later], [])
+    expect(restarted.getSummary('family-close')).toMatchObject({
+      mutationCount: 3,
+      pendingCount: 3,
+      winner: later,
     })
   })
 })

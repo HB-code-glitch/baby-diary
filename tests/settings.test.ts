@@ -259,6 +259,104 @@ describe('SettingsStore', () => {
       })
     }
 
+    it.each(['directory-fsync', 'directory-close'] as const)(
+      'enters read-only recovery after a committed settings rename reports %s failure',
+      failure => {
+        store.save(initialSettings())
+        const settingsPath = path.join(tmpDir, 'settings.json')
+        const realOpen = fs.openSync.bind(fs)
+        const targets = new Map<number, string>()
+        const directoryFds = new Set<number>()
+        let nextDirectoryFd = -2_000
+        let injectFailure = false
+        let settingsRenameCompleted = false
+        let settingsWrites = 0
+        const durableFs: DurableFileOps = {
+          ...fs,
+          openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+            if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+              const fd = nextDirectoryFd--
+              directoryFds.add(fd)
+              targets.set(fd, String(target))
+              return fd
+            }
+            const fd = realOpen(target, flags, mode)
+            targets.set(fd, String(target))
+            return fd
+          },
+          writeSync(fd, buffer, offset, length, position) {
+            if (targets.get(fd)?.includes('settings.json.tmp-')) settingsWrites += 1
+            return fs.writeSync(fd, buffer, offset, length, position)
+          },
+          fsyncSync(fd) {
+            if (directoryFds.has(fd)) {
+              if (injectFailure && settingsRenameCompleted && failure === 'directory-fsync') {
+                throw new Error('injected committed settings directory fsync failure')
+              }
+              return
+            }
+            fs.fsyncSync(fd)
+          },
+          closeSync(fd) {
+            const directory = directoryFds.delete(fd)
+            targets.delete(fd)
+            if (!directory) fs.closeSync(fd)
+            if (directory
+              && injectFailure
+              && settingsRenameCompleted
+              && failure === 'directory-close') {
+              throw new Error('injected committed settings directory close failure')
+            }
+          },
+          renameSync(oldPath, newPath) {
+            fs.renameSync(oldPath, newPath)
+            if (path.resolve(String(newPath)) === path.resolve(settingsPath)) {
+              settingsRenameCompleted = true
+            }
+          },
+        }
+        const guarded = new SettingsStore(tmpDir, { durableFs, platform: 'linux' })
+        injectFailure = true
+
+        let firstFailure: unknown
+        try { guarded.merge({ theme: 'dark' }) } catch (error) { firstFailure = error }
+
+        expect(firstFailure).toMatchObject({
+          code: 'SETTINGS_RECOVERY_REQUIRED',
+          localDataModified: true,
+          readOnly: true,
+          settingsEvidence: {
+            committed: true,
+            durabilityConfirmed: false,
+          },
+        })
+        expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8')).theme).toBe('dark')
+
+        settingsWrites = 0
+        const expectReadOnly = (callback: () => unknown) => {
+          expect(callback).toThrow(expect.objectContaining({
+            code: 'SETTINGS_RECOVERY_REQUIRED',
+            readOnly: true,
+          }))
+        }
+        expectReadOnly(() => guarded.save({ ...guarded.get(), theme: 'light' }))
+        expectReadOnly(() => guarded.merge({ language: 'ja' }))
+        expectReadOnly(() => guarded.commitBabyInfo({
+          kind: 'reconcile',
+          familyId: 'family-main',
+          discoveredMutations: [],
+          exactAcknowledgedMutationKeys: [],
+        }))
+        expect(settingsWrites).toBe(0)
+        expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8')).theme).toBe('dark')
+
+        injectFailure = false
+        const restarted = new SettingsStore(tmpDir, { durableFs, platform: 'linux' })
+        expect(restarted.get().theme).toBe('dark')
+        expect(restarted.merge({ theme: 'light' }).theme).toBe('light')
+      },
+    )
+
     it('keeps the newest log, pending identity and pair across a stale full save', () => {
       store.save(initialSettings())
       const stale = store.get()
@@ -419,7 +517,7 @@ describe('SettingsStore', () => {
       expect(store.get()).toEqual(before)
     })
 
-    it('propagates an atomic disk failure without publishing an unpersisted mutation', () => {
+    it('reports recovery after journaling succeeds but atomic projection replacement fails', () => {
       store.save(initialSettings())
       store = new SettingsStore(tmpDir)
       const before = store.get()
@@ -432,7 +530,12 @@ describe('SettingsStore', () => {
         { ...before, baby: { name: 'Must not publish', birthdate: '2026-07-07' } },
         'Must not publish',
         '2026-07-07',
-      )).toThrow(/save failed/i)
+      )).toThrow(expect.objectContaining({
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        localDataModified: true,
+        readOnly: true,
+        journalEvidence: { kind: 'user-edit', durable: true },
+      }))
 
       expect(store.get()).toEqual(before)
     })
