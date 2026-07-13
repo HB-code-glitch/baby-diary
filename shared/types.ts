@@ -21,6 +21,21 @@ export type EventData =
   | SleepData
   | GrowthData
 
+export interface DiaryEventSyncMetadata {
+  version: 1
+  encodedEventId: string
+  eventAtMs: number
+  createdAtMs: number
+  updatedAtMs: number
+}
+
+export interface DiaryEventMigrationProvenance {
+  version: 1
+  kind: 'legacy-author-v1'
+  /** Content identity of the untouched source mutation retained in EventLog. */
+  sourceContentId: string
+}
+
 export interface DiaryEvent {
   id: string
   /** Globally unique identity for this immutable mutation. Missing only on legacy records. */
@@ -37,6 +52,10 @@ export interface DiaryEvent {
   updatedAt: string
   rev: number
   deleted: boolean
+  /** Numeric timestamp shadows used jointly by clients and Firestore rules. */
+  sync?: DiaryEventSyncMetadata
+  /** Present only on a durable, auth-bound derivative of a legacy source. */
+  migration?: DiaryEventMigrationProvenance
 }
 
 export interface AppSettings {
@@ -78,6 +97,12 @@ export interface BabyInfoJournalMetadata {
 
 export type BabyInfoMutationOrigin = 'user' | 'legacy-local' | 'legacy-cloud'
 
+export interface BabyInfoMutationMigrationProvenance {
+  version: 1
+  kind: 'legacy-cloud-boundary-v1' | 'legacy-pair-bridge-v1'
+  sourceMutationKey: string
+}
+
 export interface BabyInfoMutation {
   mutationId: string
   familyId: string
@@ -85,8 +110,11 @@ export interface BabyInfoMutation {
   babyBirthdate: string
   logicalClock: number
   updatedAt: string
+  /** Exact numeric shadow of updatedAt for server-time rule bounds. */
+  updatedAtMs?: number
   authorId: string
   origin: BabyInfoMutationOrigin
+  migration?: BabyInfoMutationMigrationProvenance
 }
 
 /** Familyless legacy values retained locally until a user explicitly reviews them. */

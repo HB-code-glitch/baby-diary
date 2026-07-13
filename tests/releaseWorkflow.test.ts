@@ -69,6 +69,7 @@ const RELEASE_TAG_CONDITION = "github.event_name == 'push' && startsWith(github.
 const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
 const RELEASE_UPLOAD_TARGET_STEP_NAME = 'Verify release upload target is absent or a private draft'
 const REQUIRED_RELEASE_NEEDS = [
+  'security-check',
   'release-context',
   'release-preflight',
   'e2e-win',
@@ -83,8 +84,9 @@ const RELEASE_MANIFEST_NEED: Record<string, string> = {
   'release-win': 'manifest-win',
   'release-mac': 'manifest-mac',
 }
-const REQUIRED_PUBLISH_NEEDS = ['build-mac', 'release-win', 'release-mac']
+const REQUIRED_PUBLISH_NEEDS = ['security-check', 'build-mac', 'release-win', 'release-mac']
 const RELEASE_CRITICAL_JOBS = [
+  'security-check',
   'build-mac',
   'e2e-mac',
   'e2e-win',
@@ -606,8 +608,8 @@ describe('release workflow CI gates', () => {
     expect(workflow.jobs).toBeDefined()
 
     const duplicateRunsOn = workflowSource.replace(
-      /(  e2e-win:\r?\n    runs-on: windows-latest)/,
-      '$1\n    runs-on: ubuntu-latest',
+      /(  security-check:\r?\n    runs-on: ubuntu-latest)/,
+      '$1\n    runs-on: windows-latest',
     )
     expect(duplicateRunsOn).not.toBe(workflowSource)
     expect(() => parseWorkflow(duplicateRunsOn)).toThrow(/duplicated mapping key/i)
@@ -628,6 +630,7 @@ describe('release workflow CI gates', () => {
 
   it('preserves all build, packaged E2E, and release jobs', () => {
     expect(new Set(Object.keys(workflow.jobs))).toEqual(new Set([
+      'security-check',
       'build-mac',
       'e2e-mac',
       'e2e-win',
@@ -646,7 +649,7 @@ describe('release workflow CI gates', () => {
     ]))
   })
 
-  it('keeps three pull-request jobs and adds one tag-only preflight before two release jobs', () => {
+  it('keeps the security gate and three platform jobs on pull requests', () => {
     const unconditionalJobs = Object.entries(workflow.jobs)
       .filter(([, job]) => job.if == null)
       .map(([jobName]) => jobName)
@@ -654,7 +657,7 @@ describe('release workflow CI gates', () => {
       .filter(([, job]) => job.if === RELEASE_TAG_CONDITION)
       .map(([jobName]) => jobName)
 
-    expect(new Set(unconditionalJobs)).toEqual(new Set(['build-mac', 'e2e-mac', 'e2e-win']))
+    expect(new Set(unconditionalJobs)).toEqual(new Set(['security-check', 'build-mac', 'e2e-mac', 'e2e-win']))
     expect(new Set(tagOnlyJobs)).toEqual(new Set(['release-preflight', 'release-win', 'release-mac', 'publish-release']))
   })
 

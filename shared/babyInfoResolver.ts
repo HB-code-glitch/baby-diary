@@ -7,10 +7,12 @@ import type {
 } from './types'
 import { isValidMutationId } from './eventResolver'
 import { isValidFamilyId } from './familyId'
+import { nextHybridLogicalClock } from './hybridLogicalClock'
 
 const BABY_INFO_CONTENT_NAMESPACE = '6ba7b814-9dad-11d1-80b4-00c04fd430c8'
 const BABY_INFO_LEGACY_NAMESPACE = '6ba7b815-9dad-11d1-80b4-00c04fd430c8'
 const BABY_INFO_UNLINKED_ARCHIVE_NAMESPACE = '6ba7b816-9dad-11d1-80b4-00c04fd430c8'
+const BABY_INFO_CLOUD_DERIVATIVE_NAMESPACE = '6ba7b818-9dad-11d1-80b4-00c04fd430c8'
 const EXPLICIT_ZONE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
 const MUTATION_FIELDS = [
   'authorId',
@@ -22,6 +24,8 @@ const MUTATION_FIELDS = [
   'origin',
   'updatedAt',
 ] as const
+const MUTATION_OPTIONAL_FIELDS = ['migration', 'updatedAtMs'] as const
+const CLOUD_FUTURE_SKEW_MS = 5 * 60 * 1000
 
 function compareStrings(left: string, right: string): number {
   if (left === right) return 0
@@ -51,17 +55,29 @@ function isSafeText(value: unknown, maxLength: number, allowEmpty = true): value
 function validateMutation(value: unknown): value is BabyInfoMutation {
   if (!isPlainRecord(value)) return false
   const keys = Object.keys(value).sort()
-  if (keys.length !== MUTATION_FIELDS.length || keys.some((key, index) => key !== MUTATION_FIELDS[index])) {
-    return false
-  }
+  if (!MUTATION_FIELDS.every(field => keys.includes(field))
+    || keys.some(key => !MUTATION_FIELDS.includes(key as typeof MUTATION_FIELDS[number])
+      && !MUTATION_OPTIONAL_FIELDS.includes(key as typeof MUTATION_OPTIONAL_FIELDS[number]))) return false
   if (!isValidMutationId(value.mutationId)) return false
   if (!isValidFamilyId(value.familyId)) return false
   if (!isSafeText(value.babyName, 2_048)) return false
   if (!isSafeText(value.babyBirthdate, 128)) return false
   if (!Number.isSafeInteger(value.logicalClock) || (value.logicalClock as number) < 0) return false
   if (!isExplicitZoneTimestamp(value.updatedAt)) return false
+  if (value.updatedAtMs !== undefined
+    && (!Number.isSafeInteger(value.updatedAtMs)
+      || value.updatedAtMs !== Date.parse(value.updatedAt))) return false
   if (!isSafeText(value.authorId, 1_024, false)) return false
   if (value.origin !== 'user' && value.origin !== 'legacy-local' && value.origin !== 'legacy-cloud') return false
+  if (value.migration !== undefined) {
+    if (!isPlainRecord(value.migration)) return false
+    const migrationKeys = Object.keys(value.migration).sort()
+    if (migrationKeys.join(',') !== 'kind,sourceMutationKey,version'
+      || value.migration.version !== 1
+      || (value.migration.kind !== 'legacy-cloud-boundary-v1'
+        && value.migration.kind !== 'legacy-pair-bridge-v1')
+      || !isValidBabyInfoMutationKey(value.migration.sourceMutationKey)) return false
+  }
   if (value.origin === 'user') return (value.logicalClock as number) >= 1
   if (value.origin === 'legacy-local') return value.logicalClock === 0
   return true
@@ -77,9 +93,81 @@ export function canonicalBabyInfoMutationJson(mutation: BabyInfoMutation): strin
     babyBirthdate: mutation.babyBirthdate,
     logicalClock: mutation.logicalClock,
     updatedAt: mutation.updatedAt,
+    ...(mutation.updatedAtMs === undefined ? {} : { updatedAtMs: mutation.updatedAtMs }),
     authorId: mutation.authorId,
     origin: mutation.origin,
+    ...(mutation.migration === undefined ? {} : { migration: mutation.migration }),
   })
+}
+
+export function babyInfoBoundarySourceMutationKey(
+  mutation: BabyInfoMutation,
+): string | undefined {
+  return mutation.migration?.kind === 'legacy-cloud-boundary-v1'
+    ? mutation.migration.sourceMutationKey
+    : undefined
+}
+
+export function isBabyInfoMutationUploadReady(
+  mutation: BabyInfoMutation,
+  writerUid: string,
+  nowMs = Date.now(),
+): boolean {
+  if (writerUid.length === 0 || !validateBabyInfoMutationForCloud(mutation, nowMs)) return false
+  if (mutation.origin === 'user') return mutation.authorId === writerUid
+  return mutation.logicalClock === 0
+    && mutation.updatedAtMs === 0
+    && mutation.authorId === mutation.origin
+    && mutation.migration === undefined
+}
+
+/**
+ * Durably append this auth-bound derivative before upload. Its provenance lets
+ * reconciliation acknowledge the immutable source only after exact read-back.
+ */
+export function deriveUploadReadyBabyInfoMutation(
+  source: BabyInfoMutation,
+  writerUid: string,
+  nowMs = Date.now(),
+): BabyInfoMutation {
+  canonicalBabyInfoMutationJson(source)
+  if (writerUid.length === 0) throw new Error('writer uid is required')
+  if (isBabyInfoMutationUploadReady(source, writerUid, nowMs)) return source
+  if (source.migration !== undefined) throw new Error('baby info derivative cannot be rebound')
+
+  const sourceMutationKey = getBabyInfoMutationKey(source)
+  const updatedAt = new Date(nowMs).toISOString()
+  const derived: BabyInfoMutation = {
+    ...source,
+    mutationId: uuidv5(
+      `baby-diary:auth-bound-baby-info:${sourceMutationKey}:${writerUid}`,
+      BABY_INFO_CLOUD_DERIVATIVE_NAMESPACE,
+    ),
+    logicalClock: nextHybridLogicalClock(source.logicalClock, nowMs),
+    updatedAt,
+    updatedAtMs: nowMs,
+    authorId: writerUid,
+    origin: 'user',
+    migration: {
+      version: 1,
+      kind: 'legacy-cloud-boundary-v1',
+      sourceMutationKey,
+    },
+  }
+  canonicalBabyInfoMutationJson(derived)
+  return derived
+}
+
+/** Cloud-only bounds; durable historical records remain readable without a shadow. */
+export function validateBabyInfoMutationForCloud(
+  mutation: BabyInfoMutation,
+  nowMs = Date.now(),
+): boolean {
+  if (!validateMutation(mutation)
+    || !Number.isSafeInteger(nowMs)
+    || !Number.isSafeInteger(mutation.updatedAtMs)) return false
+  return mutation.updatedAtMs! <= nowMs + CLOUD_FUTURE_SKEW_MS
+    && mutation.logicalClock <= nowMs + CLOUD_FUTURE_SKEW_MS
 }
 
 /** Content-bound immutable identity; a reused UUID with another payload gets another key. */
@@ -188,6 +276,7 @@ function makeLegacyBabyInfoMutation(
     babyBirthdate,
     logicalClock: 0,
     updatedAt: '1970-01-01T00:00:00.000Z',
+    updatedAtMs: 0,
     authorId: origin,
     origin,
   }
@@ -248,11 +337,59 @@ export function validateBabyInfoUnlinkedArchive(value: unknown): value is BabyIn
   return value.archiveId === getBabyInfoUnlinkedArchiveId(value.babyName, value.babyBirthdate)
 }
 
-/**
- * Preserves a pair-only write made by a v0.3.8 client after an immutable winner
- * was already projected. Binding the UUID to the prior content key makes the
- * bridge deterministic across devices and prevents replay from growing history.
- */
+/** Auth-bound HLC bridge used by the hardened cloud reconciliation path. */
+export function makeAuthBoundLegacyCloudBridgeBabyInfoMutation(
+  familyId: string,
+  babyName: string,
+  babyBirthdate: string,
+  priorWinnerKey: string,
+  priorWinner: BabyInfoMutation,
+  authorId: string,
+  nowMs = Date.now(),
+): BabyInfoMutation | undefined {
+  canonicalBabyInfoMutationJson(priorWinner)
+  if (!isValidFamilyId(familyId) || priorWinner.familyId !== familyId) {
+    throw new Error('legacy cloud bridge family mismatch')
+  }
+  if (!isValidBabyInfoMutationKey(priorWinnerKey)
+    || getBabyInfoMutationKey(priorWinner) !== priorWinnerKey) {
+    throw new Error('legacy cloud bridge marker key mismatch')
+  }
+  if (babyName === priorWinner.babyName && babyBirthdate === priorWinner.babyBirthdate) {
+    return undefined
+  }
+  if (authorId.length === 0) throw new Error('legacy cloud bridge author is required')
+
+  const canonicalSource = JSON.stringify({
+    familyId,
+    babyName,
+    babyBirthdate,
+    priorWinnerKey,
+    authorId,
+  })
+  const updatedAt = new Date(nowMs).toISOString()
+  return {
+    mutationId: uuidv5(
+      `baby-diary:baby-info-legacy-cloud-bridge:${canonicalSource}`,
+      BABY_INFO_LEGACY_NAMESPACE,
+    ),
+    familyId,
+    babyName,
+    babyBirthdate,
+    logicalClock: nextHybridLogicalClock(priorWinner.logicalClock, nowMs),
+    updatedAt,
+    updatedAtMs: nowMs,
+    authorId,
+    origin: 'user',
+    migration: {
+      version: 1,
+      kind: 'legacy-pair-bridge-v1',
+      sourceMutationKey: priorWinnerKey,
+    },
+  }
+}
+
+/** Read compatibility for the pre-hardening bridge; never upload this shape. */
 export function makeLegacyCloudBridgeBabyInfoMutation(
   familyId: string,
   babyName: string,
@@ -291,6 +428,7 @@ export function makeLegacyCloudBridgeBabyInfoMutation(
     babyBirthdate,
     logicalClock: priorWinner.logicalClock + 1,
     updatedAt: priorWinner.updatedAt,
+    updatedAtMs: Date.parse(priorWinner.updatedAt),
     authorId: 'legacy-cloud-bridge',
     origin: 'legacy-cloud',
   }

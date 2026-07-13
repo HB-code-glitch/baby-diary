@@ -8,6 +8,8 @@ import { format, isToday, parseISO, startOfDay, isSameDay } from 'date-fns'
 import i18n from '../i18n'
 import { isEventAtOrBefore, sortEventsNewestFirst } from '../lib/eventTime'
 import { mergeResolvedEvent } from '../../shared/eventResolver'
+import { createEventSyncMetadata } from '../../shared/cloudEventPayload'
+import { nextHybridLogicalClock } from '../../shared/hybridLogicalClock'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,7 +51,7 @@ function installAppStoreSettingsBridge(): void {
 
 function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): DiaryEvent {
   const t = now()
-  return {
+  const event: DiaryEvent = {
     id: uuidv4(),
     mutationId: uuidv4(),
     type,
@@ -62,9 +64,10 @@ function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): Diary
     },
     createdAt: t,
     updatedAt: t,
-    rev: 1,
+    rev: nextHybridLogicalClock(0, Date.parse(t)),
     deleted: false,
   }
+  return { ...event, sync: createEventSyncMetadata(event) }
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +280,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   addEvent: async (event: DiaryEvent) => {
-    const mutation = event.mutationId ? event : { ...event, mutationId: uuidv4() }
+    const identified = event.mutationId ? event : { ...event, mutationId: uuidv4() }
+    const updatedAtMs = Date.parse(identified.updatedAt)
+    const baseMutation: DiaryEvent = {
+      ...identified,
+      rev: Math.max(identified.rev, nextHybridLogicalClock(0, updatedAtMs)),
+    }
+    const mutation: DiaryEvent = {
+      ...baseMutation,
+      sync: createEventSyncMetadata(baseMutation),
+    }
     const result = await ipc.appendEvent(mutation)
     if (result === 'error') {
       throw new Error('append_failed')
@@ -299,13 +311,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     // while the modal was open — prevents the edit being silently dropped by
     // mergeEventIntoList (incoming.rev not > existing.rev).
     const liveRev = get().events.find(e => e.id === original.id)?.rev ?? original.rev
-    const safeRev = Math.max(original.rev, liveRev) + 1
-    const updated: DiaryEvent = {
+    const baseUpdated: DiaryEvent = {
       ...original,
       ...patch,
       updatedAt: t,
-      rev: safeRev,
+      rev: nextHybridLogicalClock(Math.max(original.rev, liveRev), Date.parse(t)),
       mutationId: uuidv4(),
+    }
+    const updated: DiaryEvent = {
+      ...baseUpdated,
+      sync: createEventSyncMetadata(baseUpdated),
     }
     const result = await ipc.appendEvent(updated)
     if (result === 'error') {
@@ -328,12 +343,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     let count = 0
     let partial = false
     for (const event of targets) {
-      const tombstone: DiaryEvent = {
+      const updatedAt = now()
+      const baseTombstone: DiaryEvent = {
         ...event,
         deleted: true,
-        updatedAt: now(),
-        rev: event.rev + 1,
+        updatedAt,
+        rev: nextHybridLogicalClock(event.rev, Date.parse(updatedAt)),
         mutationId: uuidv4(),
+      }
+      const tombstone: DiaryEvent = {
+        ...baseTombstone,
+        sync: createEventSyncMetadata(baseTombstone),
       }
       const result = await ipc.appendEvent(tombstone)
       if (result === 'error') {

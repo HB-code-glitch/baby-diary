@@ -1,5 +1,6 @@
 import type { DiaryEvent, EventType } from './types'
 import { v5 as uuidv5 } from 'uuid'
+import { validateDiaryEventData } from './eventDataValidator'
 
 const VALID_TYPE_LIST: EventType[] = [
   'pee', 'poop', 'temp', 'breast', 'formula', 'diary', 'message', 'sleep', 'growth',
@@ -12,6 +13,10 @@ const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 const MAX_ENCODED_EVENT_ID_LENGTH = 1_300
 const MAX_CANONICAL_EVENT_LENGTH = 192_000
 const EXPLICIT_ZONE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+const EVENT_FIELDS = [
+  'at', 'author', 'createdAt', 'data', 'deleted', 'id', 'rev', 'type', 'updatedAt',
+] as const
+const EVENT_OPTIONAL_FIELDS = ['migration', 'mutationId', 'sync'] as const
 
 function compareStrings(left: string, right: string): number {
   if (left === right) return 0
@@ -92,6 +97,13 @@ export function validateDiaryEvent(event: unknown): string | null {
   if (!event || typeof event !== 'object' || Array.isArray(event)) return 'event must be an object'
   const value = event as Record<string, unknown>
 
+  const keys = Object.keys(value)
+  if (EVENT_FIELDS.some(key => !Object.prototype.hasOwnProperty.call(value, key))
+    || keys.some(key => !EVENT_FIELDS.includes(key as typeof EVENT_FIELDS[number])
+      && !EVENT_OPTIONAL_FIELDS.includes(key as typeof EVENT_OPTIONAL_FIELDS[number]))) {
+    return 'event JSON has an invalid field shape'
+  }
+
   if (!isValidEventId(value.id)) return 'id must be a safe non-empty string'
   if (value.mutationId !== undefined && !isValidMutationId(value.mutationId)) {
     return 'mutationId must be a lowercase UUID v4 or migrated v5 when present'
@@ -106,13 +118,54 @@ export function validateDiaryEvent(event: unknown): string | null {
   if (typeof value.deleted !== 'boolean') return 'deleted must be a boolean'
   if (!isValidDateString(value.createdAt)) return 'createdAt must be a valid date string'
   if (!isValidDateString(value.updatedAt)) return 'updatedAt must be a valid date string'
-  if (!value.data || typeof value.data !== 'object' || Array.isArray(value.data)) return 'data must be an object'
+  const dataError = validateDiaryEventData(value.type as EventType, value.data, { deleted: value.deleted as boolean })
+  if (dataError) return dataError
   if (!value.author || typeof value.author !== 'object' || Array.isArray(value.author)) return 'author must be an object'
 
   const author = value.author as Record<string, unknown>
+  const authorKeys = Object.keys(author).sort()
+  if (authorKeys.length !== 3 || authorKeys.join(',') !== 'name,role,uid') {
+    return 'author must contain exactly uid, name, and role'
+  }
   if (typeof author.uid !== 'string' || author.uid.length > 256) return 'author.uid must be a string'
   if (typeof author.name !== 'string' || author.name.length > 512) return 'author.name must be a string'
   if (author.role !== 'dad' && author.role !== 'mom') return 'author.role must be dad or mom'
+
+  if (value.sync !== undefined) {
+    if (!value.sync || typeof value.sync !== 'object' || Array.isArray(value.sync)) {
+      return 'sync must be an object when present'
+    }
+    const sync = value.sync as Record<string, unknown>
+    const syncKeys = Object.keys(sync).sort()
+    if (syncKeys.length !== 5
+      || syncKeys.join(',') !== 'createdAtMs,encodedEventId,eventAtMs,updatedAtMs,version'
+      || sync.version !== 1
+      || sync.encodedEventId !== encodeURIComponent(value.id as string)
+      || !Number.isSafeInteger(sync.eventAtMs)
+      || !Number.isSafeInteger(sync.createdAtMs)
+      || !Number.isSafeInteger(sync.updatedAtMs)
+      || sync.eventAtMs !== Date.parse(value.at as string)
+      || sync.createdAtMs !== Date.parse(value.createdAt as string)
+      || sync.updatedAtMs !== Date.parse(value.updatedAt as string)) {
+      return 'sync timestamp metadata does not match the event timestamps'
+    }
+  }
+
+  if (value.migration !== undefined) {
+    if (!value.migration || typeof value.migration !== 'object' || Array.isArray(value.migration)) {
+      return 'migration must be an object when present'
+    }
+    const migration = value.migration as Record<string, unknown>
+    const migrationKeys = Object.keys(migration).sort()
+    if (migrationKeys.length !== 3
+      || migrationKeys.join(',') !== 'kind,sourceContentId,version'
+      || migration.version !== 1
+      || migration.kind !== 'legacy-author-v1'
+      || !isValidMutationId(migration.sourceContentId)
+      || !isValidMutationId(value.mutationId)) {
+      return 'migration provenance is invalid'
+    }
+  }
 
   try {
     if (canonicalize(value.data, new Set()).length > 128_000) return 'data is too large'

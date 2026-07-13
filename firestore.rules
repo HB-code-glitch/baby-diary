@@ -1,109 +1,494 @@
 rules_version = '2';
-//
-// firestore.rules — BABY DIARY
-//
-// 설계 원칙 (F-RULES 보안 강화):
-//   1. 가족 멤버(uid가 members 맵에 있음)만 자신의 가족 문서와 이벤트 접근 가능
-//   2. 이벤트 doc은 create-only (update/delete 불가 — append-only 아키텍처 보장)
-//   3. invites/{code} 컬렉션: 초대코드 직접 get()만 허용 (list 불가)
-//      → 인증된 사용자만 정확한 코드로 get 가능, 열거 공격 불가
-//   4. families list 완전 차단 → 아기 이름/멤버/초대코드 열거 불가
-//   5. families self-join: auth.uid를 members에 추가하는 update만 허용
-//      (변경된 키가 members뿐이고, 기존 멤버 제거 없이 본인만 추가하는 경우)
-//   6. rev 감소 방지 / 하드 삭제 방지: events create-only이므로 자동 보장
-//
-// ─── 보안 감사 소견 ────────────────────────────────────────────────────────
-// [PASS] members 멤버만 가족 데이터 접근 — uid 기반 맵 체크
-// [PASS] 이벤트 create-only — update/delete 규칙 없음
-// [PASS] families list 차단 — 아기 이름/초대코드 열거 불가
-// [PASS] invites list 차단 — 코드 열거 불가 (get만 허용)
-// [PASS] self-join 검증 — members diff가 auth.uid 추가뿐임을 확인
-// [INFO] 브루트포스: 36^6 ≈ 2.2억 경우. 인증된 사용자만 get() 가능.
-//        Spark 무료 플랜 읽기 쿼터(50k/day)로 실질적 브루트포스 불가능.
-// ──────────────────────────────────────────────────────────────────────────
 
+// Baby Diary Firestore trust boundary.
+// Family identity transitions are atomic; shared history is immutable.
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // ── 사용자 개인 문서 (클라우드 identity truth) ─────────────────────────
-    // users/{uid}: { familyId } — 클라우드 정체성 진실 소스
-    // 자신의 doc만 read/write 가능.
-    match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    function signedIn() {
+      return request.auth != null;
     }
 
-    // ── 초대 코드 컬렉션 ───────────────────────────────────────────────────
-    // invites/{code}: { familyId, createdAt, code_check }
-    // code_check is redundant but lets rules verify the doc id matches
-    match /invites/{code} {
-      // 인증된 사용자만 정확한 코드로 직접 get 가능 (list 완전 차단)
-      allow get: if request.auth != null;
+    function safeFamilyId(value) {
+      return value is string
+        && value.size() >= 1
+        && value.toUtf8().size() <= 1500
+        && value != '.'
+        && value != '..'
+        && value.matches('[^/]+');
+    }
+
+    function uuid(value) {
+      return value is string
+        && value.matches('[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}');
+    }
+
+    function inviteCode(value) {
+      return value is string && value.matches('[A-HJ-NP-Z2-9]{6}');
+    }
+
+    function isoTimestamp(value) {
+      return value is string
+        && value.size() <= 64
+        && value.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})');
+    }
+
+    function birthdate(value) {
+      return value is string
+        && value.size() <= 128
+        && (value == '' || value.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}'));
+    }
+
+    function validMember(value) {
+      return value is map
+        && value.keys().hasAll(['name', 'role'])
+        && value.keys().hasOnly(['name', 'role'])
+        && value.name is string
+        && value.name.size() <= 512
+        && (value.role == 'dad' || value.role == 'mom');
+    }
+
+    function familyAfterHasMember(familyId, uid) {
+      let family = getAfter(/databases/$(database)/documents/families/$(familyId)).data;
+      return family is map
+        && 'members' in family
+        && family.members is map
+        && uid in family.members
+        && validMember(family.members[uid]);
+    }
+
+    function familyHasMember(familyId, uid) {
+      let family = get(/databases/$(database)/documents/families/$(familyId)).data;
+      return family is map
+        && 'members' in family
+        && family.members is map
+        && uid in family.members;
+    }
+
+    function isFamilyMember(familyId) {
+      return signedIn() && safeFamilyId(familyId) && familyHasMember(familyId, request.auth.uid);
+    }
+
+    function exactUserIdentity(data, familyId) {
+      return data is map
+        && data.keys().hasAll(['familyId'])
+        && data.keys().hasOnly(['familyId'])
+        && data.familyId == familyId;
+    }
+
+    function userAfterSelects(uid, familyId) {
+      return exactUserIdentity(
+        getAfter(/databases/$(database)/documents/users/$(uid)).data,
+        familyId
+      );
+    }
+
+    function validOptionalNote(data) {
+      return !('note' in data) || (data.note is string && data.note.size() <= 2000);
+    }
+
+    function validTypedEventData(event) {
+      let data = event.data;
+      return (event.type == 'pee'
+          && data is map && data.keys().hasOnly(['note']) && validOptionalNote(data))
+        || (event.type == 'poop'
+          && data is map && data.keys().hasOnly(['note']) && validOptionalNote(data))
+        || (event.type == 'temp'
+          && data is map
+          && data.keys().hasAll(['celsius'])
+          && data.keys().hasOnly(['celsius', 'note'])
+          && data.celsius is number && data.celsius >= 35 && data.celsius <= 42
+          && validOptionalNote(data))
+        || (event.type == 'breast'
+          && data is map
+          && data.keys().hasAll(['side'])
+          && data.keys().hasOnly(['side', 'minutes', 'note'])
+          && (data.side == 'L' || data.side == 'R' || data.side == 'both')
+          && (!('minutes' in data) || (data.minutes is int && data.minutes >= 1 && data.minutes <= 240))
+          && validOptionalNote(data))
+        || (event.type == 'formula'
+          && data is map
+          && data.keys().hasAll(['ml'])
+          && data.keys().hasOnly(['ml', 'note'])
+          && data.ml is int && data.ml >= 10 && data.ml <= 2000
+          && validOptionalNote(data))
+        || (event.type == 'sleep'
+          && data is map
+          && data.keys().hasAll(['minutes'])
+          && data.keys().hasOnly(['minutes', 'note'])
+          && data.minutes is int && data.minutes >= 1 && data.minutes <= 960
+          && validOptionalNote(data))
+        || (event.type == 'growth'
+          && data is map
+          && data.keys().hasOnly(['weightKg', 'heightCm', 'note'])
+          && data.keys().hasAny(['weightKg', 'heightCm'])
+          && (!('weightKg' in data)
+            || (data.weightKg is number && data.weightKg >= 0.5 && data.weightKg <= 30))
+          && (!('heightCm' in data)
+            || (data.heightCm is number && data.heightCm >= 30 && data.heightCm <= 120))
+          && validOptionalNote(data))
+        || (event.type == 'diary'
+          && data is map
+          && data.keys().hasAll(['text'])
+          && data.keys().hasOnly(['title', 'text'])
+          && (!('title' in data) || (data.title is string && data.title.size() <= 200))
+          && data.text is string && data.text.size() <= 20000 && data.text.trim().size() > 0)
+        || (event.type == 'message'
+          && data is map
+          && data.keys().hasAll(['text'])
+          && data.keys().hasOnly(['text'])
+          && data.text is string && data.text.size() <= 20000 && data.text.trim().size() > 0);
+    }
+
+    function validEventSync(event) {
+      let sync = event.sync;
+      let upper = request.time.toMillis() + 300000;
+      return sync is map
+        && sync.keys().hasAll(['version', 'encodedEventId', 'eventAtMs', 'createdAtMs', 'updatedAtMs'])
+        && sync.keys().hasOnly(['version', 'encodedEventId', 'eventAtMs', 'createdAtMs', 'updatedAtMs'])
+        && sync.version == 1
+        && sync.encodedEventId is string
+        && sync.encodedEventId.size() >= 1
+        && sync.encodedEventId.size() <= 1300
+        && sync.eventAtMs is int && sync.eventAtMs >= 0 && sync.eventAtMs <= upper
+        && sync.createdAtMs is int && sync.createdAtMs >= 0 && sync.createdAtMs <= upper
+        && sync.updatedAtMs is int && sync.updatedAtMs >= 0 && sync.updatedAtMs <= upper
+        && event.rev <= upper;
+    }
+
+    function validEventMigration(event) {
+      return !('migration' in event)
+        || (event.migration is map
+          && event.migration.keys().hasAll(['version', 'kind', 'sourceContentId'])
+          && event.migration.keys().hasOnly(['version', 'kind', 'sourceContentId'])
+          && event.migration.version == 1
+          && event.migration.kind == 'legacy-author-v1'
+          && uuid(event.migration.sourceContentId));
+    }
+
+    // Key presence is checked before mutationId is ever accessed. This avoids
+    // evaluation errors for valid v0.3.8 `${id}_${rev}` documents.
+    function validEventIdentity(eventDocId, event) {
+      let parts = eventDocId.split('[|]');
+      let hasMutationId = 'mutationId' in event;
+      let modern = hasMutationId
+        && event.mutationId is string
+        && uuid(event.mutationId)
+        && ((parts.size() == 4
+            && parts[0] == 'm2'
+            && parts[1] == event.sync.encodedEventId
+            && parts[2] == string(event.rev)
+            && parts[3] == event.mutationId)
+          || (parts.size() == 5
+            && parts[0] == 'm3'
+            && parts[1] == event.sync.encodedEventId
+            && parts[2] == string(event.rev)
+            && parts[3] == event.mutationId
+            && uuid(parts[4])));
+      let legacy = !hasMutationId && eventDocId == event.id + '_' + string(event.rev);
+      return modern || legacy;
+    }
+
+    function validEventDocument(eventDocId, data) {
+      let event = data.event;
+      return data is map
+        && data.keys().hasAll(['event'])
+        && data.keys().hasOnly(['event'])
+        && event is map
+        && event.keys().hasAll([
+          'id', 'type', 'at', 'data', 'author', 'createdAt', 'updatedAt',
+          'rev', 'deleted', 'sync'
+        ])
+        && event.keys().hasOnly([
+          'id', 'mutationId', 'type', 'at', 'data', 'author', 'createdAt',
+          'updatedAt', 'rev', 'deleted', 'sync', 'migration'
+        ])
+        && event.id is string
+        && event.id.size() >= 1
+        && event.id.size() <= 256
+        && event.id.matches('[^/]+')
+        && event.rev is int && event.rev >= 1
+        && event.deleted is bool
+        && isoTimestamp(event.at)
+        && isoTimestamp(event.createdAt)
+        && isoTimestamp(event.updatedAt)
+        && event.author is map
+        && event.author.keys().hasAll(['uid', 'name', 'role'])
+        && event.author.keys().hasOnly(['uid', 'name', 'role'])
+        && event.author.uid == request.auth.uid
+        && event.author.name is string && event.author.name.size() <= 512
+        && (event.author.role == 'dad' || event.author.role == 'mom')
+        && validEventSync(event)
+        && validEventMigration(event)
+        && validTypedEventData(event)
+        && validEventIdentity(eventDocId, event);
+    }
+
+    function validBabyMutationShape(familyId, docId, data) {
+      let parts = docId.split('[|]');
+      let mutation = data.mutation;
+      let upper = request.time.toMillis() + 300000;
+      return data is map
+        && data.keys().hasAll(['mutation'])
+        && data.keys().hasOnly(['mutation'])
+        && mutation is map
+        && mutation.keys().hasAll([
+          'mutationId', 'familyId', 'babyName', 'babyBirthdate', 'logicalClock',
+          'updatedAt', 'updatedAtMs', 'authorId', 'origin'
+        ])
+        && mutation.keys().hasOnly([
+          'mutationId', 'familyId', 'babyName', 'babyBirthdate', 'logicalClock',
+          'updatedAt', 'updatedAtMs', 'authorId', 'origin', 'migration'
+        ])
+        && parts.size() == 3
+        && parts[0] == 'b1'
+        && uuid(parts[1]) && uuid(parts[2])
+        && mutation.mutationId == parts[1]
+        && mutation.familyId == familyId
+        && safeFamilyId(mutation.familyId)
+        && mutation.babyName is string && mutation.babyName.size() <= 2048
+        && birthdate(mutation.babyBirthdate)
+        && mutation.logicalClock is int && mutation.logicalClock >= 0
+        && isoTimestamp(mutation.updatedAt)
+        && mutation.updatedAtMs is int && mutation.updatedAtMs >= 0 && mutation.updatedAtMs <= upper
+        && mutation.logicalClock <= upper
+        && mutation.authorId is string
+        && mutation.authorId.size() >= 1 && mutation.authorId.size() <= 1024
+        && (mutation.origin == 'user'
+          || mutation.origin == 'legacy-local'
+          || mutation.origin == 'legacy-cloud')
+        && validBabyMutationMigration(mutation);
+    }
+
+    function validBabyMutationMigration(mutation) {
+      return !('migration' in mutation)
+        || validBabyMutationMigrationValue(mutation.migration);
+    }
+
+    function validBabyMutationMigrationValue(migration) {
+      let parts = migration.sourceMutationKey.split('[:]');
+      return migration is map
+          && migration.keys().hasAll(['version', 'kind', 'sourceMutationKey'])
+          && migration.keys().hasOnly(['version', 'kind', 'sourceMutationKey'])
+          && migration.version == 1
+          && (migration.kind == 'legacy-cloud-boundary-v1'
+            || migration.kind == 'legacy-pair-bridge-v1')
+          && migration.sourceMutationKey is string
+          && migration.sourceMutationKey.size() <= 160
+          && parts.size() == 3
+          && parts[0] == 'baby-info'
+          && uuid(parts[1]) && uuid(parts[2]);
+    }
+
+    function validBabyMutationWriter(data) {
+      let mutation = data.mutation;
+      return (mutation.origin == 'user'
+          && mutation.logicalClock >= 1
+          && mutation.authorId == request.auth.uid)
+        || (mutation.origin == 'legacy-local'
+          && mutation.logicalClock == 0
+          && mutation.updatedAtMs == 0
+          && mutation.authorId == 'legacy-local')
+        || (mutation.origin == 'legacy-cloud'
+          && mutation.logicalClock == 0
+          && mutation.updatedAtMs == 0
+          && mutation.authorId == 'legacy-cloud');
+    }
+
+    function validBabyProjection(familyId, data) {
+      let keyParts = data.babyInfoWinnerKey.split(':');
+      let mutationDocId = 'b1|' + keyParts[1] + '|' + keyParts[2];
+      let stored = getAfter(
+        /databases/$(database)/documents/families/$(familyId)/babyInfoMutations/$(mutationDocId)
+      ).data;
+      let mutation = stored.mutation;
+      return data.keys().hasAll([
+          'babyName', 'babyBirthdate', 'babyInfoWinnerKey',
+          'babyInfoWinnerMutationId', 'babyInfoWinnerLogicalClock',
+          'babyInfoWinnerUpdatedAt', 'babyInfoWinnerAuthorId', 'babyInfoWinnerOrigin'
+        ])
+        && data.babyName is string && data.babyName.size() <= 2048
+        && birthdate(data.babyBirthdate)
+        && data.babyInfoWinnerKey is string && data.babyInfoWinnerKey.size() <= 160
+        && keyParts.size() == 3
+        && keyParts[0] == 'baby-info'
+        && uuid(keyParts[1]) && uuid(keyParts[2])
+        && validBabyMutationShape(familyId, mutationDocId, stored)
+        && data.babyInfoWinnerMutationId == mutation.mutationId
+        && data.babyInfoWinnerLogicalClock == mutation.logicalClock
+        && data.babyInfoWinnerUpdatedAt == mutation.updatedAt
+        && data.babyInfoWinnerAuthorId == mutation.authorId
+        && data.babyInfoWinnerOrigin == mutation.origin
+        && data.babyName == mutation.babyName
+        && data.babyBirthdate == mutation.babyBirthdate;
+    }
+
+    match /users/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
       allow list: if false;
+      allow create, update: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data is map
+        && request.resource.data.keys().hasAll(['familyId'])
+        && request.resource.data.keys().hasOnly(['familyId'])
+        && safeFamilyId(request.resource.data.familyId)
+        && familyAfterHasMember(request.resource.data.familyId, uid);
+      allow delete: if false;
+    }
 
-      // 인증된 사용자가 본인 가족을 만들 때 생성 (createFamily 배치에서 호출)
-      // code_check == document id 로 간단히 검증
-      allow create: if request.auth != null
+    match /invites/{code} {
+      allow get: if signedIn() && inviteCode(code);
+      allow list: if false;
+      allow create: if signedIn()
+        && inviteCode(code)
+        && request.resource.data is map
+        && request.resource.data.keys().hasAll(['familyId', 'code_check', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['familyId', 'code_check', 'createdAt'])
+        && safeFamilyId(request.resource.data.familyId)
         && request.resource.data.code_check == code
-        && request.resource.data.familyId is string;
-
-      // 수정/삭제 불가
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.createdAt == request.time
+        && getAfter(
+          /databases/$(database)/documents/families/$(request.resource.data.familyId)
+        ).data.inviteCode == code
+        && familyAfterHasMember(request.resource.data.familyId, request.auth.uid)
+        && userAfterSelects(request.auth.uid, request.resource.data.familyId);
       allow update, delete: if false;
     }
 
-    // ── 가족 문서 ──────────────────────────────────────────────────────────
-    match /families/{familyId} {
+    match /joinProofs/{uid} {
+      allow read, write: if false;
 
-      // 멤버 여부 확인 함수 (가족 문서에 직접 접근하는 경우)
+      match /capabilities/{code} {
+        allow get, list: if false;
+        allow create: if signedIn()
+          && request.auth.uid == uid
+          && inviteCode(code)
+          && request.resource.data is map
+          && request.resource.data.keys().hasAll(['uid', 'familyId', 'inviteCode'])
+          && request.resource.data.keys().hasOnly(['uid', 'familyId', 'inviteCode'])
+          && request.resource.data.uid == uid
+          && request.resource.data.inviteCode == code
+          && safeFamilyId(request.resource.data.familyId)
+          && get(/databases/$(database)/documents/invites/$(code)).data.familyId
+            == request.resource.data.familyId
+          && get(/databases/$(database)/documents/invites/$(code)).data.code_check == code
+          && familyAfterHasMember(request.resource.data.familyId, uid)
+          && userAfterSelects(uid, request.resource.data.familyId);
+        allow update: if signedIn()
+          && request.auth.uid == uid
+          && request.resource.data == resource.data;
+        allow delete: if false;
+      }
+    }
+
+    match /families/{familyId} {
       function isMember() {
-        return request.auth != null
-          && resource.data.members[request.auth.uid] != null;
+        return signedIn()
+          && resource.data.members is map
+          && request.auth.uid in resource.data.members;
       }
 
-      // get: 멤버만 허용 (초대코드 조회는 이제 invites 컬렉션에서 처리)
-      allow get: if isMember();
+      function validFamilyCreate() {
+        let data = request.resource.data;
+        let invite = getAfter(/databases/$(database)/documents/invites/$(data.inviteCode)).data;
+        return signedIn()
+          && safeFamilyId(familyId)
+          && data is map
+          && data.keys().hasAll(['name', 'babyName', 'babyBirthdate', 'members', 'inviteCode', 'createdAt'])
+          && data.keys().hasOnly(['name', 'babyName', 'babyBirthdate', 'members', 'inviteCode', 'createdAt'])
+          && data.name is string && data.name.size() <= 512
+          && data.babyName is string && data.babyName.size() <= 2048
+          && birthdate(data.babyBirthdate)
+          && data.members is map
+          && data.members.keys().size() == 1
+          && data.members.keys().hasOnly([request.auth.uid])
+          && validMember(data.members[request.auth.uid])
+          && inviteCode(data.inviteCode)
+          && data.createdAt is timestamp && data.createdAt == request.time
+          && invite.familyId == familyId
+          && invite.code_check == data.inviteCode
+          && userAfterSelects(request.auth.uid, familyId);
+      }
 
-      // list: 완전 차단 (아기 이름, 멤버, 초대코드 열거 방지)
-      allow list: if false;
+      function exactJoinProof() {
+        let code = resource.data.inviteCode;
+        let proof = getAfter(
+          /databases/$(database)/documents/joinProofs/$(request.auth.uid)/capabilities/$(code)
+        ).data;
+        return proof is map
+          && proof.keys().hasAll(['uid', 'familyId', 'inviteCode'])
+          && proof.keys().hasOnly(['uid', 'familyId', 'inviteCode'])
+          && proof.uid == request.auth.uid
+          && proof.familyId == familyId
+          && proof.inviteCode == code;
+      }
 
-      // 새 가족 생성: 로그인한 사용자, 자신이 members에 포함되어 있어야 함
-      allow create: if request.auth != null
-        && request.resource.data.members[request.auth.uid] != null
-        && request.resource.data.inviteCode is string
-        && request.resource.data.inviteCode.size() == 6;
-
-      // 가족 정보 수정 (기존 멤버만):
-      //   (a) 일반 정보 수정 (이미 멤버인 경우)
-      //   (b) self-join: 변경된 키가 members뿐이고, auth.uid가 새로 추가되는 경우
-      allow update: if isMember()
-        || (
-          request.auth != null
-          // 변경된 최상위 키가 members뿐임
+      function validSelfJoin() {
+        let changes = request.resource.data.members.diff(resource.data.members);
+        return signedIn()
+          && !(request.auth.uid in resource.data.members)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
-          // 본인 uid가 새로 추가됨
-          && request.resource.data.members[request.auth.uid] != null
-          // 기존 멤버가 제거되지 않음 (기존 members는 그대로 포함)
-          && resource.data.members.keys().toSet().difference(
-               request.resource.data.members.keys().toSet()
-             ).size() == 0
-        );
+          && request.resource.data.members is map
+          && changes.addedKeys().size() == 1
+          && changes.addedKeys().hasOnly([request.auth.uid])
+          && changes.changedKeys().size() == 0
+          && changes.removedKeys().size() == 0
+          && validMember(request.resource.data.members[request.auth.uid])
+          && exactJoinProof()
+          && userAfterSelects(request.auth.uid, familyId);
+      }
 
-      // 삭제는 허용하지 않음
+      function validLegacyPairOnlyUpdate() {
+        let top = request.resource.data.diff(resource.data).affectedKeys();
+        return isMember()
+          && top.hasAll(['babyName', 'babyBirthdate'])
+          && top.hasOnly(['babyName', 'babyBirthdate'])
+          && request.resource.data.babyName is string
+          && request.resource.data.babyName.size() <= 2048
+          && birthdate(request.resource.data.babyBirthdate);
+      }
+
+      function validMemberUpdate() {
+        let top = request.resource.data.diff(resource.data).affectedKeys();
+        let memberChanges = request.resource.data.members.diff(resource.data.members).affectedKeys();
+        let babyFields = [
+          'babyName', 'babyBirthdate', 'babyInfoWinnerKey',
+          'babyInfoWinnerMutationId', 'babyInfoWinnerLogicalClock',
+          'babyInfoWinnerUpdatedAt', 'babyInfoWinnerAuthorId', 'babyInfoWinnerOrigin'
+        ];
+        return isMember()
+          && request.resource.data.keys().hasOnly([
+            'name', 'babyName', 'babyBirthdate', 'members', 'inviteCode', 'createdAt',
+            'babyInfoWinnerKey', 'babyInfoWinnerMutationId', 'babyInfoWinnerLogicalClock',
+            'babyInfoWinnerUpdatedAt', 'babyInfoWinnerAuthorId', 'babyInfoWinnerOrigin'
+          ])
+          && top.hasOnly(['members'].concat(babyFields))
+          && request.resource.data.members is map
+          && request.auth.uid in request.resource.data.members
+          && memberChanges.hasOnly([request.auth.uid])
+          && validMember(request.resource.data.members[request.auth.uid])
+          && (!top.hasAny(babyFields) || validBabyProjection(familyId, request.resource.data));
+      }
+
+      allow get: if isMember();
+      allow list: if false;
+      allow create: if validFamilyCreate();
+      allow update: if validSelfJoin() || validLegacyPairOnlyUpdate() || validMemberUpdate();
       allow delete: if false;
 
-      // ── 이벤트 서브컬렉션 ─────────────────────────────────────────────
       match /events/{eventDocId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId)
+          && validEventDocument(eventDocId, request.resource.data);
+        allow update, delete: if false;
+      }
 
-        // 읽기: 가족 멤버만 (get으로 family doc을 조회하여 확인)
-        allow read: if request.auth != null
-          && get(/databases/$(database)/documents/families/$(familyId)).data.members[request.auth.uid] != null;
-
-        // 쓰기: create-only (멤버만), update/delete 불가
-        allow create: if request.auth != null
-          && get(/databases/$(database)/documents/families/$(familyId)).data.members[request.auth.uid] != null;
-
-        // update/delete 명시적 거부 (create-only 보장)
-        allow update: if false;
-        allow delete: if false;
+      match /babyInfoMutations/{mutationDocId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId)
+          && validBabyMutationShape(familyId, mutationDocId, request.resource.data)
+          && validBabyMutationWriter(request.resource.data);
+        allow update, delete: if false;
       }
     }
   }

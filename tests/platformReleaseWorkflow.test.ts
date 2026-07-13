@@ -324,6 +324,7 @@ describe('signed platform release workflow', () => {
       'build-mac', 'e2e-mac', 'e2e-win',
       'manifest-mac', 'manifest-win', 'package-mac', 'package-win',
       'publish-release', 'release-context', 'release-mac', 'release-preflight', 'release-win',
+      'security-check',
       'smoke-mac-arm64', 'smoke-mac-intel', 'smoke-win',
     ].sort())
   })

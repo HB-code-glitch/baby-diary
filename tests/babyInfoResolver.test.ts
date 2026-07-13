@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import type { BabyInfoMutation } from '../shared/types'
 import {
+  babyInfoBoundarySourceMutationKey,
   canonicalBabyInfoMutationJson,
   compareBabyInfoMutations,
+  deriveUploadReadyBabyInfoMutation,
   getBabyInfoMutationKey,
+  isBabyInfoMutationUploadReady,
+  makeAuthBoundLegacyCloudBridgeBabyInfoMutation,
   makeLegacyCloudBabyInfoMutation,
   makeLegacyCloudBridgeBabyInfoMutation,
   makeLegacyLocalBabyInfoMutation,
   normalizeBabyInfoSyncState,
   resolveLatestBabyInfoMutation,
+  validateBabyInfoMutationForCloud,
 } from '../shared/babyInfoResolver'
 
 const FAMILY_ID = 'family-1'
@@ -28,6 +33,47 @@ function mutation(overrides: Partial<BabyInfoMutation> = {}): BabyInfoMutation {
 }
 
 describe('baby info mutation resolver', () => {
+  it('durably identifies an auth-bound timestamp-shadow derivative for an old pending source', () => {
+    const now = Date.parse('2026-07-13T12:00:00.000Z')
+    const source = mutation({ updatedAtMs: undefined, authorId: 'old-local-profile' })
+    const before = structuredClone(source)
+    const derived = deriveUploadReadyBabyInfoMutation(source, 'firebase-user', now)
+
+    expect(source).toEqual(before)
+    expect(derived).toMatchObject({
+      familyId: source.familyId,
+      babyName: source.babyName,
+      babyBirthdate: source.babyBirthdate,
+      logicalClock: now,
+      updatedAt: new Date(now).toISOString(),
+      updatedAtMs: now,
+      authorId: 'firebase-user',
+      origin: 'user',
+    })
+    expect(babyInfoBoundarySourceMutationKey(derived)).toBe(getBabyInfoMutationKey(source))
+    expect(isBabyInfoMutationUploadReady(derived, 'firebase-user', now)).toBe(true)
+    expect(() => deriveUploadReadyBabyInfoMutation(derived, 'another-user', now + 1)).toThrow(/rebound/)
+  })
+
+  it('requires an exact timestamp shadow and rejects future/clock poison at the cloud boundary', () => {
+    const now = Date.parse('2026-07-13T12:00:00.000Z')
+    const valid = mutation({
+      updatedAt: '2026-07-13T10:00:00.000Z',
+      updatedAtMs: Date.parse('2026-07-13T10:00:00.000Z'),
+    })
+    expect(validateBabyInfoMutationForCloud(valid, now)).toBe(true)
+    expect(validateBabyInfoMutationForCloud({ ...valid, updatedAtMs: valid.updatedAtMs! + 1 }, now)).toBe(false)
+    expect(validateBabyInfoMutationForCloud({
+      ...valid,
+      logicalClock: now + 300_001,
+    }, now)).toBe(false)
+    expect(validateBabyInfoMutationForCloud({
+      ...valid,
+      updatedAt: '2026-07-13T12:05:00.001Z',
+      updatedAtMs: now + 300_001,
+    }, now)).toBe(false)
+  })
+
   it('rejects forbidden and UTF-8 oversized family document segments', () => {
     const base = mutation({ familyId: 'family-safe' })
     expect(() => canonicalBabyInfoMutationJson({ ...base, familyId: '.' })).toThrow()
@@ -77,6 +123,35 @@ describe('baby info mutation resolver', () => {
       getBabyInfoMutationKey(mutation({ mutationId: '00000000-0000-4000-8000-000000000002' })),
       prior,
     )).toThrow(/marker key mismatch/i)
+  })
+
+  it('creates an auth-bound HLC bridge for a v0.3.8 pair-only update', () => {
+    const now = Date.parse('2026-07-13T12:00:00.000Z')
+    const prior = mutation({ babyName: 'Prior', logicalClock: 8 })
+    const priorKey = getBabyInfoMutationKey(prior)
+    const bridge = makeAuthBoundLegacyCloudBridgeBabyInfoMutation(
+      FAMILY_ID,
+      'Old client edit',
+      '2026-06-06',
+      priorKey,
+      prior,
+      'firebase-user',
+      now,
+    )
+
+    expect(bridge).toMatchObject({
+      logicalClock: now,
+      updatedAt: new Date(now).toISOString(),
+      updatedAtMs: now,
+      authorId: 'firebase-user',
+      origin: 'user',
+      migration: {
+        version: 1,
+        kind: 'legacy-pair-bridge-v1',
+        sourceMutationKey: priorKey,
+      },
+    })
+    expect(isBabyInfoMutationUploadReady(bridge!, 'firebase-user', now)).toBe(true)
   })
   it('treats a missing state as the empty versioned state', () => {
     expect(normalizeBabyInfoSyncState(undefined)).toEqual({

@@ -98,9 +98,13 @@ describe('softDeleteAllEvents', () => {
     // ipc.appendEvent called once per event with deleted: true and rev bumped
     expect(mockAppendEvent).toHaveBeenCalledTimes(3)
     const calls = mockAppendEvent.mock.calls
-    expect(calls[0][0]).toMatchObject({ id: 'e1', deleted: true, rev: 2 })
-    expect(calls[1][0]).toMatchObject({ id: 'e2', deleted: true, rev: 3 })
-    expect(calls[2][0]).toMatchObject({ id: 'e3', deleted: true, rev: 2 })
+    expect(calls[0][0]).toMatchObject({ id: 'e1', deleted: true })
+    expect(calls[1][0]).toMatchObject({ id: 'e2', deleted: true })
+    expect(calls[2][0]).toMatchObject({ id: 'e3', deleted: true })
+    for (const [persisted] of calls as Array<[DiaryEvent]>) {
+      expect(persisted.rev).toBe(Date.parse(persisted.updatedAt))
+      expect(persisted.sync?.updatedAtMs).toBe(Date.parse(persisted.updatedAt))
+    }
     // enqueue called for each tombstone
     expect(mockEnqueue).toHaveBeenCalledTimes(3)
   })
@@ -173,11 +177,13 @@ describe('softDeleteAllEvents', () => {
     await useAppStore.getState().softDeleteAllEvents()
 
     const tombstone = mockAppendEvent.mock.calls[0][0] as DiaryEvent
-    expect(tombstone.rev).toBe(6)
+    expect(tombstone.rev).toBe(Date.parse(tombstone.updatedAt))
+    expect(tombstone.rev).toBeGreaterThan(event.rev)
+    expect(tombstone.sync?.updatedAtMs).toBe(Date.parse(tombstone.updatedAt))
     expect(tombstone.deleted).toBe(true)
     // enqueue receives the same tombstone object
     const enqueued = mockEnqueue.mock.calls[0][0] as DiaryEvent
-    expect(enqueued.rev).toBe(6)
+    expect(enqueued.rev).toBe(tombstone.rev)
     expect(enqueued.deleted).toBe(true)
   })
 
@@ -205,6 +211,8 @@ describe('softDeleteAllEvents', () => {
     const added = await useAppStore.getState().addEvent(legacyShapedNewEvent)
 
     expect(added.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(added.rev).toBe(Date.parse(added.updatedAt))
+    expect(added.sync?.updatedAtMs).toBe(Date.parse(added.updatedAt))
     expect(mockAppendEvent.mock.calls[0][0]).toBe(added)
     expect(mockEnqueue.mock.calls[0][0]).toBe(added)
   })
@@ -216,7 +224,9 @@ describe('softDeleteAllEvents', () => {
 
     const edited = await useAppStore.getState().editEvent(original, { at: '2026-07-13T09:00:00.000Z' })
 
-    expect(edited.rev).toBe(original.rev + 1)
+    expect(edited.rev).toBe(Date.parse(edited.updatedAt))
+    expect(edited.rev).toBeGreaterThan(original.rev)
+    expect(edited.sync?.updatedAtMs).toBe(Date.parse(edited.updatedAt))
     expect(edited.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(edited.mutationId).not.toBe(original.mutationId)
     expect(mockAppendEvent.mock.calls[0][0]).toBe(edited)
