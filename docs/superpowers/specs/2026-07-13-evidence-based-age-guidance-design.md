@@ -43,24 +43,29 @@ The typed source registry will include, at minimum:
 - Japan CFA safe-sleep, infant nutrition/weaning, accident-prevention, and infant check-up pages
 - Japan MHLW vaccination information
 
-Sources open in the system browser through a narrow Electron IPC bridge that accepts only `https:` URLs on the registry's explicit authority-host allowlist. Browser development mode may use `window.open` with `noopener,noreferrer`. The guidance remains useful without an internet connection because the concise action text is bundled with the app.
+Sources open in the system browser through a narrow Electron IPC bridge. The renderer sends only a known `sourceId`; Electron main resolves that ID from a shared immutable registry and opens that exact `https:` URL. Arbitrary renderer-supplied URLs and arbitrary paths on an allowed host are never accepted. Browser development mode may open the registry URL with `noopener,noreferrer`. The guidance remains useful without an internet connection because the concise action text is bundled with the app.
 
 ## Age routing
 
-Age is calculated in completed days from the stored birthdate. Boundary behaviour is deterministic and covered by tests.
+Age is calculated from the stored birthdate in two deliberately separate forms:
+
+- completed calendar months for feeding, development, activity, check-up, and other month-labelled guidance;
+- completed days only for rules whose authority source is explicitly day-based, such as the 0–27-day newborn stage and the fever safety function.
+
+Calendar months must not be approximated as 30/90/182/365 days. Month-end births, leap years, local midnight, and DST/time-zone transitions are covered by tests. The UI refreshes its stage after local midnight.
 
 | Stage | Age window | First priorities |
 |---|---:|---|
-| Newborn | 0–27 days | responsive milk feeding and intake concerns; safe sleep; fever/newborn danger signs; supervised awake floor time; local newborn check-up |
-| Young infant | 28–89 days | responsive feeding; safe sleep; supervised tummy time; 2-month developmental observation and current vaccination/check-up link |
-| 3–5 months | 90–181 days | safe sleep; active floor play; complementary-food readiness near 6 months, never before 4 months; age-aware fever threshold |
-| 6–8 months | 182–273 days | breast milk/formula remains central; 2–3 complementary meals with iron-rich variety; allergen and choking safety; no honey/cow's milk as a drink/juice; oral care |
-| 9–11 months | 274–364 days | texture and self-feeding progression; 3–4 meals with optional snacks as needed; 9-month developmental check; choking and safe sleep |
-| 12–17 months | 365–547 days | varied family foods and responsive meals; continued breastfeeding if desired; safe activity/sleep; dental care and local check-up/vaccine link |
-| 18–23 months | 548–729 days | 18-month developmental screening and act-early signs; at least 180 minutes of varied activity; no routine screen time; family meals and oral care |
-| 2 years | 730–1094 days | language/social development; active play; screen time no more than 1 hour and less is better; 11–14 hours sleep; balanced family foods and dental care |
-| 3–4 years | 1095–1825 days | developmental checkpoints; at least 180 minutes activity including 60 minutes energetic play; screen time no more than 1 hour; 10–13 hours sleep; injury prevention |
-| 5+ years | 1826+ days | the infant/toddler guide retires to a general safety/check-up card and directs caregivers to local paediatric guidance rather than extrapolating infant claims |
+| Newborn | completed days 0–27 | responsive milk feeding and intake concerns; safe sleep; fever/newborn danger signs; supervised awake floor time; local newborn check-up |
+| Young infant | day 28 through completed month 2 | responsive feeding; safe sleep; supervised tummy time; 2-month developmental observation and current vaccination/check-up links |
+| 3–5 months | completed months 3–5 | safe sleep; active floor play; complementary-food readiness near 6 months, never before 4 months; age-aware fever threshold |
+| 6–8 months | completed months 6–8 | breast milk/formula remains central; 2–3 complementary meals with iron-rich variety; allergen and choking safety; no honey/cow's milk as a drink/juice; oral care |
+| 9–11 months | completed months 9–11 | texture and self-feeding progression; 3–4 meals with optional snacks as needed; 9-month developmental check; choking and safe sleep |
+| 12–17 months | completed months 12–17 | varied family foods and responsive meals; continued breastfeeding if desired; safe activity/sleep; dental care and official check-up/vaccine links |
+| 18–23 months | completed months 18–23 | 18-month developmental screening and act-early signs; at least 180 minutes of varied activity; no routine screen time; family meals and oral care |
+| 2 years | completed months 24–35 | language/social development; active play; screen time no more than 1 hour and less is better; 11–14 hours sleep; balanced family foods and dental care |
+| 3–4 years | completed months 36–59 | developmental checkpoints; at least 180 minutes activity including 60 minutes energetic play; screen time no more than 1 hour; 10–13 hours sleep; injury prevention |
+| 5+ years | completed month 60+ | the infant/toddler guide retires to a general safety/check-up card and directs caregivers to local paediatric guidance rather than extrapolating infant claims |
 
 The visible UI shows at most three priority cards. A `more` disclosure reveals remaining age-relevant categories. Emergency signs and official-source access remain available regardless of the stage.
 
@@ -71,6 +76,7 @@ The visible UI shows at most three priority cards. A `more` disclosure reveals r
 - Put infants on their back for every sleep until age 1.
 - Use a firm, flat, non-inclined separate infant sleep surface with only a fitted sheet; keep soft objects and loose bedding out.
 - Room-share, without bed-sharing, ideally for at least the first 6 months.
+- Continue placing the baby on the back. Only after the baby can roll independently in both directions may the position they assume be left alone; stop swaddling as soon as any attempt to roll appears.
 - Start supervised awake tummy/floor time early; sleep always returns to the back position.
 - Apply WHO age-appropriate activity, restraint, screen, and sleep guidance without presenting sleep hours as a performance score.
 
@@ -89,9 +95,11 @@ The visible UI shows at most three priority cards. A `more` disclosure reveals r
 `evaluateFever` routes recorded temperature conservatively:
 
 - Under 3 months and 38.0°C or higher: urgent same-day/emergency assessment.
-- 3–6 months and 39.0°C or higher: high-risk warning for prompt assessment.
+- If birthdate/age is unknown and 38.0°C or higher: the app cannot exclude a young infant and instructs the caregiver to contact a medical service now while confirming age.
+- 3–6 months and 38.3°C or higher: contact a clinician; 39.0°C or higher is at least an intermediate/high-risk warning for prompt assessment.
 - Older than 6 months: temperature height alone does not determine serious illness; symptoms and red flags drive urgency.
-- Any age: pale/blue/mottled colour, difficult or grunting breathing, marked drowsiness or poor response, non-blanching rash, seizure, stiff neck or bulging fontanelle, severe dehydration, or bilious/projectile vomiting prompts emergency help.
+- Newborn 0–27 days: temperature below 35.5°C, inability to feed, marked lethargy, seizure, grunting, or severe chest indrawing also prompts urgent assessment.
+- Any age: pale/blue/mottled colour, difficult or grunting breathing, marked drowsiness or poor response, non-blanching rash, seizure, stiff neck or bulging fontanelle, severe dehydration, or bilious/projectile vomiting prompts emergency help. Korean and Japanese emergency action identifies 119.
 - Fever lasting 5 days or longer needs medical assessment; worsening, caregiver concern, poor drinking, or dehydration warrants earlier advice.
 - Remove tepid sponging. Avoid underdressing or over-wrapping. Offer fluids.
 - Antipyretics are for distress, not merely to lower the number. The app gives no dose and tells caregivers to follow the label and clinician/pharmacist advice; a child under 3 months is assessed first.
@@ -102,7 +110,7 @@ Temperature measurement site is not stored, so the UI must not claim that a reco
 
 - Surface only the current CDC checkpoint and a short observation prompt; never mark a child delayed from app data.
 - If a skill is lost or the caregiver is concerned, advise speaking to a clinician promptly rather than waiting for the next check-up.
-- Link Korean users to KDCA check-up/vaccination pages and Japanese users to CFA/MHLW pages.
+- App language does not prove country of residence. Until a separate local-only country preference exists, show clearly labelled Korean KDCA and Japanese CFA/MHLW check-up/vaccination links together; language changes presentation order/text only, never residency assumptions.
 - From the first tooth, begin age-appropriate brushing; recommend a dental visit by the first birthday, with fluoride details left to local dental advice where national recommendations differ.
 
 ## UI behaviour
@@ -138,7 +146,7 @@ The visual patch reuses the existing premium card language, restrained motion, a
 - No event, profile, family-code, login, or sync schema changes.
 - Guidance is static versioned content and is never synced as user data.
 - Existing diary records and statistics remain unchanged.
-- macOS and Windows use the same React/TypeScript path. A new typed `openEvidenceSource` bridge validates the URL again in the main process before calling `shell.openExternal`; arbitrary renderer-supplied URLs are rejected.
+- macOS and Windows use the same React/TypeScript path. A new typed `openEvidenceSource(sourceId)` bridge resolves the exact URL in the main process before calling `shell.openExternal`; arbitrary renderer-supplied URLs are rejected.
 
 ## Acceptance criteria
 

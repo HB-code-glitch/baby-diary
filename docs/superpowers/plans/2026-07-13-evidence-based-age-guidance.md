@@ -16,7 +16,8 @@
 
 **Files:**
 
-- Create: `src/lib/healthEvidence.ts`
+- Create: `shared/healthEvidence.ts`
+- Create: `src/lib/healthEvidence.ts` (renderer re-export/helpers only if needed)
 - Create: `src/lib/ageGuidance.ts`
 - Create: `tests/healthEvidence.test.ts`
 - Create: `tests/ageGuidance.test.ts`
@@ -40,7 +41,7 @@ Expected: PASS.
 
 ### Step 3: Write failing age-routing tests
 
-Cover exact boundaries 0/27/28/89/90/181/182/273/274/364/365/547/548/729/730/1094/1095/1825/1826, invalid/future/missing birthdates, 5+ fallback, current priority count, source-ID referential integrity, and Korean/Japanese completeness.
+Cover day 0/27/28 for newborn routing, then exact completed-calendar-month boundaries 3/6/9/12/18/24/36/60. Include January 29–31 births, February/month-end rollover, leap day, local-midnight/DST-safe calculation, invalid/future/missing birthdates, 5+ fallback, current priority count, source-ID referential integrity, and Korean/Japanese completeness. Explicitly prove that calendar-month routing is not approximated by 90/182/365 days.
 
 Run: `npx vitest run tests/ageGuidance.test.ts`  
 Expected: FAIL.
@@ -54,7 +55,7 @@ Use structured records with:
 - `sourceIds`
 - optional `country` and `linkPurpose`
 
-Keep the first three priorities concise. Put safe sleep, feeding/readiness, food safety, activity/screen/sleep, oral health, check-up/vaccine links, and developmental act-early guidance in the correct stages. Add corrected-age and clinician-plan caveats.
+Keep the first three priorities concise. Put safe sleep, feeding/readiness, food safety, activity/screen/sleep, oral health, check-up/vaccine links, and developmental act-early guidance in the correct stages. Add the both-direction rolling condition and stop-swaddling-at-first-roll-attempt rule. Keep corrected-age wording as a clinician caveat only because gestational age is not stored. Do not infer residence country from UI language; return both countries' clearly labelled official links when country is unknown.
 
 Run: `npx vitest run tests/ageGuidance.test.ts tests/healthEvidence.test.ts`  
 Expected: PASS.
@@ -93,9 +94,10 @@ Commit: `feat: add official age guidance registry`
 Assert:
 
 - `<90 days && >=38.0` routes urgent.
-- `90–181 days && >=39.0` routes high risk.
-- `>=182 days` is not marked dangerous from temperature height alone.
-- unknown age receives a cautious assessment prompt without pretending the child is newborn.
+- age 3–6 calendar months and `>=38.3` prompts clinician contact, while `>=39.0` has the stronger risk classification.
+- after completed calendar month 6, temperature height alone does not mark serious illness.
+- unknown age with `>=38.0` cannot exclude a young infant and prompts immediate medical contact while asking the caregiver to confirm age.
+- newborn 0–27 days with `<35.5`, poor feeding, marked lethargy, grunting, seizure, or severe chest indrawing routes urgent assessment.
 - care steps include fluids and neutral clothing, exclude tepid sponging, exclude unsupported 24-hour/3-day rules, and use the 5-day assessment threshold plus earlier red-flag advice.
 - red flags are structured bilingual arrays.
 
@@ -104,7 +106,7 @@ Expected: FAIL.
 
 ### Step 2: Implement conservative fever routing and modal
 
-Separate temperature routing from symptom red flags. Do not infer measurement site. Do not provide medicine doses. Show the urgent action first, then expandable red flags and sources. Keep keyboard focus, alert-dialog semantics, and reduced-motion behaviour.
+Separate temperature routing from symptom red flags. Do not infer measurement site. Do not provide medicine doses. Show the urgent action first, then expandable red flags and sources. Korean/Japanese emergency CTA names 119. Test initial focus, focus trap, Escape/keyboard handling, focus restoration, and reduced-motion behaviour.
 
 Run the targeted fever tests and typecheck.  
 Expected: PASS.
@@ -165,12 +167,12 @@ Test that the home panel:
 - shows at most three priorities before expansion;
 - reveals remaining current-stage content only on request;
 - handles missing birthdate with one setup prompt;
-- uses current locale and country-specific official links;
+- uses current locale while showing both countries' clearly labelled official links when residence is unknown;
 - exposes sources via semantic anchors/buttons and has accessible expanded state.
 
 Test that Settings no longer renders the fixed breastfeeding interval table or mixed 13-marker accordion and instead groups official evidence by current stage/category.
 
-Test the external-link bridge independently: only `https:` URLs whose normalized hostname is in the evidence registry's authority allowlist can reach `shell.openExternal`; HTTP, credentials, lookalike suffixes, unknown hosts, and malformed URLs are rejected.
+Test the external-link bridge independently: the renderer can send only a known `sourceId`; main resolves the exact URL from the shared registry. Unknown IDs and any URL-shaped payload are rejected, and the real preload→main→`shell.openExternal` path is covered.
 
 Run: `npx vitest run tests/ageGuidanceUi.test.tsx tests/progressiveDisclosure.test.ts`  
 Expected: FAIL.
@@ -179,11 +181,11 @@ Expected: FAIL.
 
 Build `AgeGuidancePanel` from the pure selectors. Reuse the existing premium card palette and spacing. Use a short staged reveal, no auto-advancing carousel, no layout-shifting animation, and a reduced-motion override.
 
-`EvidenceSourceList` displays organisation/title/review date and opens HTTPS URLs through a new typed `openEvidenceSource` bridge. Validate the source URL in the renderer for UX and again in Electron main for security. Browser-mode fallback must use `noopener,noreferrer`. Source details remain collapsed until requested.
+`EvidenceSourceList` displays organisation/title/review date and opens a known ID through a new typed `openEvidenceSource(sourceId)` bridge. Electron main resolves the exact registry URL. Browser-mode fallback may resolve that same registry ID and must use `noopener,noreferrer`. Source details remain collapsed until requested.
 
 ### Step 3: Integrate Home and Settings
 
-Replace formula-only home advice and both old Settings guide cards. Keep sync, records, reports, tutorial, and settings disclosures untouched.
+Replace formula-only home advice and both old Settings guide cards. Keep sync, records, tutorial, and unrelated settings disclosures untouched. Connect the existing local-midnight refresh so stage transitions update without restarting the app.
 
 Run targeted UI tests and typecheck.  
 Expected: PASS.
@@ -214,14 +216,14 @@ Commit: `feat: show age-appropriate evidence guidance`
 
 **Files:**
 
-- Modify as identified by the inventory: `src/i18n/ko.json`, `src/i18n/ja.json`, `src/lib/milestones.ts`, tests
+- Modify as identified by the inventory: `src/i18n/ko.json`, `src/i18n/ja.json`, `src/lib/milestones.ts`, `src/pages/StatsPage.tsx`, `src/lib/reportModel.ts`, `src/pages/ReportView.tsx`, tests
 - Create: `docs/health-content-audit.md`
 
 ### Step 1: Re-scan every embedded claim
 
 Search TypeScript/TSX/JSON for medical, nutrition, development, sleep, safety, formula, breastfeeding, medicine, fever, vaccination, dental, and milestone terms. Classify each as record label, cultural description, or health claim.
 
-Every health claim must be removed, made neutral, or mapped to an official source. Cultural event descriptions must be clearly labelled as traditions and must not imply a health benefit.
+Every health claim must be removed, made neutral, or mapped to an official source. Cultural event descriptions must be clearly labelled as traditions and must not imply a health benefit. Replace the temperature chart's unexplained 37.5°C line and report's context-free `>=38°C fever count` with neutral recorded-temperature language that states measurement-site/age context is required. Rephrase percentile as an approximate reference from the WHO chart rather than an exact rank.
 
 ### Step 2: Add an auditable content ledger
 
@@ -229,7 +231,7 @@ Document each retained health topic, app location, source IDs, decision, and rev
 
 ### Step 3: Add guard tests
 
-Tests reject known removed phrases/domains, missing bilingual text, broken source references, copied numeric risk marketing, and fixed feeding countdown/allowance wording.
+Tests reject known removed phrases/domains, missing bilingual text or placeholder mismatch, broken source references, copied numeric risk marketing, fixed feeding countdown/allowance wording, `400 IU로 수렴`, `58 IU/L`, `1,000 mL`, LEAP/PETIT percentage marketing, and `더 원하면 이유식`. Add complete CDC checkpoint coverage tests for 2/4/6/9/12/15/18/24 months and screening-link explanations at 9/18/30 and 18/24 months without producing a diagnosis.
 
 Run: `npm run check`  
 Expected: PASS.
@@ -270,6 +272,7 @@ Run one whole-branch review for correctness, evidence fidelity, accessibility, c
 ### Step 3: Publish
 
 - bump to 0.3.9;
+- update `.github/workflows/build.yml` so checks and packaged E2E run on pull requests, and tag release jobs depend on the matching packaged E2E jobs;
 - push `codex/evidence-guidance-v3`;
 - open PR and wait for CI;
 - merge only after all checks pass;
