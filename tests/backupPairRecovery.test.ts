@@ -461,11 +461,11 @@ describe('verified settings/journal pair recovery', () => {
     })).toThrow(/file.?count|too many/i)
   })
 
-  it('accepts the 128-file production boundary and closes every held source handle', () => {
+  it('accepts the legacy 4096-file production boundary', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(233)])
-    for (let index = 0; index < 125; index += 1) {
+    for (let index = 0; index < 4_093; index += 1) {
       fs.writeFileSync(
-        path.join(snapshot.snapshot, 'data', `boundary-${String(index).padStart(3, '0')}.jsonl`),
+        path.join(snapshot.snapshot, 'data', `boundary-${String(index).padStart(4, '0')}.jsonl`),
         '{}\n',
       )
     }
@@ -477,11 +477,47 @@ describe('verified settings/journal pair recovery', () => {
     fs.renameSync(moved, snapshot.snapshot)
   })
 
-  it('rejects 129 manifest files at the production fd budget and leaves no handle behind', () => {
+  it('verifies 128 manifest files with at most four evidence handles open', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(234)])
-    for (let index = 0; index < 126; index += 1) {
+    for (let index = 0; index < 125; index += 1) {
       fs.writeFileSync(
-        path.join(snapshot.snapshot, 'data', `overflow-${String(index).padStart(3, '0')}.jsonl`),
+        path.join(snapshot.snapshot, 'data', `bounded-${String(index).padStart(3, '0')}.jsonl`),
+        '{}\n',
+      )
+    }
+    writeManifest(snapshot.snapshot)
+
+    const realOpen = fs.openSync.bind(fs)
+    const realClose = fs.closeSync.bind(fs)
+    const held = new Set<number>()
+    let peak = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target, flags, mode) {
+        const fd = realOpen(target, flags, mode)
+        held.add(fd)
+        peak = Math.max(peak, held.size)
+        return fd
+      },
+      closeSync(fd) {
+        realClose(fd)
+        held.delete(fd)
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      durableFs,
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { durableFs: DurableFileOps })).not.toThrow()
+    expect(peak).toBeGreaterThan(0)
+    expect(peak).toBeLessThanOrEqual(4)
+    expect(held.size).toBe(0)
+  })
+
+  it('rejects 4097 manifest files and leaves no handle behind', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(237)])
+    for (let index = 0; index < 4_094; index += 1) {
+      fs.writeFileSync(
+        path.join(snapshot.snapshot, 'data', `overflow-${String(index).padStart(4, '0')}.jsonl`),
         '{}\n',
       )
     }
@@ -491,6 +527,341 @@ describe('verified settings/journal pair recovery', () => {
     const moved = `${snapshot.snapshot}-moved`
     fs.renameSync(snapshot.snapshot, moved)
     fs.renameSync(moved, snapshot.snapshot)
+  })
+
+  it('preserves a cleanup-complete evidence spool owned by a foreign startup', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(243)])
+    fs.copyFileSync(path.join(snapshot.snapshot, 'settings.json'), path.join(tmpDir, 'settings.json'))
+    fs.copyFileSync(
+      path.join(snapshot.snapshot, BABY_INFO_JOURNAL_FILE),
+      path.join(tmpDir, BABY_INFO_JOURNAL_FILE),
+    )
+    const stalePid = process.pid === 999_999 ? 999_998 : 999_999
+    const spool = path.join(
+      tmpDir,
+      'backups',
+      `.baby-info-backup.tmp-evidence-${stalePid}-crashproof`,
+    )
+    fs.mkdirSync(path.join(spool, 'data'), { recursive: true })
+    const spoolStat = fs.statSync(spool)
+    fs.writeFileSync(path.join(spool, '.baby-info-backup-evidence-v1.json'), JSON.stringify({
+      version: 1,
+      spoolId: path.basename(spool),
+      snapshotId: '2026-07-13_10-20-30',
+      ownerPid: stalePid,
+      startupId: 'foreign-startup',
+      transactionDigest: '3'.repeat(64),
+      root: {
+        dev: spoolStat.dev,
+        ino: spoolStat.ino,
+        birthtimeMs: spoolStat.birthtimeMs,
+      },
+      state: 'cleanup-complete',
+      sealedDigest: '4'.repeat(64),
+    }), 'utf8')
+    fs.writeFileSync(path.join(spool, BABY_INFO_JOURNAL_FILE), snapshot.journal)
+    fs.writeFileSync(path.join(spool, 'data', '2026-07.jsonl'), '{"sealed":true}\n')
+
+    recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'stale-spool-cleanup',
+    })
+
+    expect(fs.existsSync(spool)).toBe(true)
+  })
+
+  it('preserves a cleanup-complete spool when its durable marker response is lost', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(244)])
+    let markerPublications = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        if (path.basename(String(destination)) === '.baby-info-backup-evidence-v1.json') {
+          markerPublications += 1
+          if (markerPublications === 2) {
+            throw new Error('simulated response loss after cleanup-complete marker publish')
+          }
+        }
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'response-loss-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/response loss after cleanup-complete marker publish/i)
+    expect(markerPublications).toBe(2)
+    const spools = fs.readdirSync(path.dirname(snapshot.snapshot))
+      .filter(name => name.startsWith('.baby-info-backup.tmp-evidence-'))
+    expect(spools).toHaveLength(1)
+    const marker = JSON.parse(fs.readFileSync(path.join(
+      path.dirname(snapshot.snapshot),
+      spools[0],
+      '.baby-info-backup-evidence-v1.json',
+    ), 'utf8'))
+    expect(marker.state).toBe('cleanup-complete')
+  })
+
+  it('preserves an active evidence spool from an unconfirmed startup', () => {
+    const backups = path.join(tmpDir, 'backups')
+    fs.mkdirSync(backups)
+    const spool = path.join(backups, '.baby-info-backup.tmp-evidence-999999-activeproof')
+    fs.mkdirSync(spool)
+    const root = fs.statSync(spool)
+    fs.writeFileSync(path.join(spool, '.baby-info-backup-evidence-v1.json'), JSON.stringify({
+      version: 1,
+      spoolId: path.basename(spool),
+      snapshotId: '2026-07-13_10-20-30',
+      ownerPid: 999_999,
+      startupId: 'unconfirmed-startup',
+      transactionDigest: '5'.repeat(64),
+      root: { dev: root.dev, ino: root.ino, birthtimeMs: root.birthtimeMs },
+      state: 'active',
+      sealedDigest: null,
+    }), 'utf8')
+    const live = mutation(245)
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify(settingsFor(live), null, 2))
+    const journal = new BabyInfoJournal(tmpDir)
+    journal.ingest(live.familyId, [live], [])
+
+    recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'different-startup',
+    })
+
+    expect(fs.existsSync(spool)).toBe(true)
+  })
+
+  it('refuses cleanup when the cleanup-complete marker is atomically swapped', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(246)])
+    let markerPublications = 0
+    let spool = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        if (path.basename(String(destination)) === '.baby-info-backup-evidence-v1.json') {
+          markerPublications += 1
+          if (markerPublications === 2) {
+            spool = path.dirname(String(destination))
+            const marker = JSON.parse(fs.readFileSync(destination, 'utf8'))
+            marker.snapshotId = 'swapped-marker-authority'
+            const replacement = `${String(destination)}.swapped`
+            fs.writeFileSync(replacement, JSON.stringify(marker), 'utf8')
+            fs.renameSync(replacement, destination)
+          }
+        }
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'marker-swap-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/marker|evidence|authority|identity|changed/i)
+    expect(markerPublications).toBe(2)
+    expect(fs.existsSync(spool)).toBe(true)
+  })
+
+  it('refuses cleanup when the same spool name is recreated with a new root inode', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(247)])
+    let markerPublications = 0
+    let spool = ''
+    let displaced = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        if (path.basename(String(destination)) === '.baby-info-backup-evidence-v1.json') {
+          markerPublications += 1
+          if (markerPublications === 2) {
+            spool = path.dirname(String(destination))
+            displaced = `${spool}.replayed-root`
+            fs.renameSync(spool, displaced)
+            fs.mkdirSync(spool)
+            fs.copyFileSync(
+              path.join(displaced, '.baby-info-backup-evidence-v1.json'),
+              path.join(spool, '.baby-info-backup-evidence-v1.json'),
+            )
+          }
+        }
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'root-replay-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/spool|evidence|identity|changed/i)
+    expect(markerPublications).toBe(2)
+    expect(fs.existsSync(spool)).toBe(true)
+    expect(fs.existsSync(displaced)).toBe(true)
+  })
+
+  it('deletes only the isolated spool tombstone when its original name is reused', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(249)])
+    let isolated = false
+    let reusedRoot = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        const sourceName = path.basename(String(source))
+        if (!isolated
+          && sourceName.startsWith('.baby-info-backup.tmp-evidence-')
+          && path.basename(String(destination)).startsWith(`${sourceName}.cleanup-`)) {
+          isolated = true
+          reusedRoot = String(source)
+          fs.mkdirSync(reusedRoot)
+          fs.writeFileSync(path.join(reusedRoot, 'new-owner.txt'), 'keep me', 'utf8')
+        }
+      },
+    }
+
+    verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'spool-name-reuse-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string })
+
+    expect(isolated).toBe(true)
+    expect(fs.readFileSync(path.join(reusedRoot, 'new-owner.txt'), 'utf8')).toBe('keep me')
+    expect(fs.readdirSync(path.dirname(snapshot.snapshot)).filter(name => (
+      name.startsWith('.baby-info-backup.tmp-evidence-') && name.includes('.cleanup-')
+    ))).toEqual([])
+  })
+
+  it('preserves an isolated spool tombstone when strict inventory gains an unexpected entry', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(250)])
+    let cleanupRoot = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        const sourceName = path.basename(String(source))
+        if (!cleanupRoot
+          && sourceName.startsWith('.baby-info-backup.tmp-evidence-')
+          && path.basename(String(destination)).startsWith(`${sourceName}.cleanup-`)) {
+          cleanupRoot = String(destination)
+          fs.writeFileSync(path.join(cleanupRoot, 'unexpected.txt'), 'foreign evidence', 'utf8')
+        }
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'spool-unexpected-entry-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/inventory|unexpected|sealed|evidence/i)
+    expect(cleanupRoot).not.toBe('')
+    expect(fs.readFileSync(path.join(cleanupRoot, 'unexpected.txt'), 'utf8'))
+      .toBe('foreign evidence')
+  })
+
+  it('preserves an isolated spool tombstone when sealed evidence is replaced by a hard link', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(251)])
+    const foreignJournal = path.join(tmpDir, 'foreign-linked-journal.jsonl')
+    fs.writeFileSync(foreignJournal, snapshot.journal)
+    let cleanupRoot = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        const sourceName = path.basename(String(source))
+        if (!cleanupRoot
+          && sourceName.startsWith('.baby-info-backup.tmp-evidence-')
+          && path.basename(String(destination)).startsWith(`${sourceName}.cleanup-`)) {
+          cleanupRoot = String(destination)
+          const sealedJournal = path.join(cleanupRoot, BABY_INFO_JOURNAL_FILE)
+          fs.unlinkSync(sealedJournal)
+          fs.linkSync(foreignJournal, sealedJournal)
+        }
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'spool-linked-entry-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/identity|inventory|sealed|evidence/i)
+    expect(cleanupRoot).not.toBe('')
+    expect(fs.existsSync(cleanupRoot)).toBe(true)
+    expect(fs.existsSync(foreignJournal)).toBe(true)
+    expect(fs.statSync(path.join(cleanupRoot, BABY_INFO_JOURNAL_FILE)).ino)
+      .toBe(fs.statSync(foreignJournal).ino)
+  })
+
+  it('reserves a 128-bit cleanup name and preserves both roots on a destination collision', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(252)])
+    const realOpen = fs.openSync.bind(fs)
+    let reservation = ''
+    let cleanupRoot = ''
+    let originalRoot = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target, flags, mode) {
+        const candidate = String(target)
+        if (!reservation
+          && candidate.includes('.baby-info-backup.tmp-evidence-')
+          && /\.cleanup-[0-9a-f]{32}\.reserve$/i.test(candidate)) {
+          reservation = candidate
+          cleanupRoot = candidate.slice(0, -'.reserve'.length)
+          originalRoot = cleanupRoot.replace(/\.cleanup-[0-9a-f]{32}$/i, '')
+          fs.mkdirSync(cleanupRoot)
+          expect(flags).toBe('wx')
+        }
+        return realOpen(target, flags, mode)
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'spool-cleanup-collision-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/cleanup|collision|already exists|destination/i)
+    expect(reservation).toMatch(/\.cleanup-[0-9a-f]{32}\.reserve$/i)
+    expect(fs.existsSync(reservation)).toBe(true)
+    expect(fs.existsSync(cleanupRoot)).toBe(true)
+    expect(fs.existsSync(originalRoot)).toBe(true)
+  })
+
+  it('refuses cleanup when sealed data is replaced by a directory symlink', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(248)])
+    let markerPublications = 0
+    let spool = ''
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        if (path.basename(String(destination)) === '.baby-info-backup-evidence-v1.json') {
+          markerPublications += 1
+          if (markerPublications === 2) {
+            spool = path.dirname(String(destination))
+            const data = path.join(spool, 'data')
+            const displaced = path.join(spool, 'data-real')
+            fs.renameSync(data, displaced)
+            fs.symlinkSync(displaced, data, 'junction')
+          }
+        }
+      },
+    }
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot, {
+      platform: 'win32',
+      durableFs,
+      startupId: 'symlink-spool-startup',
+    } as Parameters<typeof verifyBackupSnapshot>[1] & { startupId: string }))
+      .toThrow(/spool|evidence|identity|changed|escaped/i)
+    expect(markerPublications).toBe(2)
+    expect(fs.existsSync(spool)).toBe(true)
+    expect(fs.lstatSync(path.join(spool, 'data')).isSymbolicLink()).toBe(true)
   })
 
   it('rejects aggregate snapshot bytes with overflow-safe accounting', () => {
@@ -1367,6 +1738,15 @@ describe('verified settings/journal pair recovery', () => {
     const readRequests: Array<{ source: string; position: number; length: number }> = []
     const streamingFs: InstrumentedDurableFileOps = {
       ...fs,
+      openSync(target, flags, mode) {
+        const fd = fs.openSync(target, flags, mode)
+        if (String(target).includes('.tmp-evidence-')
+          && path.basename(String(target)) === BABY_INFO_JOURNAL_FILE) {
+          const identity = fs.fstatSync(fd)
+          journalPaths.set(`${identity.dev}:${identity.ino}`, 'sealed')
+        }
+        return fd
+      },
       readSync(fd, buffer, offset, length, position) {
         if (position === null) throw new Error('maximum journal reads must be positional')
         const opened = fs.fstatSync(fd)
@@ -1399,7 +1779,7 @@ describe('verified settings/journal pair recovery', () => {
     expect(Math.max(...allocations.map(allocation => allocation.size)), `RSS growth diagnostic only: ${rssGrowthDiagnostic}`)
       .toBeLessThanOrEqual(64 * 1024)
     expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
-    const expectedJournalPasses = prepared.expectedJournalFiles === 3 ? 10 : 6
+    const expectedJournalPasses = prepared.expectedJournalFiles === 3 ? 14 : 9
     expect(readRequests.reduce((total, request) => total + request.length, 0))
       .toBe(prepared.fixture.size * expectedJournalPasses)
     expect(readRequests.filter(request => request.position + request.length === prepared.fixture.size))
@@ -1412,8 +1792,8 @@ describe('verified settings/journal pair recovery', () => {
       )).length,
     ]))
     expect(eofCounts).toEqual(prepared.expectedJournalFiles === 3
-      ? { backup: 4, staging: 2, live: 4 }
-      : { backup: 3, live: 3 })
+      ? { backup: 5, staging: 2, live: 4, sealed: 3 }
+      : { backup: 4, live: 3, sealed: 2 })
     expect(elapsedMs).toBeLessThan(10_000)
     expect(fs.existsSync(prepared.intentPath)).toBe(false)
     expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).profile.name)
@@ -2232,7 +2612,6 @@ describe('verified settings/journal pair recovery', () => {
     const fixture = syntheticMaximumJournal(fs.readFileSync(snapshotJournalPath))
     const forensicJournalPath = path.join(advanced.forensicArchive, BABY_INFO_JOURNAL_FILE)
     fs.truncateSync(forensicJournalPath, fixture.size)
-    const forensicIdentity = fs.statSync(forensicJournalPath)
 
     const manifestPath = path.join(advanced.forensicArchive, MANIFEST_FILE)
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
@@ -2252,6 +2631,7 @@ describe('verified settings/journal pair recovery', () => {
     fs.writeFileSync(intentPath, JSON.stringify(transaction, null, 2), 'utf8')
 
     const realRead = fs.readSync.bind(fs)
+    const forensicFds = new Set<number>()
     const readRequests: Array<{ position: number; length: number }> = []
     const streamedRead = (
       fd: number,
@@ -2260,8 +2640,7 @@ describe('verified settings/journal pair recovery', () => {
       length: number,
       position: number | null,
     ): number => {
-      const opened = fs.fstatSync(fd)
-      if (opened.dev !== forensicIdentity.dev || opened.ino !== forensicIdentity.ino) {
+      if (!forensicFds.has(fd)) {
         return realRead(fd, buffer, offset, length, position)
       }
       if (position === null) throw new Error('forensic journal reads must be positional')
@@ -2269,29 +2648,35 @@ describe('verified settings/journal pair recovery', () => {
       const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
       return fixture.readInto(target, offset, length, position)
     }
-    const readSpy = vi.spyOn(fs, 'readSync').mockImplementation(streamedRead as typeof fs.readSync)
     const streamingFs: InstrumentedDurableFileOps = {
       ...fs,
+      openSync(target, flags, mode) {
+        const fd = fs.openSync(target, flags, mode)
+        if (path.resolve(String(target)) === path.resolve(forensicJournalPath)) {
+          forensicFds.add(fd)
+        }
+        return fd
+      },
       readSync: streamedRead,
+      closeSync(fd) {
+        forensicFds.delete(fd)
+        fs.closeSync(fd)
+      },
     }
     let caught: Error & Record<string, unknown> | undefined
     let allocations: Array<{ method: string; size: number }> = []
     const startedAt = Date.now()
-    try {
-      allocations = guardBufferAllocations(64 * 1024, () => {
-        try {
-          recoverSettingsAndJournalPair(tmpDir, {
-            platform: 'win32',
-            startupId: descriptorMatches ? 'forensic-max-ok-boot-4' : 'forensic-max-bad-boot-4',
-            durableFs: streamingFs,
-          })
-        } catch (error) {
-          caught = error as Error & Record<string, unknown>
-        }
-      })
-    } finally {
-      readSpy.mockRestore()
-    }
+    allocations = guardBufferAllocations(64 * 1024, () => {
+      try {
+        recoverSettingsAndJournalPair(tmpDir, {
+          platform: 'win32',
+          startupId: descriptorMatches ? 'forensic-max-ok-boot-4' : 'forensic-max-bad-boot-4',
+          durableFs: streamingFs,
+        })
+      } catch (error) {
+        caught = error as Error & Record<string, unknown>
+      }
+    })
     const elapsedMs = Date.now() - startedAt
 
     expect(Math.max(...allocations.map(allocation => allocation.size))).toBeLessThanOrEqual(64 * 1024)
@@ -2380,15 +2765,15 @@ describe('verified settings/journal pair recovery', () => {
       durableFs: shortReadFs,
     })).not.toThrow()
     expect(Math.max(...reads.map(read => read.requested))).toBeLessThanOrEqual(4 * 1024)
-    expect(reads.reduce((total, read) => total + read.count, 0)).toBe(journalBytes.byteLength * 10)
-    expect(reads.filter(read => read.position + read.count === journalBytes.byteLength)).toHaveLength(10)
+    expect(reads.reduce((total, read) => total + read.count, 0)).toBe(journalBytes.byteLength * 11)
+    expect(reads.filter(read => read.position + read.count === journalBytes.byteLength)).toHaveLength(11)
     expect(Object.fromEntries(['backup', 'staging', 'live'].map(source => [
       source,
       reads.filter(read => (
         read.source === source
         && read.position + read.count === journalBytes.byteLength
       )).length,
-    ]))).toEqual({ backup: 4, staging: 2, live: 4 })
+    ]))).toEqual({ backup: 5, staging: 2, live: 4 })
     expect(fs.existsSync(intentPath)).toBe(false)
     expect(fs.existsSync(stagingPath)).toBe(false)
 
@@ -3029,29 +3414,30 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
   })
 
-  it('keeps POSIX intent deletion last when cleanup reports a crash after unlink', () => {
+  it('keeps POSIX tombstone deletion last when cleanup reports a crash after unlink', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(149)])
     writeCorruptLivePair(tmpDir)
     const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
     const posixOps = simulatedPosixOps()
-    let failAfterIntentDeletion = true
+    let failAfterTombstoneDeletion = true
     const durableFs: DurableFileOps = {
       ...posixOps,
       unlinkSync(target) {
-        if (path.resolve(String(target)) === path.resolve(path.join(tmpDir, RESTORE_INTENT_FILE))) {
+        const isIntentTombstone = path.dirname(String(target)) === tmpDir
+          && path.basename(String(target)).startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)
+        if (isIntentTombstone) {
           expect(fs.existsSync(stagingPath)).toBe(false)
         }
         posixOps.unlinkSync(target)
-        if (failAfterIntentDeletion
-          && path.resolve(String(target)) === path.resolve(path.join(tmpDir, RESTORE_INTENT_FILE))) {
-          failAfterIntentDeletion = false
-          throw new Error('simulated POSIX crash after intent deletion')
+        if (failAfterTombstoneDeletion && isIntentTombstone) {
+          failAfterTombstoneDeletion = false
+          throw new Error('simulated POSIX crash after intent tombstone deletion')
         }
       },
     }
 
     expect(() => new SettingsStore(tmpDir, { platform: 'linux', durableFs }))
-      .toThrow(/simulated POSIX crash after intent deletion/i)
+      .toThrow(/simulated POSIX crash after intent tombstone deletion/i)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
     expect(fs.existsSync(stagingPath)).toBe(false)
 
@@ -3061,6 +3447,198 @@ describe('verified settings/journal pair recovery', () => {
       fs.readFileSync(path.join(snapshot.snapshot, 'settings.json')),
     )
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(snapshot.journal)
+  })
+
+  it('does not delete a canonical intent replaced after staging cleanup', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(238)])
+    writeCorruptLivePair(tmpDir)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const posixOps = simulatedPosixOps()
+    let replacement: Buffer | undefined
+    const durableFs: DurableFileOps = {
+      ...posixOps,
+      openSync(target, flags, mode) {
+        if (!replacement
+          && path.resolve(String(target)) === path.resolve(tmpDir)
+          && !fs.existsSync(stagingPath)
+          && fs.existsSync(intentPath)) {
+          const value = JSON.parse(fs.readFileSync(intentPath, 'utf8'))
+          value.snapshotId = 'newer-recovery-authority'
+          replacement = Buffer.from(JSON.stringify(value, null, 2), 'utf8')
+          const temporary = `${intentPath}.new-authority`
+          fs.writeFileSync(temporary, replacement)
+          fs.renameSync(temporary, intentPath)
+        }
+        return posixOps.openSync(target, flags, mode)
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs,
+    }))
+
+    expect(replacement).toBeDefined()
+    expect(error.message).toMatch(/intent|transaction|changed|identity|authority/i)
+    expect(fs.readFileSync(intentPath)).toEqual(replacement)
+  })
+
+  it('deletes only its tombstone when a new canonical intent appears after rename', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(239)])
+    writeCorruptLivePair(tmpDir)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const posixOps = simulatedPosixOps()
+    const newer = Buffer.from(JSON.stringify({
+      version: 1,
+      snapshotId: 'newer-recovery-authority',
+      settings: { size: 0, sha256: '0'.repeat(64) },
+      journal: { size: 0, sha256: '0'.repeat(64) },
+    }, null, 2), 'utf8')
+    let tombstoned = false
+    let directorySyncedAfterRename = false
+    let tombstoneDeletedAfterSync = false
+    const durableFs: DurableFileOps = {
+      ...posixOps,
+      renameSync(source, destination) {
+        posixOps.renameSync(source, destination)
+        if (!tombstoned
+          && path.resolve(String(source)) === path.resolve(intentPath)
+          && path.basename(String(destination)).startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)) {
+          tombstoned = true
+          fs.writeFileSync(intentPath, newer)
+        }
+      },
+      fsyncSync(fd) {
+        if (tombstoned) directorySyncedAfterRename = true
+        posixOps.fsyncSync(fd)
+      },
+      unlinkSync(target) {
+        if (path.basename(String(target)).startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)) {
+          expect(directorySyncedAfterRename).toBe(true)
+          tombstoneDeletedAfterSync = true
+        }
+        posixOps.unlinkSync(target)
+      },
+    }
+
+    recoverSettingsAndJournalPair(tmpDir, { platform: 'linux', durableFs })
+
+    expect(tombstoned).toBe(true)
+    expect(directorySyncedAfterRename).toBe(true)
+    expect(tombstoneDeletedAfterSync).toBe(true)
+    expect(fs.readFileSync(intentPath)).toEqual(newer)
+    expect(fs.readdirSync(tmpDir).filter(name => name.startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)))
+      .toEqual([])
+  })
+
+  it('uses the same tombstone isolation on Windows cleanup', () => {
+    reachPrimaryVerifiedWindowsRestore(tmpDir, 242, 'intent-tombstone-win')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const newer = Buffer.from(JSON.stringify({
+      version: 1,
+      snapshotId: 'newer-windows-recovery-authority',
+      settings: { size: 0, sha256: '2'.repeat(64) },
+      journal: { size: 0, sha256: '2'.repeat(64) },
+    }, null, 2), 'utf8')
+    let tombstoned = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      renameSync(source, destination) {
+        fs.renameSync(source, destination)
+        if (!tombstoned
+          && path.resolve(String(source)) === path.resolve(intentPath)
+          && path.basename(String(destination)).startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)) {
+          tombstoned = true
+          fs.writeFileSync(intentPath, newer)
+        }
+      },
+    }
+
+    recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'intent-tombstone-win-boot-3',
+      durableFs,
+    })
+
+    expect(tombstoned).toBe(true)
+    expect(fs.readFileSync(intentPath)).toEqual(newer)
+    expect(fs.readdirSync(tmpDir).filter(name => name.startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)))
+      .toEqual([])
+  })
+
+  it('preserves a swapped tombstone whose inode and bytes do not match cleanup authority', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(240)])
+    writeCorruptLivePair(tmpDir)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const posixOps = simulatedPosixOps()
+    const foreign = Buffer.from(JSON.stringify({
+      version: 1,
+      snapshotId: 'foreign-recovery-authority',
+      settings: { size: 0, sha256: '1'.repeat(64) },
+      journal: { size: 0, sha256: '1'.repeat(64) },
+    }, null, 2), 'utf8')
+    let swapped = false
+    const durableFs: DurableFileOps = {
+      ...posixOps,
+      renameSync(source, destination) {
+        if (!swapped && path.resolve(String(source)) === path.resolve(intentPath)) {
+          const temporary = `${intentPath}.foreign`
+          fs.writeFileSync(temporary, foreign)
+          fs.renameSync(temporary, intentPath)
+          swapped = true
+        }
+        posixOps.renameSync(source, destination)
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs,
+    }))
+    const tombstones = fs.readdirSync(tmpDir)
+      .filter(name => name.startsWith(`${RESTORE_INTENT_FILE}.cleanup-`))
+
+    expect(swapped).toBe(true)
+    expect(error.message).toMatch(/intent|tombstone|changed|identity|authority/i)
+    expect(tombstones).toHaveLength(1)
+    expect(fs.readFileSync(path.join(tmpDir, tombstones[0]))).toEqual(foreign)
+  })
+
+  it('reconciles a crash after canonical intent was renamed to its tombstone', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(241)])
+    writeCorruptLivePair(tmpDir)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const posixOps = simulatedPosixOps()
+    let crashed = false
+    const crashingFs: DurableFileOps = {
+      ...posixOps,
+      renameSync(source, destination) {
+        posixOps.renameSync(source, destination)
+        if (!crashed
+          && path.resolve(String(source)) === path.resolve(intentPath)
+          && path.basename(String(destination)).startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)) {
+          crashed = true
+          throw new Error('simulated crash after intent tombstone rename')
+        }
+      },
+    }
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs: crashingFs,
+    })).toThrow(/simulated crash after intent tombstone rename/i)
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.readdirSync(tmpDir).filter(name => name.startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)))
+      .toHaveLength(1)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs: posixOps,
+    })).not.toThrow()
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.readdirSync(tmpDir).filter(name => name.startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)))
+      .toEqual([])
   })
 
   it('fails closed when a surviving restore intent has lost its staging directory', () => {

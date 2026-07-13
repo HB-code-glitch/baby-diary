@@ -1,4 +1,4 @@
-import { createHash } from 'crypto'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { AppSettings } from '../../shared/types'
@@ -26,6 +26,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/
 const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/
 const LEGACY_SNAPSHOT_NAME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/
 const DATA_PATH_PATTERN = /^data\/[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl$/
+const RESTORE_INTENT_TOMBSTONE_PATTERN = /^\.baby-info-pair-restore-v1\.json\.cleanup-[0-9a-f]{32}$/i
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024
 const MAX_JOURNAL_BYTES = 128 * 1024 * 1024
@@ -35,13 +36,18 @@ const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 const STREAM_CHUNK_BYTES = 64 * 1024
 const MAX_FORENSIC_ARCHIVE_ALLOCATION_ATTEMPTS = 64
 const MAX_FORENSIC_ARCHIVES = 64
+const MAX_CLEANUP_RESERVATION_ATTEMPTS = 64
 const LEGACY_TRANSACTION_TIMESTAMP = new Date(0).toISOString()
 let forensicStreamSequence = 0
 
+function cleanupNonce(): string {
+  return randomBytes(16).toString('hex')
+}
+
 export const DEFAULT_BACKUP_RESOURCE_LIMITS = Object.freeze({
-  // Every verified file descriptor remains open until the cleanup decision.
-  // Keep the production evidence set within common desktop soft-fd budgets.
-  maxSnapshotFiles: 128,
+  // Auxiliary evidence is sealed and revalidated with a constant-size fd set.
+  // Preserve the historical on-disk compatibility boundary.
+  maxSnapshotFiles: 4_096,
   maxCandidates: 1_024,
   maxTotalSnapshotBytes: 768 * 1024 * 1024,
 })
@@ -116,13 +122,14 @@ type ParsedRestoreIntent = LegacyRestoreIntentFile | LegacyRestoreTransactionFil
 export interface BackupReadOptions {
   platform?: NodeJS.Platform
   now?: Date
+  /** Injectable synchronous I/O used by recovery and durability tests. */
+  durableFs?: DurableFileOps
   /** Tests may lower, but never raise, the production hard bounds. */
   limits?: Partial<BackupResourceLimits>
 }
 
 export interface RecoveryOptions extends BackupReadOptions {
   documentsBackupDir?: string
-  durableFs?: DurableFileOps
   /** Stable for one SettingsStore construction; a new process/startup must use a new value. */
   startupId?: string
 }
@@ -387,6 +394,8 @@ function maximumFor(relativePath: string): number {
   if (relativePath === RESTORE_STAGE_METADATA_FILE || relativePath === RESTORE_INTENT_FILE) {
     return MAX_TRANSACTION_BYTES
   }
+  if (relativePath === EVIDENCE_SPOOL_MARKER_FILE) return MAX_TRANSACTION_BYTES
+  if (RESTORE_INTENT_TOMBSTONE_PATTERN.test(relativePath)) return MAX_TRANSACTION_BYTES
   if (DATA_PATH_PATTERN.test(relativePath)) return MAX_DATA_BYTES
   throw new Error(`file path is not allowlisted: ${relativePath}`)
 }
@@ -410,6 +419,7 @@ function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
 
 interface OpenRegularFile {
   fd: number
+  ops: DurableFileOps
   absolute: string
   beforeReal: string
   opened: fs.Stats
@@ -419,6 +429,8 @@ interface OpenRegularFile {
 interface HeldEvidence<T> {
   value: T
   assertStable(): void
+  completeCleanup?(): void
+  preserve?(): void
   close(): void
 }
 
@@ -429,7 +441,7 @@ interface ExpectedOpenRegularFile {
 
 function closeOpenRegularFiles(sources: readonly OpenRegularFile[]): void {
   for (let index = sources.length - 1; index >= 0; index -= 1) {
-    fs.closeSync(sources[index].fd)
+    sources[index].ops.closeSync(sources[index].fd)
   }
 }
 
@@ -458,19 +470,20 @@ function openRegularFileOnce(
   if (!isWithin(rootReal, beforeReal)) throw new Error(`backup path resolves outside its root: ${relativePath}`)
 
   const platform = options.platform ?? process.platform
+  const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
   const noFollow = platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)
-  const fd = fs.openSync(absolute, fs.constants.O_RDONLY | noFollow)
+  const fd = ops.openSync(absolute, fs.constants.O_RDONLY | noFollow)
   try {
-    const opened = fs.fstatSync(fd)
+    const opened = ops.fstatSync(fd)
     if (!opened.isFile() || !sameFileIdentity(before, opened)) {
       throw new Error(`backup path identity changed while opening: ${relativePath}`)
     }
     if (opened.size > maximumFor(normalized)) {
       throw new Error(`backup file exceeds its size bound: ${relativePath}`)
     }
-    return { fd, absolute, beforeReal, opened, relativePath }
+    return { fd, ops, absolute, beforeReal, opened, relativePath }
   } catch (error) {
-    fs.closeSync(fd)
+    ops.closeSync(fd)
     throw error
   }
 }
@@ -480,7 +493,7 @@ function assertOpenFileUnchanged(source: OpenRegularFile): void {
   let current: fs.Stats
   let afterReal: string
   try {
-    after = fs.fstatSync(source.fd)
+    after = source.ops.fstatSync(source.fd)
     current = fs.lstatSync(source.absolute)
     afterReal = fs.realpathSync.native(source.absolute)
   } catch {
@@ -497,7 +510,7 @@ function assertOpenFileUnchanged(source: OpenRegularFile): void {
 }
 
 function positionalReadSync(options: BackupReadOptions): PositionalReadSync {
-  const recoveryOps = (options as RecoveryOptions).durableFs as RecoveryReadOps | undefined
+  const recoveryOps = options.durableFs as RecoveryReadOps | undefined
   return recoveryOps?.readSync
     ? recoveryOps.readSync.bind(recoveryOps)
     : fs.readSync.bind(fs)
@@ -588,7 +601,7 @@ function readRegularFileOnce(
     assertOpenFileUnchanged(source)
     return buffer
   } finally {
-    fs.closeSync(source.fd)
+    source.ops.closeSync(source.fd)
   }
 }
 
@@ -601,7 +614,7 @@ function hashRegularFileOnce(
   try {
     return stableHashOpenRegularFile(source, options)
   } finally {
-    fs.closeSync(source.fd)
+    source.ops.closeSync(source.fd)
   }
 }
 
@@ -616,6 +629,7 @@ function streamOpenJournal(
   replayOptions: {
     allowTornFinal: boolean
     requiredPrefix?: DigestDescriptor
+    onChunk?: (bytes: Uint8Array) => void
   },
 ): StreamedJournalResult {
   const requiredPrefix = replayOptions.requiredPrefix
@@ -636,6 +650,7 @@ function streamOpenJournal(
       throw new Error(`backup file changed during read: ${BABY_INFO_JOURNAL_FILE}`)
     }
     const bytes = chunk.subarray(0, count)
+    replayOptions.onChunk?.(bytes)
     fullHash.update(bytes)
     if (requiredPrefix && offset < requiredPrefix.size) {
       const prefixCount = Math.min(count, requiredPrefix.size - offset)
@@ -671,7 +686,7 @@ function streamJournalOnce(
   try {
     return streamOpenJournal(source, options, replayOptions)
   } finally {
-    fs.closeSync(source.fd)
+    source.ops.closeSync(source.fd)
   }
 }
 
@@ -715,11 +730,743 @@ function streamRegularFileToStaging(
     return first
   } finally {
     if (destinationFd !== undefined) fs.closeSync(destinationFd)
-    fs.closeSync(source.fd)
+    source.ops.closeSync(source.fd)
     if (destinationCreated && !completed) {
       try { fs.unlinkSync(destination) } catch { /* preserve the original failure */ }
     }
   }
+}
+
+const EVIDENCE_SPOOL_MARKER_FILE = '.baby-info-backup-evidence-v1.json'
+
+interface ClosedRegularFileIdentity {
+  absolute: string
+  beforeReal: string
+  opened: fs.Stats
+  relativePath: string
+}
+
+interface SealedRegularEvidence {
+  sourceRoot: string
+  source: ClosedRegularFileIdentity
+  sealedRoot: string
+  sealed: ClosedRegularFileIdentity
+  expected: DigestDescriptor
+}
+
+interface EvidenceSpoolMarker {
+  version: 1
+  spoolId: string
+  snapshotId: string
+  ownerPid: number
+  startupId: string
+  transactionDigest: string | null
+  root: {
+    dev: number
+    ino: number
+    birthtimeMs: number
+  }
+  state: 'active' | 'cleanup-complete'
+  sealedDigest: string | null
+}
+
+interface EvidenceSpool {
+  root: string
+  parent: string
+  parentIdentity: BoundDirectoryIdentity
+  identity: BoundDirectoryIdentity
+  dataIdentity?: BoundDirectoryIdentity
+  platform: NodeJS.Platform
+  ops: DurableFileOps
+  marker: EvidenceSpoolMarker
+  markerAuthority: RegularFileAuthority
+  authorityRoot?: string
+}
+
+function closedIdentity(source: OpenRegularFile): ClosedRegularFileIdentity {
+  return {
+    absolute: source.absolute,
+    beforeReal: source.beforeReal,
+    opened: source.opened,
+    relativePath: source.relativePath,
+  }
+}
+
+function publishEvidenceMarkerDurably(
+  root: string,
+  bytes: Buffer,
+  platform: NodeJS.Platform,
+  ops: DurableFileOps,
+): RegularFileAuthority {
+  const target = path.join(root, EVIDENCE_SPOOL_MARKER_FILE)
+  const temporary = `${target}.publish-${randomUUID()}`
+  let fd: number | undefined
+  let temporaryExists = false
+  try {
+    fd = ops.openSync(temporary, 'wx', 0o600)
+    temporaryExists = true
+    writeAllSync(fd, bytes, ops)
+    ops.fsyncSync(fd)
+    const published = ops.fstatSync(fd)
+    if (!published.isFile() || published.size !== bytes.byteLength) {
+      throw new Error('backup evidence marker temporary is not a regular file')
+    }
+    ops.closeSync(fd)
+    fd = undefined
+    ops.renameSync(temporary, target)
+    temporaryExists = false
+    syncDirectory(root, platform, ops)
+    const authority = readRegularFileAuthority(root, EVIDENCE_SPOOL_MARKER_FILE, {
+      platform,
+      durableFs: ops,
+    })
+    if (!sameInodeIdentity(published, authority.opened) || !bytes.equals(authority.bytes)) {
+      throw new Error('backup evidence marker authority changed during publication')
+    }
+    return authority
+  } finally {
+    if (fd !== undefined) ops.closeSync(fd)
+    if (temporaryExists && ops.existsSync(temporary)) {
+      try { ops.unlinkSync(temporary) } catch { /* preserve the primary failure */ }
+    }
+  }
+}
+
+function createEvidenceSpool(
+  snapshotDir: string,
+  options: BackupReadOptions,
+  context?: { transactionDigest: string; authorityRoot: string },
+): EvidenceSpool {
+  const platform = options.platform ?? process.platform
+  const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
+  const parent = path.resolve(path.dirname(snapshotDir))
+  const parentIdentity = bindDirectChildDirectory(
+    parent,
+    fs.realpathSync.native(path.dirname(parent)),
+    'backup evidence parent',
+  )
+  const root = fs.mkdtempSync(path.join(parent, `.baby-info-backup.tmp-evidence-${process.pid}-`))
+  const identity = bindDirectChildDirectory(root, parentIdentity.real, 'backup evidence spool')
+  const marker: EvidenceSpoolMarker = {
+    version: 1,
+    spoolId: path.basename(root),
+    snapshotId: path.basename(snapshotDir),
+    ownerPid: process.pid,
+    startupId: (options as RecoveryOptions).startupId ?? '',
+    transactionDigest: context?.transactionDigest ?? null,
+    root: {
+      dev: identity.stat.dev,
+      ino: identity.stat.ino,
+      birthtimeMs: identity.stat.birthtimeMs,
+    },
+    state: 'active',
+    sealedDigest: null,
+  }
+  const markerAuthority = publishEvidenceMarkerDurably(
+    root,
+    Buffer.from(JSON.stringify(marker), 'utf8'),
+    platform,
+    ops,
+  )
+  syncDirectory(parent, platform, ops)
+  return {
+    root,
+    parent,
+    parentIdentity,
+    identity,
+    platform,
+    ops,
+    marker,
+    markerAuthority,
+    authorityRoot: context?.authorityRoot,
+  }
+}
+
+function ensureEvidenceDataDirectory(spool: EvidenceSpool): void {
+  if (spool.dataIdentity) return
+  const dataPath = path.join(spool.root, 'data')
+  fs.mkdirSync(dataPath)
+  spool.dataIdentity = bindDirectChildDirectory(
+    dataPath,
+    spool.identity.real,
+    'backup evidence data spool',
+  )
+  syncDirectory(spool.root, spool.platform, spool.ops)
+}
+
+function assertEvidenceSpoolStable(spool: EvidenceSpool): void {
+  assertBoundDirectory(spool.parentIdentity)
+  assertBoundDirectory(spool.identity)
+  if (spool.dataIdentity) assertBoundDirectory(spool.dataIdentity)
+}
+
+function sealedEvidenceDigest(evidence: readonly SealedRegularEvidence[]): string {
+  const entries = evidence.map(item => ({
+    path: item.sealed.relativePath,
+    size: item.expected.size,
+    sha256: item.expected.sha256,
+  })).sort((left, right) => left.path.localeCompare(right.path))
+  return sha256(Buffer.from(JSON.stringify(entries), 'utf8'))
+}
+
+function assertSpoolTransactionUnreferenced(spool: EvidenceSpool): void {
+  if (!spool.authorityRoot || !spool.marker.transactionDigest) return
+  const names = [
+    ...(fs.existsSync(path.join(spool.authorityRoot, RESTORE_INTENT_FILE))
+      ? [RESTORE_INTENT_FILE]
+      : []),
+    ...intentTombstoneNames(spool.authorityRoot),
+  ]
+  for (const name of names) {
+    const authority = readRegularFileAuthority(spool.authorityRoot, name, {
+      platform: spool.platform,
+      durableFs: spool.ops,
+    })
+    if (sha256(authority.bytes) === spool.marker.transactionDigest) {
+      throw new Error('backup evidence spool is still referenced by restore authority')
+    }
+  }
+}
+
+function completeEvidenceSpool(
+  spool: EvidenceSpool,
+  evidence: readonly SealedRegularEvidence[],
+): void {
+  assertEvidenceSpoolStable(spool)
+  assertRegularFileAuthority(
+    spool.root,
+    EVIDENCE_SPOOL_MARKER_FILE,
+    spool.markerAuthority,
+    { platform: spool.platform, durableFs: spool.ops },
+  )
+  assertSpoolTransactionUnreferenced(spool)
+  const marker: EvidenceSpoolMarker = {
+    ...spool.marker,
+    state: 'cleanup-complete',
+    sealedDigest: sealedEvidenceDigest(evidence),
+  }
+  const markerAuthority = publishEvidenceMarkerDurably(
+    spool.root,
+    Buffer.from(JSON.stringify(marker), 'utf8'),
+    spool.platform,
+    spool.ops,
+  )
+  spool.marker = marker
+  spool.markerAuthority = markerAuthority
+}
+
+type EvidenceInventoryEntryType = 'file' | 'directory'
+
+interface EvidenceSpoolInventory {
+  rootEntries: ReadonlyMap<string, EvidenceInventoryEntryType>
+  dataEntries: ReadonlyMap<string, EvidenceInventoryEntryType>
+  rootFiles: readonly SealedRegularEvidence[]
+  dataFiles: readonly SealedRegularEvidence[]
+}
+
+interface EvidenceCleanupReservation {
+  cleanupRoot: string
+  path: string
+  opened: fs.Stats
+}
+
+function sameBoundDirectoryIdentity(
+  left: BoundDirectoryIdentity,
+  right: BoundDirectoryIdentity,
+): boolean {
+  return left.stat.dev === right.stat.dev
+    && left.stat.ino === right.stat.ino
+    && left.stat.mode === right.stat.mode
+    && left.stat.birthtimeMs === right.stat.birthtimeMs
+}
+
+function evidenceSpoolInventory(
+  spool: EvidenceSpool,
+  evidence: readonly SealedRegularEvidence[],
+): EvidenceSpoolInventory {
+  const rootFiles: SealedRegularEvidence[] = []
+  const dataFiles: SealedRegularEvidence[] = []
+  const seen = new Set<string>()
+  for (const item of evidence) {
+    const relativePath = item.sealed.relativePath
+    if (!sameCanonicalPath(path.resolve(item.sealedRoot), path.resolve(spool.root))
+      || item.sealed.opened.size !== item.expected.size
+      || seen.has(relativePath)) {
+      throw new Error(`backup evidence sealed inventory is inconsistent: ${relativePath}`)
+    }
+    seen.add(relativePath)
+    if (relativePath === BABY_INFO_JOURNAL_FILE) {
+      rootFiles.push(item)
+    } else if (DATA_PATH_PATTERN.test(relativePath)) {
+      dataFiles.push(item)
+    } else {
+      throw new Error(`backup evidence sealed inventory has an unexpected path: ${relativePath}`)
+    }
+  }
+  if (dataFiles.length > 0 && !spool.dataIdentity) {
+    throw new Error('backup evidence sealed inventory is missing its data directory authority')
+  }
+  const rootEntries = new Map<string, EvidenceInventoryEntryType>([
+    [EVIDENCE_SPOOL_MARKER_FILE, 'file'],
+  ])
+  for (const item of rootFiles) rootEntries.set(item.sealed.relativePath, 'file')
+  if (spool.dataIdentity) rootEntries.set('data', 'directory')
+  const dataEntries = new Map<string, EvidenceInventoryEntryType>()
+  for (const item of dataFiles) {
+    dataEntries.set(path.basename(item.sealed.relativePath), 'file')
+  }
+  if (rootEntries.size !== rootFiles.length + 1 + (spool.dataIdentity ? 1 : 0)
+    || dataEntries.size !== dataFiles.length) {
+    throw new Error('backup evidence sealed inventory contains duplicate entries')
+  }
+  return { rootEntries, dataEntries, rootFiles, dataFiles }
+}
+
+function assertExactEvidenceDirectoryInventory(
+  directory: string,
+  expected: ReadonlyMap<string, EvidenceInventoryEntryType>,
+  label: string,
+): void {
+  const entries = boundedDirectoryEntries(directory, expected.size + 1, `${label} inventory`)
+  if (entries.length !== expected.size) {
+    throw new Error(`${label} inventory contains an unexpected entry`)
+  }
+  for (const entry of entries) {
+    const expectedType = expected.get(entry.name)
+    const current = fs.lstatSync(path.join(directory, entry.name))
+    if (!expectedType
+      || current.isSymbolicLink()
+      || (expectedType === 'file' && !current.isFile())
+      || (expectedType === 'directory' && !current.isDirectory())) {
+      throw new Error(`${label} inventory entry changed: ${entry.name}`)
+    }
+  }
+}
+
+function assertRelocatedClosedRegularFileIdentity(
+  root: string,
+  identity: ClosedRegularFileIdentity,
+  options: BackupReadOptions,
+): void {
+  const source = openRegularFileOnce(root, identity.relativePath, options)
+  try {
+    if (!sameFileIdentity(identity.opened, source.opened)) {
+      throw new Error(`backup evidence sealed identity changed: ${identity.relativePath}`)
+    }
+    assertOpenFileUnchanged(source)
+  } finally {
+    source.ops.closeSync(source.fd)
+  }
+}
+
+function assertCleanupDestinationAbsent(target: string): void {
+  try {
+    fs.lstatSync(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  throw new Error('backup evidence cleanup destination already exists')
+}
+
+function reserveEvidenceCleanupName(spool: EvidenceSpool): EvidenceCleanupReservation {
+  assertBoundDirectory(spool.parentIdentity)
+  for (let attempt = 0; attempt < MAX_CLEANUP_RESERVATION_ATTEMPTS; attempt += 1) {
+    const cleanupRoot = `${spool.root}.cleanup-${cleanupNonce()}`
+    const reservationPath = `${cleanupRoot}.reserve`
+    let fd: number
+    try {
+      fd = spool.ops.openSync(reservationPath, 'wx', 0o600)
+    } catch (error) {
+      if (isAlreadyExistsError(error)) continue
+      throw error
+    }
+    let opened: fs.Stats
+    try {
+      const bytes = Buffer.from(JSON.stringify({
+        version: 1,
+        source: path.basename(spool.root),
+        destination: path.basename(cleanupRoot),
+        ownerPid: process.pid,
+      }), 'utf8')
+      writeAllSync(fd, bytes, spool.ops)
+      spool.ops.fsyncSync(fd)
+      opened = spool.ops.fstatSync(fd)
+      if (!opened.isFile() || opened.size !== bytes.byteLength) {
+        throw new Error('backup evidence cleanup reservation is not a sealed regular file')
+      }
+    } finally {
+      spool.ops.closeSync(fd)
+    }
+    syncDirectory(spool.parent, spool.platform, spool.ops)
+    assertBoundDirectory(spool.parentIdentity)
+    assertCleanupDestinationAbsent(cleanupRoot)
+    return { cleanupRoot, path: reservationPath, opened }
+  }
+  throw new Error('could not reserve a unique backup evidence cleanup destination')
+}
+
+function assertIsolatedEvidenceSpoolStable(
+  spool: EvidenceSpool,
+  cleanupIdentity: BoundDirectoryIdentity,
+  cleanupDataIdentity: BoundDirectoryIdentity | undefined,
+  inventory: EvidenceSpoolInventory,
+): void {
+  const options: BackupReadOptions = { platform: spool.platform, durableFs: spool.ops }
+  assertBoundDirectory(spool.parentIdentity)
+  assertBoundDirectory(cleanupIdentity)
+  if (cleanupDataIdentity) assertBoundDirectory(cleanupDataIdentity)
+  assertExactEvidenceDirectoryInventory(
+    cleanupIdentity.absolute,
+    inventory.rootEntries,
+    'backup evidence cleanup root',
+  )
+  if (cleanupDataIdentity) {
+    assertExactEvidenceDirectoryInventory(
+      cleanupDataIdentity.absolute,
+      inventory.dataEntries,
+      'backup evidence cleanup data',
+    )
+  }
+  assertRegularFileAuthority(
+    cleanupIdentity.absolute,
+    EVIDENCE_SPOOL_MARKER_FILE,
+    spool.markerAuthority,
+    options,
+  )
+  for (const item of inventory.rootFiles) {
+    assertRelocatedClosedRegularFileIdentity(cleanupIdentity.absolute, item.sealed, options)
+  }
+  for (const item of inventory.dataFiles) {
+    assertRelocatedClosedRegularFileIdentity(cleanupIdentity.absolute, item.sealed, options)
+  }
+  // Repeat the no-follow inventory after bounded per-file checks so an entry
+  // created or swapped during the walk causes preservation before any unlink.
+  assertExactEvidenceDirectoryInventory(
+    cleanupIdentity.absolute,
+    inventory.rootEntries,
+    'backup evidence cleanup root',
+  )
+  if (cleanupDataIdentity) {
+    assertExactEvidenceDirectoryInventory(
+      cleanupDataIdentity.absolute,
+      inventory.dataEntries,
+      'backup evidence cleanup data',
+    )
+  }
+  assertBoundDirectory(cleanupIdentity)
+  assertBoundDirectory(spool.parentIdentity)
+}
+
+function removeEvidenceSpool(
+  spool: EvidenceSpool,
+  evidence: readonly SealedRegularEvidence[],
+): void {
+  if (!fs.existsSync(spool.root)) return
+  const options: BackupReadOptions = { platform: spool.platform, durableFs: spool.ops }
+  const inventory = evidenceSpoolInventory(spool, evidence)
+  assertEvidenceSpoolStable(spool)
+  assertExactEvidenceDirectoryInventory(
+    spool.root,
+    inventory.rootEntries,
+    'backup evidence source root',
+  )
+  if (spool.dataIdentity) {
+    assertExactEvidenceDirectoryInventory(
+      spool.dataIdentity.absolute,
+      inventory.dataEntries,
+      'backup evidence source data',
+    )
+  }
+  assertRegularFileAuthority(
+    spool.root,
+    EVIDENCE_SPOOL_MARKER_FILE,
+    spool.markerAuthority,
+    options,
+  )
+  if (spool.marker.state === 'cleanup-complete'
+    && spool.marker.sealedDigest !== sealedEvidenceDigest(evidence)) {
+    throw new Error('backup evidence cleanup marker does not match its sealed inventory')
+  }
+  for (const item of evidence) {
+    assertClosedRegularFileIdentity(item.sealedRoot, item.sealed, options)
+  }
+
+  const reservation = reserveEvidenceCleanupName(spool)
+  // The reservation remains beside either source or tombstone on every
+  // uncertain/error path. It is diagnostic evidence and is removed only last.
+  assertEvidenceSpoolStable(spool)
+  assertCleanupDestinationAbsent(reservation.cleanupRoot)
+  spool.ops.renameSync(spool.root, reservation.cleanupRoot)
+  syncDirectory(spool.parent, spool.platform, spool.ops)
+  assertBoundDirectory(spool.parentIdentity)
+
+  const cleanupIdentity = bindDirectChildDirectory(
+    reservation.cleanupRoot,
+    spool.parentIdentity.real,
+    'isolated backup evidence spool',
+  )
+  if (!sameBoundDirectoryIdentity(cleanupIdentity, spool.identity)) {
+    throw new Error('isolated backup evidence spool identity changed')
+  }
+  const cleanupDataIdentity = spool.dataIdentity
+    ? bindDirectChildDirectory(
+      path.join(reservation.cleanupRoot, 'data'),
+      cleanupIdentity.real,
+      'isolated backup evidence data spool',
+    )
+    : undefined
+  if (cleanupDataIdentity
+    && !sameBoundDirectoryIdentity(cleanupDataIdentity, spool.dataIdentity!)) {
+    throw new Error('isolated backup evidence data spool identity changed')
+  }
+
+  assertIsolatedEvidenceSpoolStable(
+    spool,
+    cleanupIdentity,
+    cleanupDataIdentity,
+    inventory,
+  )
+
+  for (const item of inventory.dataFiles) {
+    assertRelocatedClosedRegularFileIdentity(reservation.cleanupRoot, item.sealed, options)
+    spool.ops.unlinkSync(path.join(reservation.cleanupRoot, ...item.sealed.relativePath.split('/')))
+  }
+  if (cleanupDataIdentity) {
+    assertExactEvidenceDirectoryInventory(
+      cleanupDataIdentity.absolute,
+      new Map(),
+      'emptied backup evidence cleanup data',
+    )
+    assertBoundDirectory(cleanupDataIdentity)
+    syncDirectory(cleanupDataIdentity.absolute, spool.platform, spool.ops)
+    fs.rmdirSync(cleanupDataIdentity.absolute)
+    syncDirectory(cleanupIdentity.absolute, spool.platform, spool.ops)
+  }
+  for (const item of inventory.rootFiles) {
+    assertRelocatedClosedRegularFileIdentity(reservation.cleanupRoot, item.sealed, options)
+    spool.ops.unlinkSync(path.join(reservation.cleanupRoot, item.sealed.relativePath))
+  }
+  assertRegularFileAuthority(
+    reservation.cleanupRoot,
+    EVIDENCE_SPOOL_MARKER_FILE,
+    spool.markerAuthority,
+    options,
+  )
+  assertExactEvidenceDirectoryInventory(
+    reservation.cleanupRoot,
+    new Map([[EVIDENCE_SPOOL_MARKER_FILE, 'file']]),
+    'final backup evidence cleanup root',
+  )
+  assertRegularFileAuthority(
+    reservation.cleanupRoot,
+    EVIDENCE_SPOOL_MARKER_FILE,
+    spool.markerAuthority,
+    options,
+  )
+  spool.ops.unlinkSync(path.join(reservation.cleanupRoot, EVIDENCE_SPOOL_MARKER_FILE))
+  assertExactEvidenceDirectoryInventory(
+    reservation.cleanupRoot,
+    new Map(),
+    'emptied backup evidence cleanup root',
+  )
+  assertBoundDirectory(cleanupIdentity)
+  syncDirectory(reservation.cleanupRoot, spool.platform, spool.ops)
+  fs.rmdirSync(reservation.cleanupRoot)
+  syncDirectory(spool.parent, spool.platform, spool.ops)
+  assertBoundDirectory(spool.parentIdentity)
+
+  const reservationStat = fs.lstatSync(reservation.path)
+  const reservationReal = fs.realpathSync.native(reservation.path)
+  if (!sameFileIdentity(reservation.opened, reservationStat)
+    || !sameCanonicalPath(path.dirname(reservationReal), spool.parentIdentity.real)) {
+    throw new Error('backup evidence cleanup reservation identity changed')
+  }
+  spool.ops.unlinkSync(reservation.path)
+  syncDirectory(spool.parent, spool.platform, spool.ops)
+  assertBoundDirectory(spool.parentIdentity)
+}
+
+function sealOpenRegularFile(
+  sourceRoot: string,
+  source: OpenRegularFile,
+  spool: EvidenceSpool,
+  expected: DigestDescriptor,
+  options: BackupReadOptions,
+): SealedRegularEvidence {
+  if (DATA_PATH_PATTERN.test(source.relativePath)) ensureEvidenceDataDirectory(spool)
+  assertEvidenceSpoolStable(spool)
+  const destination = path.join(spool.root, ...source.relativePath.split('/'))
+  const hash = createHash('sha256')
+  const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+  const readSync = positionalReadSync(options)
+  let destinationFd: number | undefined
+  try {
+    destinationFd = spool.ops.openSync(destination, 'wx', 0o600)
+    let offset = 0
+    while (offset < source.opened.size) {
+      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
+      const count = readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0 || count > requested) {
+        throw new Error(`backup file changed during evidence copy: ${source.relativePath}`)
+      }
+      const bytes = chunk.subarray(0, count)
+      hash.update(bytes)
+      writeAllSync(destinationFd, bytes, spool.ops)
+      offset += count
+    }
+    spool.ops.fsyncSync(destinationFd)
+    const copied = { size: source.opened.size, sha256: hash.digest('hex') }
+    const sealedOpened = spool.ops.fstatSync(destinationFd)
+    if (!sealedOpened.isFile() || sealedOpened.size !== source.opened.size) {
+      throw new Error(`backup evidence copy is not a stable regular file: ${source.relativePath}`)
+    }
+    assertOpenFileUnchanged(source)
+    const second = hashOpenRegularFilePass(source, options)
+    assertOpenFileUnchanged(source)
+    if (!sameDescriptor(copied, second) || !sameDescriptor(copied, expected)) {
+      throw new Error(`backup file changed between evidence passes: ${source.relativePath}`)
+    }
+    spool.ops.closeSync(destinationFd)
+    destinationFd = undefined
+    const sealedCurrent = fs.lstatSync(destination)
+    const sealedReal = fs.realpathSync.native(destination)
+    if (sealedCurrent.isSymbolicLink()
+      || !sameFileIdentity(sealedOpened, sealedCurrent)
+      || !isWithin(spool.identity.real, sealedReal)) {
+      throw new Error(`backup evidence path changed after copy: ${source.relativePath}`)
+    }
+    return {
+      sourceRoot,
+      source: closedIdentity(source),
+      sealedRoot: spool.root,
+      sealed: {
+        absolute: destination,
+        beforeReal: sealedReal,
+        opened: sealedOpened,
+        relativePath: source.relativePath,
+      },
+      expected,
+    }
+  } finally {
+    if (destinationFd !== undefined) spool.ops.closeSync(destinationFd)
+  }
+}
+
+function streamOpenJournalToSealedEvidence(
+  sourceRoot: string,
+  source: OpenRegularFile,
+  spool: EvidenceSpool,
+  expected: DigestDescriptor,
+  options: BackupReadOptions,
+): { journalResult: StreamedJournalResult; evidence: SealedRegularEvidence } {
+  assertEvidenceSpoolStable(spool)
+  const destination = path.join(spool.root, BABY_INFO_JOURNAL_FILE)
+  let destinationFd: number | undefined
+  try {
+    destinationFd = spool.ops.openSync(destination, 'wx', 0o600)
+    const journalResult = streamOpenJournal(source, options, {
+      allowTornFinal: false,
+      onChunk(bytes) {
+        writeAllSync(destinationFd!, bytes, spool.ops)
+      },
+    })
+    spool.ops.fsyncSync(destinationFd)
+    const sealedOpened = spool.ops.fstatSync(destinationFd)
+    if (!sealedOpened.isFile()
+      || sealedOpened.size !== source.opened.size
+      || !sameDescriptor(journalResult.descriptor, expected)) {
+      throw new Error(`backup checksum mismatch: ${BABY_INFO_JOURNAL_FILE}`)
+    }
+    spool.ops.closeSync(destinationFd)
+    destinationFd = undefined
+    const sealedCurrent = fs.lstatSync(destination)
+    const sealedReal = fs.realpathSync.native(destination)
+    if (sealedCurrent.isSymbolicLink()
+      || !sameFileIdentity(sealedOpened, sealedCurrent)
+      || !isWithin(spool.identity.real, sealedReal)) {
+      throw new Error(`backup evidence path changed after copy: ${BABY_INFO_JOURNAL_FILE}`)
+    }
+    return {
+      journalResult,
+      evidence: {
+        sourceRoot,
+        source: closedIdentity(source),
+        sealedRoot: spool.root,
+        sealed: {
+          absolute: destination,
+          beforeReal: sealedReal,
+          opened: sealedOpened,
+          relativePath: BABY_INFO_JOURNAL_FILE,
+        },
+        expected,
+      },
+    }
+  } finally {
+    if (destinationFd !== undefined) spool.ops.closeSync(destinationFd)
+  }
+}
+
+function assertClosedRegularFileIdentity(
+  root: string,
+  identity: ClosedRegularFileIdentity,
+  options: BackupReadOptions,
+): void {
+  const source = openRegularFileOnce(root, identity.relativePath, options)
+  try {
+    if (!sameFileIdentity(identity.opened, source.opened)
+      || identity.beforeReal !== source.beforeReal) {
+      throw new Error(`backup file identity changed: ${identity.relativePath}`)
+    }
+    assertOpenFileUnchanged(source)
+  } finally {
+    source.ops.closeSync(source.fd)
+  }
+}
+
+function assertClosedRegularFileContent(
+  root: string,
+  identity: ClosedRegularFileIdentity,
+  expected: DigestDescriptor,
+  options: BackupReadOptions,
+): void {
+  const source = openRegularFileOnce(root, identity.relativePath, options)
+  try {
+    if (!sameFileIdentity(identity.opened, source.opened)
+      || identity.beforeReal !== source.beforeReal) {
+      throw new Error(`backup file identity changed: ${identity.relativePath}`)
+    }
+    const actual = hashOpenRegularFilePass(source, options)
+    assertOpenFileUnchanged(source)
+    if (!sameDescriptor(actual, expected)) {
+      throw new Error(`backup file content changed: ${identity.relativePath}`)
+    }
+  } finally {
+    source.ops.closeSync(source.fd)
+  }
+}
+
+function assertSealedRegularFilesStable(
+  evidence: readonly SealedRegularEvidence[],
+  spool: EvidenceSpool,
+  options: BackupReadOptions,
+): void {
+  assertEvidenceSpoolStable(spool)
+  for (const item of evidence) {
+    assertClosedRegularFileContent(item.sourceRoot, item.source, item.expected, options)
+  }
+  for (const item of evidence) {
+    assertClosedRegularFileContent(item.sealedRoot, item.sealed, item.expected, options)
+  }
+  // A last identity-only sweep catches an earlier path changed while a later
+  // bounded content pass was in progress without retaining one fd per file.
+  for (const item of evidence) {
+    assertClosedRegularFileIdentity(item.sourceRoot, item.source, options)
+  }
+  for (const item of evidence) {
+    assertClosedRegularFileIdentity(item.sealedRoot, item.sealed, options)
+  }
+  assertEvidenceSpoolStable(spool)
 }
 
 function assertSnapshotDirectory(snapshotDir: string): void {
@@ -887,11 +1634,14 @@ export function verifyBackupSnapshot(
         legacy: true,
       }
     } finally {
-      fs.closeSync(settingsSource.fd)
+      settingsSource.ops.closeSync(settingsSource.fd)
     }
   }
 
   const evidenceSources: OpenRegularFile[] = []
+  const sealedEvidence: SealedRegularEvidence[] = []
+  let evidenceSpool: EvidenceSpool | undefined
+  let preserveEvidenceSpool = false
   try {
     const manifestSource = openRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
     evidenceSources.push(manifestSource)
@@ -905,39 +1655,39 @@ export function verifyBackupSnapshot(
       throw new Error('backup manifest does not enumerate the complete staged set')
     }
     assertVerificationDirectories()
+    evidenceSpool = createEvidenceSpool(snapshotDir, options)
 
-    let settingsSource: OpenRegularFile | undefined
-    let settingsBytes: Buffer | undefined
+    const settingsEntry = manifest.files[0]
+    const settingsSource = openRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
+    evidenceSources.push(settingsSource)
+    const settingsBytes = readOpenRegularFile(settingsSource, options)
+    if (!sameDescriptor(descriptor(settingsBytes), settingsEntry)) {
+      throw new Error(`backup checksum mismatch: ${settingsEntry.path}`)
+    }
+    assertOpenFileUnchanged(settingsSource)
     let journalBytes: Buffer | undefined
-    for (const entry of manifest.files) {
+    for (const entry of manifest.files.slice(1)) {
       const source = openRegularFileOnce(snapshotDir, entry.path, options)
-      evidenceSources.push(source)
-      if (DATA_PATH_PATTERN.test(entry.path)) {
-        const actual = stableHashOpenRegularFile(source, options)
-        if (!sameDescriptor(actual, entry)) {
-          throw new Error(`backup checksum mismatch: ${entry.path}`)
+      try {
+        if (entry.path === BABY_INFO_JOURNAL_FILE) {
+          const bytes = readOpenRegularFile(source, options)
+          if (!sameDescriptor(descriptor(bytes), entry)) {
+            throw new Error(`backup checksum mismatch: ${entry.path}`)
+          }
+          journalBytes = bytes
         }
-        continue
-      }
-      const bytes = readOpenRegularFile(source, options)
-      const actual = descriptor(bytes)
-      if (!sameDescriptor(actual, entry)) {
-        throw new Error(`backup checksum mismatch: ${entry.path}`)
-      }
-      assertOpenFileUnchanged(source)
-      if (entry.path === SETTINGS_FILE) {
-        settingsSource = source
-        settingsBytes = bytes
-      } else if (entry.path === BABY_INFO_JOURNAL_FILE) {
-        const second = hashOpenRegularFilePass(source, options)
-        assertOpenFileUnchanged(source)
-        if (!sameDescriptor(actual, second)) {
-          throw new Error(`backup file changed between descriptor passes: ${entry.path}`)
-        }
-        journalBytes = bytes
+        sealedEvidence.push(sealOpenRegularFile(
+          snapshotDir,
+          source,
+          evidenceSpool,
+          entry,
+          options,
+        ))
+      } finally {
+        source.ops.closeSync(source.fd)
       }
     }
-    if (!settingsSource || !settingsBytes || !journalBytes) {
+    if (!journalBytes) {
       throw new Error('backup manifest did not produce a complete settings/journal pair')
     }
     const settingsAfterScan = readOpenRegularFile(settingsSource, options)
@@ -959,17 +1709,26 @@ export function verifyBackupSnapshot(
       { source: manifestSource, expected: descriptor(manifestBytes) },
       options,
     )
+    assertSealedRegularFilesStable(sealedEvidence, evidenceSpool, options)
     for (const source of evidenceSources) assertOpenFileUnchanged(source)
-    return pairFromBuffers(
+    const pair = pairFromBuffers(
       path.basename(snapshotDir),
       manifest.snapshotTimestamp,
       snapshotDir,
       settingsBytes,
       journalBytes,
     )
+    try {
+      completeEvidenceSpool(evidenceSpool, sealedEvidence)
+    } catch (error) {
+      preserveEvidenceSpool = true
+      throw error
+    }
+    return pair
   } finally {
-    for (let index = evidenceSources.length - 1; index >= 0; index -= 1) {
-      fs.closeSync(evidenceSources[index].fd)
+    closeOpenRegularFiles(evidenceSources)
+    if (evidenceSpool && !preserveEvidenceSpool) {
+      removeEvidenceSpool(evidenceSpool, sealedEvidence)
     }
   }
 }
@@ -989,6 +1748,7 @@ interface VerifiedSnapshotIdentity {
 function holdBackupSnapshotIdentity(
   snapshotDir: string,
   options: RecoveryOptions,
+  context?: { transactionDigest: string; authorityRoot: string },
 ): HeldEvidence<VerifiedSnapshotIdentity> {
   const now = options.now ?? new Date()
   const limits = resourceLimits(options.limits)
@@ -1063,17 +1823,19 @@ function holdBackupSnapshotIdentity(
         close() {
           if (closed) return
           closed = true
-          fs.closeSync(settingsSource.fd)
+          settingsSource.ops.closeSync(settingsSource.fd)
         },
       }
     } catch (error) {
-      fs.closeSync(settingsSource.fd)
+      settingsSource.ops.closeSync(settingsSource.fd)
       throw error
     }
   }
 
   const evidenceSources: OpenRegularFile[] = []
   const expectedEvidence: ExpectedOpenRegularFile[] = []
+  const sealedEvidence: SealedRegularEvidence[] = []
+  let evidenceSpool: EvidenceSpool | undefined
   try {
     const manifestSource = openRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
     evidenceSources.push(manifestSource)
@@ -1089,6 +1851,7 @@ function holdBackupSnapshotIdentity(
       throw new Error('backup manifest does not enumerate the complete staged set')
     }
     assertVerificationDirectories()
+    evidenceSpool = createEvidenceSpool(snapshotDir, options, context)
 
     const settingsEntry = manifest.files[0]
     const settingsSource = openRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
@@ -1102,22 +1865,29 @@ function holdBackupSnapshotIdentity(
       throw new Error(`backup checksum mismatch: ${settingsEntry.path}`)
     }
     for (const entry of manifest.files.slice(1)) {
-      if (entry.path === BABY_INFO_JOURNAL_FILE) {
-        const journalSource = openRegularFileOnce(snapshotDir, entry.path, options)
-        evidenceSources.push(journalSource)
-        expectedEvidence.push({ source: journalSource, expected: entry })
-        journalResult = streamOpenJournal(journalSource, options, { allowTornFinal: false })
-        if (!sameDescriptor(journalResult.descriptor, entry)) {
-          throw new Error(`backup checksum mismatch: ${entry.path}`)
+      const source = openRegularFileOnce(snapshotDir, entry.path, options)
+      try {
+        if (entry.path === BABY_INFO_JOURNAL_FILE) {
+          const sealedJournal = streamOpenJournalToSealedEvidence(
+            snapshotDir,
+            source,
+            evidenceSpool,
+            entry,
+            options,
+          )
+          journalResult = sealedJournal.journalResult
+          sealedEvidence.push(sealedJournal.evidence)
+        } else {
+          sealedEvidence.push(sealOpenRegularFile(
+            snapshotDir,
+            source,
+            evidenceSpool,
+            entry,
+            options,
+          ))
         }
-        continue
-      }
-      const dataSource = openRegularFileOnce(snapshotDir, entry.path, options)
-      evidenceSources.push(dataSource)
-      expectedEvidence.push({ source: dataSource, expected: entry })
-      const actual = stableHashOpenRegularFile(dataSource, options)
-      if (!sameDescriptor(actual, entry)) {
-        throw new Error(`backup checksum mismatch: ${entry.path}`)
+      } finally {
+        source.ops.closeSync(source.fd)
       }
     }
 
@@ -1138,6 +1908,10 @@ function holdBackupSnapshotIdentity(
     }
     assertVerificationDirectories()
     for (const source of evidenceSources) assertOpenFileUnchanged(source)
+    for (const item of sealedEvidence) {
+      assertClosedRegularFileIdentity(item.sourceRoot, item.source, options)
+      assertClosedRegularFileIdentity(item.sealedRoot, item.sealed, options)
+    }
 
     const settings = parseSettingsBytes(settingsBytes)
     validateProjection(settings, journalResult!.journal)
@@ -1148,28 +1922,43 @@ function holdBackupSnapshotIdentity(
       journalDescriptor: journalResult!.descriptor,
     }
     let closed = false
+    let preserveSpool = false
+    const assertModernEvidenceStable = () => {
+      assertHeldRegularFilesStable(expectedEvidence, options)
+      assertSealedRegularFilesStable(sealedEvidence, evidenceSpool!, options)
+      assertVerificationDirectories()
+      const finalPaths = actualSnapshotPaths(snapshotDir, limits)
+      if (finalPaths.length !== manifestPaths.length
+        || finalPaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
+        throw new Error('backup manifest set changed before cleanup')
+      }
+      assertVerificationDirectories()
+      for (const source of evidenceSources) assertOpenFileUnchanged(source)
+    }
     return {
       value,
       assertStable() {
         if (closed) throw new Error('backup evidence is already closed')
-        assertHeldRegularFilesStable(expectedEvidence, options)
-        assertVerificationDirectories()
-        const finalPaths = actualSnapshotPaths(snapshotDir, limits)
-        if (finalPaths.length !== manifestPaths.length
-          || finalPaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
-          throw new Error('backup manifest set changed before cleanup')
-        }
-        assertVerificationDirectories()
-        for (const source of evidenceSources) assertOpenFileUnchanged(source)
+        assertModernEvidenceStable()
+      },
+      completeCleanup() {
+        if (closed) throw new Error('backup evidence is already closed')
+        assertModernEvidenceStable()
+        completeEvidenceSpool(evidenceSpool!, sealedEvidence)
+      },
+      preserve() {
+        preserveSpool = true
       },
       close() {
         if (closed) return
         closed = true
         closeOpenRegularFiles(evidenceSources)
+        if (!preserveSpool) removeEvidenceSpool(evidenceSpool!, sealedEvidence)
       },
     }
   } catch (error) {
     closeOpenRegularFiles(evidenceSources)
+    if (evidenceSpool) removeEvidenceSpool(evidenceSpool, sealedEvidence)
     throw error
   }
 }
@@ -1419,13 +2208,127 @@ function readTransactionFile(root: string, relativePath: string, options: Backup
   return parseRestoreIntent(readRegularFileOnce(root, relativePath, options))
 }
 
-function removeIntentDurably(
+interface RegularFileAuthority {
+  opened: fs.Stats
+  bytes: Buffer
+}
+
+function sameInodeIdentity(left: fs.Stats, right: fs.Stats): boolean {
+  return left.isFile()
+    && right.isFile()
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mode === right.mode
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+function readRegularFileAuthority(
+  root: string,
+  relativePath: string,
+  options: BackupReadOptions,
+): RegularFileAuthority {
+  const source = openRegularFileOnce(root, relativePath, options)
+  try {
+    const bytes = readOpenRegularFile(source, options)
+    assertOpenFileUnchanged(source)
+    return { opened: source.opened, bytes }
+  } finally {
+    source.ops.closeSync(source.fd)
+  }
+}
+
+function assertRegularFileAuthority(
+  root: string,
+  relativePath: string,
+  authority: RegularFileAuthority,
+  options: BackupReadOptions,
+): void {
+  const current = readRegularFileAuthority(root, relativePath, options)
+  if (!sameInodeIdentity(authority.opened, current.opened)
+    || !authority.bytes.equals(current.bytes)) {
+    throw new Error(`restore intent authority changed: ${relativePath}`)
+  }
+}
+
+function intentTombstoneNames(userDataPath: string): string[] {
+  const handle = fs.opendirSync(userDataPath)
+  const names: string[] = []
+  try {
+    for (;;) {
+      const entry = handle.readSync()
+      if (!entry) break
+      if (!entry.name.startsWith(`${RESTORE_INTENT_FILE}.cleanup-`)) continue
+      if (!RESTORE_INTENT_TOMBSTONE_PATTERN.test(entry.name)
+        || entry.isSymbolicLink()
+        || !entry.isFile()) {
+        throw new Error('restore intent tombstone has an invalid name or type')
+      }
+      names.push(entry.name)
+      if (names.length > 1) {
+        throw new Error('multiple restore intent tombstones require manual reconciliation')
+      }
+    }
+    return names
+  } finally {
+    handle.closeSync()
+  }
+}
+
+function reconcileIntentTombstone(
   userDataPath: string,
+  options: RecoveryOptions,
+): void {
+  const tombstones = intentTombstoneNames(userDataPath)
+  if (tombstones.length === 0) return
+  const platform = options.platform ?? process.platform
+  const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
+  const readOptions: BackupReadOptions = { ...options, platform, durableFs: ops }
+  const tombstoneName = tombstones[0]
+  const tombstonePath = path.join(userDataPath, tombstoneName)
+  const intentPath = path.join(userDataPath, RESTORE_INTENT_FILE)
+  const tombstone = readRegularFileAuthority(userDataPath, tombstoneName, readOptions)
+
+  if (ops.existsSync(intentPath)) {
+    const canonical = readRegularFileAuthority(userDataPath, RESTORE_INTENT_FILE, readOptions)
+    if (!sameInodeIdentity(tombstone.opened, canonical.opened)
+      || !tombstone.bytes.equals(canonical.bytes)) {
+      throw new Error('canonical restore intent conflicts with its crash tombstone')
+    }
+  } else {
+    // A same-directory hard link is an atomic no-replace publication. If the
+    // process stops after this point, both paths identify the same inode and
+    // the next startup can finish the reconciliation without ambiguity.
+    fs.linkSync(tombstonePath, intentPath)
+    syncDirectory(userDataPath, platform, ops)
+    assertRegularFileAuthority(userDataPath, RESTORE_INTENT_FILE, tombstone, readOptions)
+  }
+
+  ops.unlinkSync(tombstonePath)
+  syncDirectory(userDataPath, platform, ops)
+}
+
+function removeMatchingIntentDurably(
+  userDataPath: string,
+  expectedBytes: Buffer,
   platform: NodeJS.Platform,
   ops: DurableFileOps,
 ): void {
   const intentPath = path.join(userDataPath, RESTORE_INTENT_FILE)
-  if (ops.existsSync(intentPath)) ops.unlinkSync(intentPath)
+  const options: BackupReadOptions = { platform, durableFs: ops }
+  const authority = readRegularFileAuthority(userDataPath, RESTORE_INTENT_FILE, options)
+  if (!authority.bytes.equals(expectedBytes)) {
+    throw new Error('canonical restore intent no longer matches cleanup authority')
+  }
+  const tombstoneName = `${RESTORE_INTENT_FILE}.cleanup-${cleanupNonce()}`
+  const tombstonePath = path.join(userDataPath, tombstoneName)
+  ops.renameSync(intentPath, tombstonePath)
+  syncDirectory(userDataPath, platform, ops)
+  assertRegularFileAuthority(userDataPath, tombstoneName, authority, options)
+  // Re-open immediately before unlink so a swapped path is preserved rather
+  // than deleting a newer or foreign recovery authority.
+  assertRegularFileAuthority(userDataPath, tombstoneName, authority, options)
+  ops.unlinkSync(tombstonePath)
   syncDirectory(userDataPath, platform, ops)
 }
 
@@ -1478,7 +2381,10 @@ function holdTransactionVerifiedBackup(
     for (const candidate of listSnapshotCandidates(root, limits, budget)) {
       let held: HeldEvidence<VerifiedSnapshotIdentity> | undefined
       try {
-        held = holdBackupSnapshotIdentity(candidate, options)
+        held = holdBackupSnapshotIdentity(candidate, options, {
+          transactionDigest: sha256(transactionBytes(transaction)),
+          authorityRoot: userDataPath,
+        })
         const identity = held.value
         if (identity.snapshotId === transaction.snapshotId
           && (identity.snapshotTimestamp === transaction.snapshotTimestamp
@@ -1655,6 +2561,13 @@ function holdCompletedRestoreLiveState(
         forensic?.assertStable()
         live!.assertStable()
       },
+      completeCleanup() {
+        if (closed) throw new Error('completed restore evidence is already closed')
+        backup!.completeCleanup?.()
+      },
+      preserve() {
+        backup!.preserve?.()
+      },
       close() {
         if (closed) return
         closed = true
@@ -1718,7 +2631,14 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
   let completedRestoreWasPublished = false
   let forensicConfirmed = platform !== 'win32'
   try {
-    const parsedIntent = readTransactionFile(userDataPath, RESTORE_INTENT_FILE, { platform })
+    const readOptions: BackupReadOptions = { ...options, platform, durableFs: ops }
+    let expectedIntentBytes = readRegularFileOnce(userDataPath, RESTORE_INTENT_FILE, readOptions)
+    const parsedIntent = parseRestoreIntent(expectedIntentBytes)
+    const writeIntentDurably = (transaction: RestoreTransactionFile): void => {
+      const bytes = transactionBytes(transaction)
+      writeDurably(intentPath, bytes, platform, ops)
+      expectedIntentBytes = bytes
+    }
     const isLegacyIntent = parsedIntent.version === 1
     const intentTransaction = normalizeTransaction(parsedIntent)
     if (isLegacyIntent && !intentTransaction.forensicArchiveId) forensicConfirmed = false
@@ -1745,10 +2665,14 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       const held = holdCompletedRestoreLiveState(userDataPath, completedTransaction, options, () => {
         forensicConfirmed = true
       }, undefined, isLegacyIntent)
+      let cleanupComplete = false
       try {
         held.assertStable()
-        removeIntentDurably(userDataPath, platform, ops)
+        removeMatchingIntentDurably(userDataPath, expectedIntentBytes, platform, ops)
+        held.completeCleanup?.()
+        cleanupComplete = true
       } finally {
+        if (!cleanupComplete) held.preserve?.()
         held.close()
       }
       return true
@@ -1758,7 +2682,7 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     const metadataExists = fs.existsSync(metadataPath)
     if (metadataExists) {
       const stageMetadata = normalizeTransaction(
-        readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform }),
+        readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, readOptions),
       )
       if (!sameTransactionIdentity(stageMetadata, intentTransaction)) {
         throw new Error('restore intent and staging metadata differ')
@@ -1784,18 +2708,22 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       const held = holdCompletedRestoreLiveState(userDataPath, transaction, options, () => {
         forensicConfirmed = true
       }, undefined, isLegacyIntent)
+      let cleanupComplete = false
       try {
         held.assertStable()
         removeStagingDurably(userDataPath, platform, ops)
         held.assertStable()
-        removeIntentDurably(userDataPath, platform, ops)
+        removeMatchingIntentDurably(userDataPath, expectedIntentBytes, platform, ops)
+        held.completeCleanup?.()
+        cleanupComplete = true
       } finally {
+        if (!cleanupComplete) held.preserve?.()
         held.close()
       }
       return true
     }
 
-    const pair = verifyPairDirectory(stagingPath, transaction, { platform })
+    const pair = verifyPairDirectory(stagingPath, transaction, readOptions)
     if (!metadataExists) {
       // A surviving exact outer intent is the only authority allowed to
       // reconstruct missing stage metadata.
@@ -1808,11 +2736,11 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
         phase: platform === 'win32' ? 'awaiting-windows-confirmation' : 'prepared',
       }
       writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
-      writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+      writeIntentDurably(transaction)
     }
 
     if (platform === 'win32' && transaction.phase !== 'primary-verified') {
-      verifyForensicEvidence(userDataPath, transaction, { platform, now: options.now })
+      verifyForensicEvidence(userDataPath, transaction, { ...options, platform })
       const startupId = options.startupId ?? ''
       if (startupId
         && startupId !== transaction.lastWindowsStartupId
@@ -1823,7 +2751,7 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
           lastWindowsStartupId: startupId,
         }
         writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
-        writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+        writeIntentDurably(transaction)
       }
       forensicConfirmed = transaction.windowsVerifiedStartups >= 2
       if (!forensicConfirmed) {
@@ -1833,11 +2761,11 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       }
       transaction = { ...transaction, phase: 'prepared' }
       writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
-      writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+      writeIntentDurably(transaction)
     } else if (platform !== 'win32' && transaction.phase === 'awaiting-windows-confirmation') {
       transaction = { ...transaction, phase: 'prepared' }
       writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
-      writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+      writeIntentDurably(transaction)
     }
 
     // Every retry rewrites both members from the same already-verified buffers.
@@ -1855,7 +2783,7 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
       // A parsed v1 outer intent is the provenance marker for the narrow
       // no-forensic compatibility path; retain it as the last authority.
-      if (!isLegacyIntent) writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+      if (!isLegacyIntent) writeIntentDurably(transaction)
       if (platform === 'win32') {
         publicationLive.assertStable()
         throw new SettingsRestoreFinalizationError()
@@ -1864,12 +2792,16 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       const held = holdCompletedRestoreLiveState(userDataPath, transaction, options, () => {
         forensicConfirmed = true
       }, publicationLive, isLegacyIntent)
+      let cleanupComplete = false
       try {
         held.assertStable()
         removeStagingDurably(userDataPath, platform, ops)
         held.assertStable()
-        removeIntentDurably(userDataPath, platform, ops)
+        removeMatchingIntentDurably(userDataPath, expectedIntentBytes, platform, ops)
+        held.completeCleanup?.()
+        cleanupComplete = true
       } finally {
+        if (!cleanupComplete) held.preserve?.()
         held.close()
       }
       return true
@@ -1920,11 +2852,15 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
       const held = holdCompletedRestoreLiveState(userDataPath, parsed, options, () => {
         forensicConfirmed = true
       })
+      let cleanupComplete = false
       try {
         held.assertStable()
         removeStagingDurably(userDataPath, platform, ops)
         held.assertStable()
+        held.completeCleanup?.()
+        cleanupComplete = true
       } finally {
+        if (!cleanupComplete) held.preserve?.()
         held.close()
       }
       return true
@@ -2714,6 +3650,17 @@ export function recoverSettingsAndJournalPair(
   userDataPath: string,
   options: RecoveryOptions = {},
 ): void {
+  try {
+    reconcileIntentTombstone(userDataPath, options)
+  } catch (error) {
+    throw new SettingsRecoveryError(
+      `Restore intent tombstone reconciliation stopped safely: ${error instanceof Error ? error.message : String(error)}`,
+      [],
+      false,
+      false,
+      true,
+    )
+  }
   if (resumeRestoreIntent(userDataPath, options)) return
   if (handleOrphanStaging(userDataPath, options)) return
   if (livePairIsReadable(userDataPath, options)) return
