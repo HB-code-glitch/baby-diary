@@ -170,6 +170,8 @@ async function main() {
   console.log(`executable: ${executablePath ?? 'project Electron'}`)
 
   let app
+  let originalClipboard = ''
+  let clipboardCaptured = false
   try {
     if (executablePath && !fs.existsSync(executablePath)) throw new Error(`E2E executable not found: ${executablePath}`)
 
@@ -198,6 +200,30 @@ async function main() {
         console.warn(`  [console.error] ${text}`)
       }
     })
+
+    // Exercise the real renderer -> Electron permission boundary. Preserve the
+    // user's clipboard even when a later E2E assertion or teardown fails.
+    originalClipboard = await app.evaluate(({ clipboard }) => clipboard.readText())
+    clipboardCaptured = true
+    const clipboardMarker = `baby-diary-e2e-${Date.now()}`
+    const clipboardWrite = await page.evaluate(async marker => {
+      try {
+        await navigator.clipboard.writeText(marker)
+        return { ok: true }
+      } catch (error) {
+        return {
+          ok: false,
+          name: error instanceof Error ? error.name : 'UnknownError',
+          message: error instanceof Error ? error.message : String(error),
+        }
+      }
+    }, clipboardMarker)
+    const mainClipboard = await app.evaluate(({ clipboard }) => clipboard.readText())
+    assert(
+      clipboardWrite.ok,
+      `renderer navigator.clipboard.writeText succeeds${clipboardWrite.ok ? '' : ` (${clipboardWrite.name}: ${clipboardWrite.message})`}`,
+    )
+    assert(mainClipboard === clipboardMarker, 'main process reads the renderer clipboard marker')
 
     // ---------------------------------------------------------------------------
     // 0. Language picker (first launch — fresh profile shows picker before tour)
@@ -1211,6 +1237,14 @@ async function main() {
     // ---------------------------------------------------------------------------
     // Teardown + report
     // ---------------------------------------------------------------------------
+    if (app && clipboardCaptured) {
+      try {
+        await app.evaluate(({ clipboard }, value) => clipboard.writeText(value), originalClipboard)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        failures.push(`Failed to restore the original clipboard: ${message}`)
+      }
+    }
     if (app) {
       try { await app.close() } catch { /* ignore */ }
     }
