@@ -79,6 +79,21 @@ describe('EventTimeline interactions and accessibility', () => {
     expect(softDeleteEvent).toHaveBeenCalledWith(EVENT)
   })
 
+  it('bounds every timeline entrance delay with the shared stagger contract', async () => {
+    const events = Array.from({ length: 60 }, (_, index) => ({
+      ...EVENT,
+      id: `event-${index}`,
+      at: new Date(Date.parse(EVENT.at) - index * 60_000).toISOString(),
+    }))
+    await act(async () => root.render(<EventTimeline events={events} />))
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('.timeline-item'))
+    expect(rows).toHaveLength(60)
+    expect(rows.every(row => row.classList.contains('bounded-stagger'))).toBe(true)
+    expect(rows.at(-1)?.style.getPropertyValue('--stagger-delay')).toBe('336ms')
+    expect(rows.every(row => !row.style.getPropertyValue('--i'))).toBe(true)
+  })
+
   it('keeps the time edit modal wired to the existing store edit call', async () => {
     await act(async () => root.render(<EventTimeline events={[EVENT]} />))
     const time = formatTime(EVENT.at)

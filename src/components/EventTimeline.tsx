@@ -6,6 +6,7 @@ import { formatEventValue, formatTime, useAppStore } from '../store/useAppStore'
 import { TimeEditModal } from './TimeEditModal'
 import { useToast } from './Toast'
 import { useTranslation } from 'react-i18next'
+import { getBoundedStaggerDelay } from '../lib/useProgressiveList'
 
 interface EventTimelineProps {
   events: readonly DiaryEvent[]
@@ -188,8 +189,8 @@ export function EventTimeline({
                   key={event.id}
                   data-event-id={event.id}
                   data-event-rev={event.rev}
-                  className="timeline-item stagger-mount"
-                  style={{ '--i': index } as React.CSSProperties}
+                  className="timeline-item stagger-mount bounded-stagger"
+                  style={{ '--stagger-delay': getBoundedStaggerDelay(index) } as React.CSSProperties}
                 >
                   <span className="timeline-dot" aria-hidden="true" />
                   <span className="timeline-time">{formatTime(event.at)}</span>

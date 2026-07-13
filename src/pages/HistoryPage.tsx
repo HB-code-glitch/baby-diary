@@ -482,7 +482,29 @@ function ProgressiveDayTimeline({ events, emptyTitle, emptySub }: ProgressiveDay
     ).find(item => item.dataset.eventId === targetId)
     const target = targetItem?.querySelector<HTMLElement>('[data-event-action="edit"]')
       ?? timelineCardRef.current?.querySelector<HTMLElement>('[data-timeline-region]')
-    target?.focus({ preventScroll: true })
+    if (!target) return
+
+    // The newly revealed row must not remain opacity:0 while keyboard focus is
+    // already inside it. useLayoutEffect runs before paint, so disabling only
+    // this row's entrance animation makes the focus destination immediately
+    // perceivable without removing motion from the rest of the batch.
+    if (targetItem) targetItem.style.animation = 'none'
+
+    const rect = target.getBoundingClientRect()
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth
+    const isFullyVisible = rect.top >= 0
+      && rect.left >= 0
+      && rect.bottom <= viewportHeight
+      && rect.right <= viewportWidth
+
+    if (isFullyVisible) {
+      target.focus({ preventScroll: true })
+      return
+    }
+
+    target.focus()
+    target.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'auto' })
   }, [visibleItems.length])
 
   const handleLoadMore = () => {
