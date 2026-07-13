@@ -148,9 +148,13 @@ Commit: `fix: make fever and feeding guidance conservative`
 - Modify: `src/pages/HomePage.tsx`
 - Modify: `src/pages/SettingsPage.tsx`
 - Modify: `src/styles.css`
+- Modify: `electron/main.ts`
+- Modify: `electron/preload.ts`
+- Modify: `src/lib/ipc.ts`
 - Modify: `src/i18n/ko.json`
 - Modify: `src/i18n/ja.json`
 - Create: `tests/ageGuidanceUi.test.tsx`
+- Create: `tests/evidenceExternalLink.test.ts`
 - Modify: `tests/progressiveDisclosure.test.ts`
 - Modify: `scripts/mac-e2e.mjs`
 
@@ -166,6 +170,8 @@ Test that the home panel:
 
 Test that Settings no longer renders the fixed breastfeeding interval table or mixed 13-marker accordion and instead groups official evidence by current stage/category.
 
+Test the external-link bridge independently: only `https:` URLs whose normalized hostname is in the evidence registry's authority allowlist can reach `shell.openExternal`; HTTP, credentials, lookalike suffixes, unknown hosts, and malformed URLs are rejected.
+
 Run: `npx vitest run tests/ageGuidanceUi.test.tsx tests/progressiveDisclosure.test.ts`  
 Expected: FAIL.
 
@@ -173,7 +179,7 @@ Expected: FAIL.
 
 Build `AgeGuidancePanel` from the pure selectors. Reuse the existing premium card palette and spacing. Use a short staged reveal, no auto-advancing carousel, no layout-shifting animation, and a reduced-motion override.
 
-`EvidenceSourceList` displays organisation/title/review date and opens HTTPS URLs through the existing external-link path. Source details remain collapsed until requested.
+`EvidenceSourceList` displays organisation/title/review date and opens HTTPS URLs through a new typed `openEvidenceSource` bridge. Validate the source URL in the renderer for UX and again in Electron main for security. Browser-mode fallback must use `noopener,noreferrer`. Source details remain collapsed until requested.
 
 ### Step 3: Integrate Home and Settings
 
@@ -280,4 +286,3 @@ Report:
 - primary source links;
 - test counts and packaged E2E results;
 - macOS/Windows release links and Windows installer hash.
-

@@ -43,7 +43,7 @@ The typed source registry will include, at minimum:
 - Japan CFA safe-sleep, infant nutrition/weaning, accident-prevention, and infant check-up pages
 - Japan MHLW vaccination information
 
-Sources open in the system browser and remain useful without an internet connection because the concise action text is bundled with the app.
+Sources open in the system browser through a narrow Electron IPC bridge that accepts only `https:` URLs on the registry's explicit authority-host allowlist. Browser development mode may use `window.open` with `noopener,noreferrer`. The guidance remains useful without an internet connection because the concise action text is bundled with the app.
 
 ## Age routing
 
@@ -138,7 +138,7 @@ The visual patch reuses the existing premium card language, restrained motion, a
 - No event, profile, family-code, login, or sync schema changes.
 - Guidance is static versioned content and is never synced as user data.
 - Existing diary records and statistics remain unchanged.
-- macOS and Windows use the same React/TypeScript path; external source opening uses the existing safe Electron bridge/browser path.
+- macOS and Windows use the same React/TypeScript path. A new typed `openEvidenceSource` bridge validates the URL again in the main process before calling `shell.openExternal`; arbitrary renderer-supplied URLs are rejected.
 
 ## Acceptance criteria
 
@@ -150,4 +150,3 @@ The visual patch reuses the existing premium card language, restrained motion, a
 6. Korean and Japanese key parity and source-link validity are tested.
 7. The home panel never shows more than three priority cards before expansion.
 8. Typecheck, unit tests, production build, Windows packaged E2E, and macOS packaged CI all pass.
-
