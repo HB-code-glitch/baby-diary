@@ -6,6 +6,7 @@ interface WorkflowStep {
   uses?: string
   run?: unknown
   if?: string
+  'continue-on-error'?: unknown
   env?: Record<string, string>
 }
 
@@ -18,6 +19,7 @@ interface WorkflowJob {
 
 interface ReleaseWorkflow {
   name: string
+  permissions: Record<string, string>
   on: {
     push: { branches: string[]; tags: string[] }
     pull_request: { branches: string[] }
@@ -39,7 +41,8 @@ interface PackagedE2ESpec {
 
 const workflowSource = readFileSync('.github/workflows/build.yml', 'utf8')
 // js-yaml v4 uses its YAML 1.2-oriented default schema and rejects duplicate
-// mapping keys. It is installed by the project's electron-builder dependency.
+// mapping keys. It is declared directly so this CI contract does not rely on a
+// transitive electron-builder dependency.
 const yaml = createRequire(import.meta.url)('js-yaml') as JsYaml
 
 function parseWorkflow(source = workflowSource): ReleaseWorkflow {
@@ -98,6 +101,12 @@ function packagedE2EContractErrors(candidate: ReleaseWorkflow, spec: PackagedE2E
   if (e2eIndex < 0 || JSON.stringify(job.steps[e2eIndex].env) !== expectedEnv) {
     errors.push(`BABYDIARY_E2E_EXECUTABLE must target: ${spec.executable}`)
   }
+  if (e2eIndex >= 0 && Object.prototype.hasOwnProperty.call(job.steps[e2eIndex], 'if')) {
+    errors.push('packaged E2E execution step must not have an if condition')
+  }
+  if (e2eIndex >= 0 && Boolean(job.steps[e2eIndex]['continue-on-error'])) {
+    errors.push('packaged E2E execution step must not continue on error')
+  }
 
   const commandText = runCommands.join('\n')
   if (/(?:^|\s)false\s*&&/m.test(commandText)) errors.push('false && no-op detected')
@@ -129,6 +138,11 @@ describe('release workflow CI gates', () => {
     expect(workflow.on).toHaveProperty('workflow_dispatch')
   })
 
+  it('grants the workflow only read access to repository contents', () => {
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(Object.values(workflow.permissions)).not.toContain('write')
+  })
+
   it('preserves all build, packaged E2E, and release jobs', () => {
     expect(new Set(Object.keys(workflow.jobs))).toEqual(new Set([
       'build-mac',
@@ -153,6 +167,19 @@ describe('release workflow CI gates', () => {
     { label: 'successful no-op', from: 'npm run test:e2e', to: 'true' },
   ])('rejects $label mutations in packaged E2E', ({ from, to }) => {
     const mutatedSource = workflowSource.replace(from, to)
+    expect(mutatedSource).not.toBe(workflowSource)
+    const mutatedWorkflow = parseWorkflow(mutatedSource)
+    expect(packagedE2EContractErrors(mutatedWorkflow, PACKAGED_E2E_SPECS[0])).not.toEqual([])
+  })
+
+  it.each([
+    { label: 'if false', property: '        if: false' },
+    { label: 'continue-on-error true', property: '        continue-on-error: true' },
+  ])('rejects $label on the packaged E2E execution step', ({ property }) => {
+    const mutatedSource = workflowSource.replace(
+      /(      - run: npm run test:e2e\r?\n)/,
+      `$1${property}\n`,
+    )
     expect(mutatedSource).not.toBe(workflowSource)
     const mutatedWorkflow = parseWorkflow(mutatedSource)
     expect(packagedE2EContractErrors(mutatedWorkflow, PACKAGED_E2E_SPECS[0])).not.toEqual([])
