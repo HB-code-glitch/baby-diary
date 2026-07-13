@@ -26,6 +26,11 @@ const ROOT = path.join(__dirname, '..')
 
 const SCREENSHOTS_DIR = path.join(ROOT, 'screenshots')
 fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true })
+for (const name of fs.readdirSync(SCREENSHOTS_DIR)) {
+  if (/^\d{2}-.+\.png$/.test(name)) {
+    fs.rmSync(path.join(SCREENSHOTS_DIR, name))
+  }
+}
 
 let screenshotIndex = 0
 let consoleErrors = []
@@ -42,6 +47,15 @@ async function shot(page, name) {
       animation.playState === 'finished' || animation.playState === 'idle'
     )
   }, undefined, { timeout: 2000 })
+  // Let finite mount/popover motion finish and give Chromium one compositor frame
+  // after glass/backdrop view transitions. This keeps review captures deterministic.
+  await page.waitForFunction(() => {
+    const animated = Array.from(document.querySelectorAll('.stagger-mount, .popover, .modal'))
+    return animated.every(element => element.getAnimations().every(animation =>
+      animation.playState === 'finished' || animation.playState === 'idle'
+    ))
+  }, undefined, { timeout: 2000 }).catch(() => {})
+  await page.waitForTimeout(300)
   await page.screenshot({ path: file, fullPage: false })
   console.log(`  📸 ${idx}-${name}.png`)
   return file
@@ -661,32 +675,94 @@ async function main() {
     await page.click('[data-tour="nav-history"]')
     await page.waitForSelector('[data-tour="calendar"]', { timeout: 8000 })
 
-    // Month view (default)
+    const historyTabs = page.locator('[role="tablist"] button[data-history-view]')
+    assert(await historyTabs.count() === 3, 'History exposes one three-option tablist')
+    assert(
+      JSON.stringify(await historyTabs.allTextContents()) === JSON.stringify(['월간', '주간', '하루']),
+      'History uses full Korean view labels',
+    )
+
+    const historyHitTargets = await page.locator(
+      '[role="tablist"] button[data-history-view], .history-period-nav button, .cal-day .timeline-action-button',
+    ).evaluateAll(buttons => buttons.map(button => {
+      const rect = button.getBoundingClientRect()
+      return { width: rect.width, height: rect.height }
+    }))
+    assert(
+      historyHitTargets.every(({ width, height }) => width >= 40 && height >= 40),
+      'History toolbar and timeline action hit targets are at least 40px',
+    )
+
+    // Selecting a month cell updates only the selected date; it does not drill down.
+    const firstMonthCell = page.locator('.cal-day-cell:not(.cal-day-other-month)').first()
+    await firstMonthCell.click()
+    assert(
+      await page.locator('[data-history-view="month"]').getAttribute('aria-selected') === 'true',
+      'month cell selection stays in month view',
+    )
+
+    // Return to today's populated preview and verify newest-three behavior.
+    const todayMonthCell = page.locator('.cal-day-cell.cal-day-today')
+    assert(await todayMonthCell.count() === 1, 'month view exposes exactly one today cell')
+    await todayMonthCell.click()
+    assert(await todayMonthCell.getAttribute('aria-pressed') === 'true', 'selected month cell exposes aria-pressed')
+    const historyPreview = page.locator('[data-history-preview]')
+    assert(await historyPreview.isVisible(), 'selected-date preview is visible beside the month')
+    assert(/선택한 날 기록/.test(await historyPreview.textContent()), 'selected-date preview title is localized')
+    const previewTimelineCount = await historyPreview.locator('.timeline-item').count()
+    assert(previewTimelineCount > 0 && previewTimelineCount <= 3, `preview shows newest three or fewer records (${previewTimelineCount})`)
     await shot(page, 'history-month')
 
-    // Look for a 백일 star chip (should be near D+100 mark for 95-day-old baby)
-    const starChips = await page.$$('.milestone-chip, [class*="star"], [class*="chip"]')
-    console.log(`  milestone chips found: ${starChips.length}`)
-
-    // Click a day cell to get week/day drill-down
-    // Find any clickable day with a record
-    const dayCells = await page.$$('[class*="day-cell"], [class*="calendar-day"], .cal-day')
-    if (dayCells.length > 0) {
-      // Click today's cell (first with today class, or just any day)
-      const todayCell = await page.$('[class*="today"], .cal-today')
-      const target = todayCell ?? dayCells[Math.floor(dayCells.length / 2)]
-      await target.click()
-      await page.waitForTimeout(400)
-    }
+    // Week rows also update selection without changing view and contain no time teaser.
+    await page.locator('button[data-history-view="week"]').click()
+    const todayWeekRow = page.locator('.cal-week-row.cal-week-row-today')
+    assert(await todayWeekRow.count() === 1, 'week view exposes exactly one today row')
+    await todayWeekRow.click()
+    assert(
+      await page.locator('[data-history-view="week"]').getAttribute('aria-selected') === 'true',
+      'week row selection stays in week view',
+    )
+    assert(await todayWeekRow.getAttribute('aria-pressed') === 'true', 'selected week row exposes aria-pressed')
+    assert(await todayWeekRow.locator('.cal-week-times').count() === 0, 'week rows do not expose time previews')
     await shot(page, 'history-week')
 
-    // Try to go to day view
-    const dayViewBtn = await page.$('button:has-text("일")')
-    if (dayViewBtn) {
-      await dayViewBtn.click()
-      await page.waitForTimeout(400)
-    }
+    // Preview CTA enters the full day timeline; the exact data selector avoids the old Diary misclick.
+    await historyPreview.locator('.history-preview-action').click()
+    const exactDayViewTab = page.locator('button[data-history-view="day"]')
+    assert(await exactDayViewTab.getAttribute('aria-selected') === 'true', 'preview CTA opens day view')
+    await exactDayViewTab.click()
+    const dayAllFilter = page.locator('[data-history-filter="all"]')
+    assert(/전체\s+\d+/.test((await dayAllFilter.textContent()) ?? ''), 'day all-filter includes its count')
+    assert(await page.locator('[data-history-filter="sleep"]').count() === 0, 'day hides absent sleep filter')
+    assert(await page.locator('[data-history-filter="growth"]').count() === 0, 'day hides absent growth filter')
     await shot(page, 'history-day')
+
+    const peeFilter = page.locator('[data-history-filter="pee"]')
+    assert(await peeFilter.isVisible(), 'day exposes a filter for the present pee event')
+    await peeFilter.click()
+    assert(await peeFilter.getAttribute('aria-pressed') === 'true', 'day filter exposes pressed state')
+    assert(await page.locator('.cal-day .timeline-item').count() === 1, 'day filter narrows the timeline')
+    await shot(page, 'history-day-filter')
+    await dayAllFilter.click()
+
+    const editHistoryEvent = page.locator('.cal-day .timeline-action-button[aria-label*="시간 수정"]').first()
+    assert(await editHistoryEvent.isVisible(), 'History day event exposes an accessible time-edit action')
+    await editHistoryEvent.click()
+    await page.waitForSelector('.popover input[type="datetime-local"]', { timeout: 5000 })
+    await shot(page, 'history-day-edit')
+    await page.locator('.popover .btn-secondary').filter({ hasText: '취소' }).click()
+
+    const deleteHistoryEvent = page.locator('.cal-day .timeline-action-button[aria-label$="삭제"]').first()
+    assert(await deleteHistoryEvent.isVisible(), 'History day event exposes an accessible delete action')
+    await deleteHistoryEvent.click()
+    const inlineDelete = page.locator('.cal-day .timeline-delete-confirm')
+    assert(/삭제할까요\?/.test(await inlineDelete.textContent()), 'History uses an inline delete confirmation')
+    assert(
+      await inlineDelete.locator('button').filter({ hasText: '취소' }).evaluate(button => document.activeElement === button),
+      'inline delete confirmation moves focus to cancel',
+    )
+    await shot(page, 'history-day-delete-confirm')
+    await inlineDelete.locator('button').filter({ hasText: '취소' }).click()
 
     // ---------------------------------------------------------------------------
     // 5. Sleep two-tap flow
@@ -916,6 +992,20 @@ async function main() {
     const jaEvidenceCenter = page.locator('[data-tour="age-guidance"]')
     assert(/年齢別エビデンスセンター/.test(await jaEvidenceCenter.textContent()), 'Japanese evidence-center title is localized')
 
+    // Japanese light History captures for all three shared-toolbar views.
+    await page.click('[data-tour="nav-history"]')
+    await page.waitForSelector('[data-tour="calendar"]', { timeout: 5000 })
+    assert(
+      JSON.stringify(await page.locator('[role="tablist"] button[data-history-view]').allTextContents())
+        === JSON.stringify(['月間', '週間', '1日']),
+      'History uses full Japanese view labels',
+    )
+    await shot(page, 'history-month-ja-light')
+    await page.locator('button[data-history-view="week"]').click()
+    await shot(page, 'history-week-ja-light')
+    await page.locator('button[data-history-view="day"]').click()
+    await shot(page, 'history-day-ja-light')
+
     // Go to home and screenshot Japanese UI
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="hero"]', { timeout: 5000 })
@@ -935,6 +1025,65 @@ async function main() {
       await darkBtn.click()
       await page.waitForTimeout(400)
     }
+
+    // Japanese dark History captures cover the same three responsive views.
+    await page.click('[data-tour="nav-history"]')
+    await page.waitForSelector('[data-tour="calendar"]', { timeout: 5000 })
+    await shot(page, 'history-month-ja-dark')
+    await page.locator('button[data-history-view="week"]').click()
+    await shot(page, 'history-week-ja-dark')
+    await page.locator('button[data-history-view="day"]').click()
+    await shot(page, 'history-day-ja-dark')
+
+    // History stacks cleanly at the compact breakpoint and honors reduced motion.
+    await page.setViewportSize({ width: 720, height: 560 })
+    await page.locator('button[data-history-view="month"]').click()
+    const compactHistoryLayout = await page.evaluate(() => {
+      const shell = document.querySelector('.app-shell')
+      const overview = document.querySelector('.history-overview-grid')
+      const toolbar = document.querySelector('.history-toolbar')
+      return {
+        shellClientWidth: shell?.clientWidth ?? 0,
+        shellScrollWidth: shell?.scrollWidth ?? Number.POSITIVE_INFINITY,
+        overviewColumns: overview ? getComputedStyle(overview).gridTemplateColumns : '',
+        toolbarColumns: toolbar ? getComputedStyle(toolbar).gridTemplateColumns : '',
+      }
+    })
+    assert(
+      compactHistoryLayout.shellScrollWidth <= compactHistoryLayout.shellClientWidth,
+      `compact History has no horizontal overflow (${compactHistoryLayout.shellScrollWidth}/${compactHistoryLayout.shellClientWidth})`,
+    )
+    assert(
+      compactHistoryLayout.overviewColumns.trim().split(/\s+/).filter(Boolean).length === 1,
+      `compact History stacks calendar and preview (${compactHistoryLayout.overviewColumns})`,
+    )
+    assert(
+      compactHistoryLayout.toolbarColumns.trim().split(/\s+/).filter(Boolean).length === 1,
+      `compact History stacks the shared toolbar (${compactHistoryLayout.toolbarColumns})`,
+    )
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.waitForTimeout(50)
+    const reducedHistoryMotion = await page.evaluate(() => {
+      const activeTab = document.querySelector('.cal-view-btn.active')
+      const dayCell = document.querySelector('.cal-day-cell')
+      const timelineItem = document.querySelector('.timeline-item')
+      return {
+        tabShimmerDisplay: activeTab ? getComputedStyle(activeTab, '::after').display : '',
+        dayTransitionDuration: dayCell ? getComputedStyle(dayCell).transitionDuration : '',
+        dayTransitionSeconds: dayCell
+          ? Math.max(...getComputedStyle(dayCell).transitionDuration.split(',').map(value => Number.parseFloat(value)))
+          : Number.POSITIVE_INFINITY,
+        timelineAnimationName: timelineItem ? getComputedStyle(timelineItem).animationName : '',
+      }
+    })
+    assert(
+      reducedHistoryMotion.tabShimmerDisplay === 'none'
+        && reducedHistoryMotion.dayTransitionSeconds <= 0.00001
+        && reducedHistoryMotion.timelineAnimationName === 'none',
+      `History disables shimmer, cell transitions, and timeline motion when reduced (${JSON.stringify(reducedHistoryMotion)})`,
+    )
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    await page.setViewportSize({ width: 1280, height: 800 })
 
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="hero"]', { timeout: 5000 })
@@ -1012,8 +1161,13 @@ async function main() {
       failures.push(`${errorCount} unexpected console error(s): ${consoleErrors.slice(0, 3).join(' | ')}`)
     }
 
-    if (screenshotIndex !== 27) {
-      failures.push(`Expected exactly 27 screenshots, got ${screenshotIndex}`)
+    if (screenshotIndex !== 36) {
+      failures.push(`Expected exactly 36 screenshots, got ${screenshotIndex}`)
+    }
+    const screenshotFiles = fs.readdirSync(SCREENSHOTS_DIR)
+      .filter(name => /^\d{2}-.+\.png$/.test(name))
+    if (screenshotFiles.length !== screenshotIndex) {
+      failures.push(`Expected ${screenshotIndex} screenshot files on disk, got ${screenshotFiles.length}`)
     }
 
     // Write result JSON

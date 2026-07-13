@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { IconPencil, IconTrash } from './icons'
 import { DiaryEvent } from '../../shared/types'
 import { EventIcon, eventLabel } from './EventIcon'
@@ -12,6 +12,9 @@ interface EventTimelineProps {
   events: DiaryEvent[]
   showAuthor?: boolean
   editable?: boolean
+  emptyTitle?: string
+  emptySub?: string
+  compact?: boolean
 }
 
 /** Warm palette pairs: [bg, text] using CSS hex values */
@@ -32,12 +35,36 @@ function nameToWarmPair(name: string): [string, string] {
   return WARM_PALETTE[Math.abs(hash) % WARM_PALETTE.length]
 }
 
-export function EventTimeline({ events, showAuthor = true, editable = true }: EventTimelineProps) {
+export function EventTimeline({
+  events,
+  showAuthor = true,
+  editable = true,
+  emptyTitle,
+  emptySub,
+  compact = false,
+}: EventTimelineProps) {
   const { editEvent, softDeleteEvent } = useAppStore()
   const { showToast } = useToast()
   const { t } = useTranslation()
   const [editingAt, setEditingAt] = useState<DiaryEvent | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const cancelDeleteRef = useRef<HTMLButtonElement | null>(null)
+  const deleteButtonRefs = useRef(new Map<string, HTMLButtonElement>())
+  const restoreDeleteFocusRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (confirmDelete) cancelDeleteRef.current?.focus()
+    if (!confirmDelete && restoreDeleteFocusRef.current) {
+      deleteButtonRefs.current.get(restoreDeleteFocusRef.current)?.focus()
+      restoreDeleteFocusRef.current = null
+    }
+  }, [confirmDelete])
+
+  useEffect(() => {
+    if (confirmDelete && !events.some(event => event.id === confirmDelete)) {
+      setConfirmDelete(null)
+    }
+  }, [confirmDelete, events])
 
   const handleTimeEdit = async (event: DiaryEvent, newAt: string) => {
     try {
@@ -50,19 +77,19 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
     }
   }
 
+  const closeDeleteConfirmation = (eventId: string, restoreFocus = true) => {
+    restoreDeleteFocusRef.current = restoreFocus ? eventId : null
+    setConfirmDelete(null)
+  }
+
   const handleDelete = async (event: DiaryEvent) => {
-    if (confirmDelete === event.id) {
-      try {
-        await softDeleteEvent(event)
-        setConfirmDelete(null)
-        showToast({ message: t('toast.deleted') })
-      } catch {
-        setConfirmDelete(null)
-        showToast({ message: t('toast.deleteFailed') })
-      }
-    } else {
-      setConfirmDelete(event.id)
-      setTimeout(() => setConfirmDelete(null), 3000)
+    try {
+      await softDeleteEvent(event)
+      setConfirmDelete(null)
+      showToast({ message: t('toast.deleted') })
+    } catch {
+      setConfirmDelete(null)
+      showToast({ message: t('toast.deleteFailed') })
     }
   }
 
@@ -75,15 +102,17 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
           <circle cx="50" cy="18" r="1.5" stroke="var(--stone-300)" strokeWidth="2.5"/>
           <circle cx="46" cy="3" r="1" stroke="var(--stone-300)" strokeWidth="2.5"/>
         </svg>
-        <div className="empty-state-title">{t('timeline.emptyTitle')}</div>
-        <div className="empty-state-sub">{t('timeline.emptySub')}</div>
+        <div className="empty-state-title">{emptyTitle ?? t('timeline.emptyTitle')}</div>
+        {(emptySub ?? t('timeline.emptySub')) && (
+          <div className="empty-state-sub">{emptySub ?? t('timeline.emptySub')}</div>
+        )}
       </div>
     )
   }
 
   return (
     <>
-      <div className="timeline-rail">
+      <div className={`timeline-rail${compact ? ' timeline-rail-compact' : ''}`}>
         {events.map((event, i) => {
           const authorName = event.author?.name ?? ''
           const initial = authorName ? authorName.charAt(0).toUpperCase() : ''
@@ -105,7 +134,7 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
               <EventIcon type={event.type} size={14} />
 
               {/* Content */}
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="timeline-content">
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
                   <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--stone-800)' }}>
                     {eventLabel(event.type)}
@@ -130,30 +159,71 @@ export function EventTimeline({ events, showAuthor = true, editable = true }: Ev
 
               {/* Edit/delete */}
               {editable && (
-                <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
-                  <button
-                    onClick={() => setEditingAt(event)}
-                    style={{
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      padding: '4px', color: 'var(--stone-400)', borderRadius: 5,
-                    }}
-                    title={t('timeline.editTime')}
-                  >
-                    <IconPencil size={13} color="var(--stone-400)" />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(event)}
-                    style={{
-                      background: confirmDelete === event.id ? 'var(--rose-100)' : 'none',
-                      border: 'none', cursor: 'pointer',
-                      padding: '4px',
-                      color: confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)',
-                      borderRadius: 5,
-                    }}
-                    title={confirmDelete === event.id ? t('timeline.confirmDelete') : t('timeline.delete')}
-                  >
-                    <IconTrash size={13} color={confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)'} />
-                  </button>
+                <div className="timeline-actions">
+                  {confirmDelete === event.id ? (
+                    <div
+                      className="timeline-delete-confirm"
+                      role="group"
+                      aria-label={t('timeline.deleteConfirmAria', {
+                        label: eventLabel(event.type),
+                        time: formatTime(event.at),
+                      })}
+                      onKeyDown={keyboardEvent => {
+                        if (keyboardEvent.key === 'Escape') {
+                          keyboardEvent.preventDefault()
+                          closeDeleteConfirmation(event.id)
+                        }
+                      }}
+                    >
+                      <span className="timeline-delete-prompt">{t('timeline.deletePrompt')}</span>
+                      <button
+                        ref={cancelDeleteRef}
+                        type="button"
+                        className="timeline-confirm-button"
+                        onClick={() => closeDeleteConfirmation(event.id)}
+                      >
+                        {t('timeline.cancelDelete')}
+                      </button>
+                      <button
+                        type="button"
+                        className="timeline-confirm-button timeline-confirm-button-danger"
+                        onClick={() => handleDelete(event)}
+                      >
+                        {t('timeline.confirmDeleteAction')}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="timeline-action-button"
+                        onClick={() => setEditingAt(event)}
+                        aria-label={t('timeline.editEventAria', {
+                          label: eventLabel(event.type),
+                          time: formatTime(event.at),
+                        })}
+                        title={t('timeline.editTime')}
+                      >
+                        <IconPencil size={15} color="currentColor" />
+                      </button>
+                      <button
+                        ref={button => {
+                          if (button) deleteButtonRefs.current.set(event.id, button)
+                          else deleteButtonRefs.current.delete(event.id)
+                        }}
+                        type="button"
+                        className="timeline-action-button"
+                        onClick={() => setConfirmDelete(event.id)}
+                        aria-label={t('timeline.deleteEventAria', {
+                          label: eventLabel(event.type),
+                          time: formatTime(event.at),
+                        })}
+                        title={t('timeline.delete')}
+                      >
+                        <IconTrash size={15} color="currentColor" />
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>

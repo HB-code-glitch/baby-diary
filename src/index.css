@@ -1711,6 +1711,86 @@ details[open] > summary .evidence-source-chevron {
   position: relative;
 }
 
+.timeline-content {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+}
+
+.timeline-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-top: -4px;
+  margin-bottom: -4px;
+}
+
+.timeline-action-button {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--stone-400);
+  cursor: pointer;
+}
+
+.timeline-action-button:hover {
+  background: var(--bg);
+  color: var(--text-secondary);
+}
+
+.timeline-delete-confirm {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+  border: 1px solid var(--rose-200);
+  border-radius: 12px;
+  background: var(--rose-100);
+  color: var(--text-primary);
+}
+
+.timeline-delete-prompt {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.timeline-confirm-button {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.timeline-confirm-button:hover { background: rgba(255,255,255,0.45); }
+.timeline-confirm-button-danger { color: var(--rose-500); }
+
+.timeline-rail-compact {
+  padding-left: 22px;
+}
+
+.timeline-rail-compact::before { left: 8px; }
+.timeline-rail-compact .timeline-item { gap: 8px; padding: 7px 0; }
+.timeline-rail-compact .timeline-dot { left: -18px; }
+.timeline-rail-compact .timeline-icon { width: 28px; height: 28px; border-radius: 9px; }
+
 .timeline-dot {
   position: absolute;
   left: -24px;
@@ -2740,7 +2820,8 @@ details[open] > summary .evidence-source-chevron {
 }
 
 .cal-view-btn {
-  padding: 5px 14px;
+  min-height: 40px;
+  padding: 7px 16px;
   border-radius: 99px;
   border: none;
   background: transparent;
@@ -2789,7 +2870,14 @@ details[open] > summary .evidence-source-chevron {
 
 /* Calendar nav arrows — glass */
 .cal-nav-arrow {
-  padding: 6px 10px;
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
@@ -2841,7 +2929,7 @@ details[open] > summary .evidence-source-chevron {
   letter-spacing: -0.01em;
 }
 
-.cal-nav-arrow { padding: 6px 10px; flex-shrink: 0; }
+.cal-nav-arrow { flex-shrink: 0; }
 
 /* Month view */
 .cal-month { /* no extra */ }
@@ -2876,7 +2964,7 @@ details[open] > summary .evidence-source-chevron {
   border-radius: 10px;
   transition: background 0.12s;
   font-family: 'Plus Jakarta Sans', 'Pretendard', sans-serif;
-  min-height: 58px;
+  min-height: 68px;
 }
 .cal-day-cell:hover { background: var(--bg); }
 
@@ -2917,6 +3005,21 @@ details[open] > summary .evidence-source-chevron {
   justify-content: center;
 }
 
+.cal-day-event-count {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.cal-day-markers {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
 .cal-indicator {
   font-size: 9px;
   font-weight: 700;
@@ -2940,7 +3043,7 @@ details[open] > summary .evidence-source-chevron {
 
 .cal-week-row {
   display: grid;
-  grid-template-columns: 90px 1fr auto;
+  grid-template-columns: minmax(116px, auto) minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
@@ -2952,6 +3055,7 @@ details[open] > summary .evidence-source-chevron {
   font-family: 'Plus Jakarta Sans', 'Pretendard', sans-serif;
   transition: background 0.12s, transform 0.12s, box-shadow 0.12s;
   width: 100%;
+  min-height: 56px;
   box-shadow: var(--shadow-card);
 }
 
@@ -2969,9 +3073,33 @@ details[open] > summary .evidence-source-chevron {
 .cal-week-row.cal-week-row-today  { border-color: var(--text-secondary); }
 .cal-week-row.cal-week-row-selected { background: var(--bg); border-color: var(--text-secondary); }
 
-.cal-week-row-date { display: flex; flex-direction: column; gap: 2px; }
+.cal-week-row-date { display: flex; flex-direction: column; gap: 3px; }
 .cal-week-day-num  { font-size: 14px; font-weight: 700; color: var(--text-primary); }
 .cal-week-dday     { font-size: 10px; color: var(--text-muted); font-weight: 500; }
+
+.cal-week-date-meta {
+  min-height: 16px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cal-week-summary {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.cal-week-summary-empty { color: var(--text-muted); }
+
+.cal-week-total {
+  min-width: 38px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
 
 .cal-week-today-badge {
   display: inline-flex;
@@ -3004,8 +3132,137 @@ details[open] > summary .evidence-source-chevron {
 
 .cal-week-times { font-size: 11px; color: var(--text-muted); white-space: nowrap; text-align: right; }
 
+/* Shared History toolbar and overview */
+.history-page-header { margin-bottom: 12px; }
+
+.history-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.history-period-nav {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-period-nav .cal-nav-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-today-button {
+  min-height: 40px;
+  padding: 0 14px;
+  flex-shrink: 0;
+}
+
+.history-view-panel { min-width: 0; }
+
+.history-overview-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(260px, 0.8fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.history-day-preview {
+  position: sticky;
+  top: 18px;
+  min-width: 0;
+}
+
+.history-preview-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.history-preview-heading h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.history-preview-date {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-preview-total {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border-radius: 99px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.history-preview-timeline .empty-state { padding: 24px 8px; }
+.history-preview-timeline .empty-state svg { width: 42px; height: 36px; }
+
+.history-preview-action {
+  width: 100%;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 14px;
+}
+
 /* Day view */
-.cal-day { /* no extra */ }
+.cal-day {
+  display: grid;
+  gap: 10px;
+}
+
+.history-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+.history-filter-row .filter-chip { min-height: 40px; }
+.history-day-timeline-card { min-width: 0; }
+
+@media (max-width: 900px) {
+  .history-overview-grid { grid-template-columns: minmax(0, 1fr); }
+  .history-day-preview { position: static; }
+}
+
+@media (max-width: 720px) {
+  .history-toolbar { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .cal-view-switcher { width: 100%; }
+  .cal-view-btn { flex: 1; padding-inline: 8px; }
+  .history-period-nav { gap: 5px; }
+  .history-period-nav .cal-nav-title { font-size: 13px; }
+  .history-today-button { padding-inline: 10px; }
+  .cal-month { padding: 12px 8px; }
+  .cal-day-cell { min-height: 60px; padding-inline: 1px; }
+  .cal-week-row { grid-template-columns: minmax(100px, auto) minmax(0, 1fr) auto; padding: 9px 10px; gap: 7px; }
+  .timeline-delete-confirm { flex-wrap: wrap; justify-content: flex-end; }
+}
+
+@media (max-width: 520px) {
+  .cal-week-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .cal-week-summary { grid-column: 1 / -1; grid-row: 2; }
+  .cal-week-total { grid-column: 2; grid-row: 1; }
+}
 
 /* ── Festive & sky calendar indicators (milestones / guidance) ── */
 .cal-indicator-festive {

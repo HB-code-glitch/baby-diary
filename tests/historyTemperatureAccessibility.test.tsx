@@ -33,9 +33,9 @@ describe('history temperature-record accessibility', () => {
   })
 
   it.each([
-    { locale: 'ko', temperatureLabel: '체온 기록', weekLabel: '주' },
-    { locale: 'ja', temperatureLabel: '体温記録', weekLabel: '週' },
-  ])('includes $locale temperature presence in month and week accessible names', async ({ locale, temperatureLabel, weekLabel }) => {
+    { locale: 'ko', temperatureLabel: '체온 기록', weekLabel: '주간', countLabel: '1건' },
+    { locale: 'ja', temperatureLabel: '体温記録', weekLabel: '週間', countLabel: '1件' },
+  ])('includes $locale temperature presence in month and week accessible names', async ({ locale, temperatureLabel, weekLabel, countLabel }) => {
     const recordedAt = new Date()
     recordedAt.setHours(10, 30, 0, 0)
     const timestamp = recordedAt.toISOString()
@@ -59,9 +59,12 @@ describe('history temperature-record accessibility', () => {
 
     const dateLabel = format(recordedAt, 'yyyy-MM-dd')
     const monthButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.cal-day-cell'))
-    const recordedDay = monthButtons.find(button => accessibleName(button) === `${dateLabel} ${temperatureLabel}`)
+    const recordedDay = monthButtons.find(button => {
+      const name = accessibleName(button)
+      return name.includes(dateLabel) && name.includes(countLabel) && name.includes(temperatureLabel)
+    })
     expect(recordedDay).toBeDefined()
-    expect(monthButtons.some(button => /^\d{4}-\d{2}-\d{2}$/.test(accessibleName(button)))).toBe(true)
+    expect(monthButtons.some(button => accessibleName(button).includes(locale === 'ja' ? '記録なし' : '기록 없음'))).toBe(true)
 
     const weekSwitcher = Array.from(container.querySelectorAll<HTMLButtonElement>('.cal-view-btn'))
       .find(button => accessibleName(button) === weekLabel)!
