@@ -459,4 +459,81 @@ describe('main-process baby-info append-only journal', () => {
       winner: item,
     })
   })
+
+  it('fails closed after torn-tail truncation succeeds but its fsync cannot confirm durability', () => {
+    const confirmed = mutation(70_004, 'family-torn')
+    const candidate = mutation(70_005, 'family-torn')
+    new BabyInfoJournal(tmpDir).ingest('family-torn', [confirmed], [])
+
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    fs.appendFileSync(journalPath, '{"version":1,"type":"mutation"')
+
+    const realOpen = fs.openSync.bind(fs)
+    const targets = new Map<number, string>()
+    let truncationCompleted = false
+    let injectTruncateFsyncFailure = true
+    let journalWrites = 0
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, String(target))
+        return fd
+      },
+      writeSync(fd, buffer, offset, length, position) {
+        if (targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) journalWrites += 1
+        return fs.writeSync(fd, buffer, offset, length, position)
+      },
+      ftruncateSync(fd, length) {
+        fs.ftruncateSync(fd, length)
+        if (targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) truncationCompleted = true
+      },
+      fsyncSync(fd) {
+        if (injectTruncateFsyncFailure
+          && truncationCompleted
+          && targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          injectTruncateFsyncFailure = false
+          throw new Error('injected torn-tail fsync failure')
+        }
+        fs.fsyncSync(fd)
+      },
+      closeSync(fd) {
+        targets.delete(fd)
+        fs.closeSync(fd)
+      },
+    }
+    const journal = new (BabyInfoJournal as unknown as new (
+      root: string,
+      options: { durableFs: DurableFileOps },
+    ) => BabyInfoJournal)(tmpDir, { durableFs })
+
+    let caught: unknown
+    try { journal.ingest('family-torn', [candidate], []) } catch (error) { caught = error }
+
+    expect(caught).toMatchObject({ code: 'DURABLE_TRUNCATE_UNCERTAIN' })
+    expect(journalWrites).toBe(0)
+    expect(journal.getSummary('family-torn')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: confirmed,
+    })
+    expect(() => journal.listPending('family-torn', { limit: 10 }))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+    expect(() => journal.ingest('family-torn', [candidate], []))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+    expect(journalWrites).toBe(0)
+
+    const restarted = new BabyInfoJournal(tmpDir)
+    expect(restarted.getSummary('family-torn')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: confirmed,
+    })
+    restarted.ingest('family-torn', [candidate], [])
+    expect(restarted.getSummary('family-torn')).toMatchObject({
+      mutationCount: 2,
+      pendingCount: 2,
+      winner: candidate,
+    })
+  })
 })

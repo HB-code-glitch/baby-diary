@@ -27,6 +27,7 @@ import {
 import {
   appendDurableFileSync,
   isDurableAppendUncertainError,
+  isDurableTruncateUncertainError,
   truncateDurableFileSync,
   type DurableFileOps,
   type DurableWriteOptions,
@@ -330,7 +331,9 @@ export class BabyInfoJournal {
       // The durable primitive either restored the exact pre-append prefix or
       // explicitly reported that it could not confirm rollback. Never ingest
       // bytes from the failed attempt into this process's memory.
-      if (isDurableAppendUncertainError(error)) this.storageUncertain = true
+      if (isDurableAppendUncertainError(error) || isDurableTruncateUncertainError(error)) {
+        this.storageUncertain = true
+      }
       throw error
     }
     for (const record of records) this.applyRecord(record)

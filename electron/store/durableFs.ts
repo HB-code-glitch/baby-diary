@@ -57,6 +57,30 @@ export function isDurableAppendUncertainError(error: unknown): error is DurableA
       && (error as { code?: unknown }).code === 'DURABLE_APPEND_UNCERTAIN')
 }
 
+export class DurableTruncateUncertainError extends Error {
+  readonly code = 'DURABLE_TRUNCATE_UNCERTAIN' as const
+
+  constructor(
+    readonly target: string,
+    readonly truncatedLength: number,
+    readonly syncError: unknown,
+    readonly closeError?: unknown,
+  ) {
+    super(
+      `Durable truncation changed the file but could not confirm durability: ${syncError instanceof Error ? syncError.message : String(syncError)}`,
+    )
+    this.name = 'DurableTruncateUncertainError'
+    Object.assign(this, { cause: syncError })
+  }
+}
+
+export function isDurableTruncateUncertainError(error: unknown): error is DurableTruncateUncertainError {
+  return error instanceof DurableTruncateUncertainError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'DURABLE_TRUNCATE_UNCERTAIN')
+}
+
 function asBuffer(data: string | Uint8Array): Buffer {
   return typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)
 }
@@ -189,11 +213,41 @@ export function truncateDurableFileSync(
   const ops = options.fs ?? DEFAULT_OPS
   const platform = options.platform ?? process.platform
   const fd = ops.openSync(target, 'r+')
+
+  let truncationCompleted = false
+  let fileSyncCompleted = false
+  let operationFailed = false
+  let operationError: unknown
   try {
     ops.ftruncateSync(fd, length)
+    truncationCompleted = true
     ops.fsyncSync(fd)
-  } finally {
+    fileSyncCompleted = true
+  } catch (error) {
+    operationFailed = true
+    operationError = error
+  }
+
+  let closeFailed = false
+  let closeError: unknown
+  try {
     ops.closeSync(fd)
+  } catch (error) {
+    closeFailed = true
+    closeError = error
+  }
+
+  if (operationFailed || closeFailed) {
+    if (truncationCompleted && !fileSyncCompleted) {
+      throw new DurableTruncateUncertainError(
+        target,
+        length,
+        operationError,
+        closeError,
+      )
+    }
+    if (operationFailed) throw operationError
+    throw closeError
   }
   return {
     fileSynced: true,
