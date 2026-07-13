@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   addDays,
   addMonths,
@@ -30,6 +30,7 @@ import { getMilestones, type Milestone } from '../lib/milestones'
 import { useAppStore } from '../store/useAppStore'
 import type { DiaryEvent, EventType } from '../../shared/types'
 import { compareEventsNewestFirst, eventTimestampMs } from '../lib/eventTime'
+import { useProgressiveList } from '../lib/useProgressiveList'
 
 type CalendarView = 'month' | 'week' | 'day'
 type Translate = ReturnType<typeof useTranslation>['t']
@@ -454,6 +455,67 @@ interface DayViewProps {
   birthdate?: string
 }
 
+interface ProgressiveDayTimelineProps {
+  events: readonly DiaryEvent[]
+  emptyTitle: string
+  emptySub: string
+}
+
+function ProgressiveDayTimeline({ events, emptyTitle, emptySub }: ProgressiveDayTimelineProps) {
+  const timelineCardRef = useRef<HTMLDivElement | null>(null)
+  const loadMoreFocusTarget = useRef<string | null>(null)
+  const {
+    visibleItems,
+    remainingCount,
+    canLoadMore,
+    nextBatchCount,
+    loadMore,
+  } = useProgressiveList(events)
+  const { t } = useTranslation()
+
+  useLayoutEffect(() => {
+    const targetId = loadMoreFocusTarget.current
+    if (!targetId) return
+    loadMoreFocusTarget.current = null
+    const targetItem = Array.from(
+      timelineCardRef.current?.querySelectorAll<HTMLElement>('.timeline-item[data-event-id]') ?? [],
+    ).find(item => item.dataset.eventId === targetId)
+    const target = targetItem?.querySelector<HTMLElement>('[data-event-action="edit"]')
+      ?? timelineCardRef.current?.querySelector<HTMLElement>('[data-timeline-region]')
+    target?.focus({ preventScroll: true })
+  }, [visibleItems.length])
+
+  const handleLoadMore = () => {
+    loadMoreFocusTarget.current = events[visibleItems.length]?.id ?? null
+    loadMore()
+  }
+
+  return (
+    <div ref={timelineCardRef} className="card history-day-timeline-card">
+      <EventTimeline
+        events={visibleItems}
+        showAuthor
+        editable
+        emptyTitle={emptyTitle}
+        emptySub={emptySub}
+      />
+      {canLoadMore && (
+        <div className="progressive-list-footer">
+          <button
+            type="button"
+            className="btn-secondary progressive-load-more"
+            data-list-load-more="history-day"
+            data-list-remaining={remainingCount}
+            onClick={handleLoadMore}
+          >
+            {t('history.loadMore', { count: nextBatchCount })}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DayView({
   selectedDate,
   eventsByDay,
@@ -550,15 +612,12 @@ function DayView({
         </div>
       )}
 
-      <div className="card history-day-timeline-card">
-        <EventTimeline
-          events={filteredEvents}
-          showAuthor
-          editable
-          emptyTitle={t('history.dayEmptyTitle')}
-          emptySub={t('history.dayEmptySub')}
-        />
-      </div>
+      <ProgressiveDayTimeline
+        key={`${dayString}:${activeFilter ?? 'all'}`}
+        events={filteredEvents}
+        emptyTitle={t('history.dayEmptyTitle')}
+        emptySub={t('history.dayEmptySub')}
+      />
     </div>
   )
 }

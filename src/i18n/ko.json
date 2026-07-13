@@ -238,7 +238,8 @@
     "previewEmptyTitle": "이 날은 아직 기록이 없어요",
     "previewEmptySub": "날짜를 선택해 기록을 살펴보세요",
     "dayEmptyTitle": "선택한 날짜에 기록이 없어요",
-    "dayEmptySub": "다른 날짜를 선택해 기록을 확인해보세요"
+    "dayEmptySub": "다른 날짜를 선택해 기록을 확인해보세요",
+    "loadMore": "기록 더 보기 ({{count}}개)"
   },
   "stats": {
     "title": "통계",

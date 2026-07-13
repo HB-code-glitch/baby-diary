@@ -238,7 +238,8 @@
     "previewEmptyTitle": "この日はまだ記録がありません",
     "previewEmptySub": "日付を選んで記録を確認できます",
     "dayEmptyTitle": "選択した日の記録はありません",
-    "dayEmptySub": "別の日を選んで記録を確認してください"
+    "dayEmptySub": "別の日を選んで記録を確認してください",
+    "loadMore": "さらに表示（{{count}}件）"
   },
   "stats": {
     "title": "グラフ",
