@@ -168,8 +168,9 @@ function SignedOutView() {
         </span>
       </div>
 
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <form data-sync-auth-form={mode} onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <input
+          data-sync-email
           type="email"
           className="input-field"
           placeholder={t('sync.emailPlaceholder')}
@@ -179,6 +180,7 @@ function SignedOutView() {
           autoComplete="email"
         />
         <input
+          data-sync-password
           type="password"
           className="input-field"
           placeholder={mode === 'signup' ? t('sync.passwordSignupPlaceholder') : t('sync.passwordPlaceholder')}
@@ -203,6 +205,7 @@ function SignedOutView() {
             fontWeight: 600,
           }}>
             <input
+              data-sync-keep-logged-in
               type="checkbox"
               name="keepLoggedIn"
               checked={keepLoggedIn}
@@ -237,6 +240,7 @@ function SignedOutView() {
           </div>
         )}
         <button
+          data-sync-submit
           type="submit"
           className="btn-primary"
           disabled={busy}
@@ -247,6 +251,7 @@ function SignedOutView() {
       </form>
 
       <button
+        data-sync-switch-mode
         onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(null) }}
         style={{
           background: 'none', border: 'none', cursor: 'pointer',
@@ -357,6 +362,7 @@ function NoFamilyView() {
       {mode === 'none' && (
         <div style={{ display: 'flex', gap: 8 }}>
           <button
+            data-sync-family-choice="create"
             className="card"
             onClick={() => setMode('create')}
             style={{
@@ -373,6 +379,7 @@ function NoFamilyView() {
             </span>
           </button>
           <button
+            data-sync-family-choice="join"
             className="card"
             onClick={() => setMode('join')}
             style={{
@@ -404,6 +411,7 @@ function NoFamilyView() {
           )}
           <div style={{ display: 'flex', gap: 8 }}>
             <button
+              data-sync-family-submit="create"
               className="btn-primary"
               onClick={handleCreate}
               disabled={busy}
@@ -425,6 +433,7 @@ function NoFamilyView() {
       {mode === 'join' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <input
+            data-sync-invite-code-input
             type="text"
             className="input-field"
             placeholder={t('sync.inviteCodePlaceholder')}
@@ -441,6 +450,7 @@ function NoFamilyView() {
           )}
           <div style={{ display: 'flex', gap: 8 }}>
             <button
+              data-sync-family-submit="join"
               className="btn-primary"
               onClick={handleJoin}
               disabled={busy || inviteCode.trim().length !== 6}
@@ -543,7 +553,7 @@ function OnlineView({ detail }: { detail: string }) {
         }}>
           <div style={{ fontSize: 11, color: 'var(--stone-400)', fontWeight: 500 }}>{t('sync.inviteCodeLabel')}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <code style={{
+            <code data-sync-invite-code-value style={{
               fontSize: 18, fontWeight: 700, color: 'var(--stone-700)',
               letterSpacing: '0.2em', flex: 1,
             }}>
@@ -618,7 +628,7 @@ function ErrorView({ detail }: { detail: string }) {
 // ────────────────────────────────────────────────────────────
 
 export function SyncSettingsSlot() {
-  const { status, detail } = useSyncStatus()
+  const { status, detail, pendingCount } = useSyncStatus()
   const { settings } = useAppStore()
   const { t } = useTranslation()
 
@@ -695,6 +705,8 @@ export function SyncSettingsSlot() {
 
   return (
     <div
+      data-sync-state={status}
+      data-sync-pending-count={pendingCount}
       style={{
         background: 'var(--cream-50)',
         border: '1px solid var(--stone-200)',

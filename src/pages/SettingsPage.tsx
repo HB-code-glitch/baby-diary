@@ -529,7 +529,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           <AgeGuidancePanel birthdate={birthdate} variant="settings" />
 
           {/* Sync section */}
-          <div data-tour="settings-sync">
+          <div data-tour="settings-sync" data-sync-settings>
             <DisclosureSection
               title={t('settings.syncSection')}
               summary={syncSummary}

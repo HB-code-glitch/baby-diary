@@ -19,7 +19,9 @@ const firebase = vi.hoisted(() => {
     initializeFirestore: vi.fn(() => db),
     persistentLocalCache: vi.fn((options: unknown) => options),
     persistentMultipleTabManager: vi.fn(() => ({ type: 'multi-tab' })),
+    connectFirestoreEmulator: vi.fn(),
     getAuth: vi.fn(() => auth),
+    connectAuthEmulator: vi.fn(),
     setPersistence: vi.fn(async () => undefined),
     signInWithEmailAndPassword: vi.fn(async () => ({ user: { uid: 'login-user' } })),
     createUserWithEmailAndPassword: vi.fn(async () => ({ user: { uid: 'signup-user' } })),
@@ -36,10 +38,12 @@ vi.mock('firebase/firestore', () => ({
   initializeFirestore: firebase.initializeFirestore,
   persistentLocalCache: firebase.persistentLocalCache,
   persistentMultipleTabManager: firebase.persistentMultipleTabManager,
+  connectFirestoreEmulator: firebase.connectFirestoreEmulator,
 }))
 
 vi.mock('firebase/auth', () => ({
   getAuth: firebase.getAuth,
+  connectAuthEmulator: firebase.connectAuthEmulator,
   setPersistence: firebase.setPersistence,
   browserLocalPersistence: firebase.local,
   browserSessionPersistence: firebase.session,

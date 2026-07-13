@@ -121,6 +121,8 @@ export function EventTimeline({
           return (
             <div
               key={`${event.id}-${event.rev}`}
+              data-event-id={event.id}
+              data-event-rev={event.rev}
               className="timeline-item stagger-mount"
               style={{ '--i': i } as React.CSSProperties}
             >
@@ -185,6 +187,7 @@ export function EventTimeline({
                         {t('timeline.cancelDelete')}
                       </button>
                       <button
+                        data-event-action="confirm-delete"
                         type="button"
                         className="timeline-confirm-button timeline-confirm-button-danger"
                         onClick={() => handleDelete(event)}
@@ -195,6 +198,7 @@ export function EventTimeline({
                   ) : (
                     <>
                       <button
+                        data-event-action="edit"
                         type="button"
                         className="timeline-action-button"
                         onClick={() => setEditingAt(event)}
@@ -207,6 +211,7 @@ export function EventTimeline({
                         <IconPencil size={15} color="currentColor" />
                       </button>
                       <button
+                        data-event-action="delete"
                         ref={button => {
                           if (button) deleteButtonRefs.current.set(event.id, button)
                           else deleteButtonRefs.current.delete(event.id)

@@ -25,6 +25,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
 
   return (
     <div
+      data-time-edit-modal
       style={{
         position: 'fixed',
         inset: 0,
@@ -53,6 +54,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
 
         <div className="label">{t('timeEdit.label')}</div>
         <input
+          data-time-edit-input
           type="datetime-local"
           className="input-field"
           value={value}
@@ -62,7 +64,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button className="btn-secondary" onClick={onClose}>{t('timeEdit.cancel')}</button>
-          <button className="btn-primary" onClick={handleConfirm}>{t('timeEdit.confirm')}</button>
+          <button data-time-edit-action="confirm" className="btn-primary" onClick={handleConfirm}>{t('timeEdit.confirm')}</button>
         </div>
       </div>
     </div>

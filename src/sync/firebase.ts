@@ -16,6 +16,7 @@ import type {
   UserCredential,
 } from 'firebase/auth'
 import { AppSettings } from '../../shared/types'
+import { ipc } from '../lib/ipc'
 
 const APP_NAME = 'baby-diary'
 
@@ -45,17 +46,32 @@ export async function initFirebase(
     return { db: _db, auth: _auth }
   }
 
+  // The main process exposes emulator endpoints only for an explicitly
+  // isolated E2E profile. Validate before initializeApp so a malformed test
+  // configuration can never fall through to production Firebase.
+  const emulator = await ipc.getFirebaseEmulator()
+  if (emulator && !emulator.enabled) {
+    throw new Error(`Firebase emulator configuration rejected: ${emulator.reason}`)
+  }
+  if (emulator?.enabled && config.projectId !== emulator.projectId) {
+    throw new Error(
+      `Firebase emulator requires project ${emulator.projectId}; received ${config.projectId}`,
+    )
+  }
+
   // Dynamic imports — firebase chunk is loaded on demand
   const { initializeApp, getApps, deleteApp } = await import('firebase/app')
   const {
     initializeFirestore,
     persistentLocalCache,
     persistentMultipleTabManager,
+    connectFirestoreEmulator,
   } = await import('firebase/firestore')
   const {
     getAuth,
     setPersistence,
     browserLocalPersistence,
+    connectAuthEmulator,
   } = await import('firebase/auth')
 
   // 기존 앱이 있으면 삭제 후 재생성 (설정 변경 시)
@@ -76,9 +92,24 @@ export async function initFirebase(
 
   const auth = getAuth(app)
 
-  // Make session restoration deterministic across macOS and Windows.
-  // Do not expose a half-initialized auth instance if persistence setup fails.
+  // Emulator connectors must run before any Auth/Firestore operation. Keep
+  // connector and persistence setup in one atomic block so a failure cannot
+  // leave a cached half-initialized app behind.
   try {
+    if (emulator?.enabled) {
+      connectAuthEmulator(
+        auth,
+        `http://${emulator.authHost}:${emulator.authPort}`,
+        { disableWarnings: true },
+      )
+      connectFirestoreEmulator(
+        db,
+        emulator.firestoreHost,
+        emulator.firestorePort,
+      )
+    }
+
+    // Make session restoration deterministic across macOS and Windows.
     await setPersistence(auth, browserLocalPersistence)
   } catch (error) {
     await deleteApp(app).catch(() => undefined)

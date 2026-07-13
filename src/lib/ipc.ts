@@ -1,10 +1,11 @@
-import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult } from '../../shared/types'
+import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult, FirebaseEmulatorBridge } from '../../shared/types'
 import type { HealthEvidenceSourceId } from '../../shared/healthEvidence'
 import { getEvidenceSourceById } from '../../shared/healthEvidence'
 
 declare global {
   interface Window {
     babyDiary: {
+      getFirebaseEmulator: () => Promise<FirebaseEmulatorBridge | null>
       openEvidenceSource: (sourceId: HealthEvidenceSourceId) => Promise<void>
       listEvents: () => Promise<DiaryEvent[]>
       appendEvent: (event: DiaryEvent) => Promise<'ok' | 'duplicate' | 'error'>
@@ -69,6 +70,8 @@ function mockMerge(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
 }
 
 const mockBabyDiary: Window['babyDiary'] = {
+  getFirebaseEmulator: async () => null,
+
   openEvidenceSource: async (sourceId: HealthEvidenceSourceId): Promise<void> => {
     const source = getEvidenceSourceById(sourceId)
     if (!source) throw new Error('Unknown health evidence source')
@@ -202,6 +205,8 @@ function getApi(): Window['babyDiary'] {
 }
 
 export const ipc = {
+  getFirebaseEmulator: (): Promise<FirebaseEmulatorBridge | null> =>
+    getApi().getFirebaseEmulator(),
   openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> =>
     getApi().openEvidenceSource(sourceId),
   listEvents:       (): Promise<DiaryEvent[]>    => getApi().listEvents(),

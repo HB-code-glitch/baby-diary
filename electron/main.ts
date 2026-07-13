@@ -9,6 +9,7 @@ import { DiaryEvent, AppSettings, ExportFormat, SavePdfResult } from '../shared/
 import { attachUpdaterWindow, setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
 import { registerEvidenceExternalLinkIPC } from './evidenceExternalLink'
 import { hardenBrowserWindow } from './windowSecurity'
+import { readFirebaseEmulatorBridge } from './firebaseEmulatorConfig'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 const rendererEntryPath = path.join(__dirname, '../../dist/index.html')
@@ -24,6 +25,11 @@ if (process.env.BABYDIARY_TEST_USERDATA) {
   // 이 줄을 바꾸면 부모가 쌓아온 기록 폴더와 연결이 끊긴다 — 절대 수정 금지.
   app.setPath('userData', path.join(app.getPath('appData'), 'baby-diary'))
 }
+
+// Test-only Firebase endpoints are parsed in the main process. The sandboxed
+// preload cannot import local runtime helpers, so it forwards this value over
+// a fixed IPC channel. Non-isolated production runs always receive null.
+const firebaseEmulatorBridge = readFirebaseEmulatorBridge(process.env)
 
 // F3: Prevent concurrent instances from writing to the same JSONL files simultaneously.
 // requestSingleInstanceLock() is synchronous and must be called before app is ready.
@@ -78,6 +84,8 @@ function createWindow(): void {
 
 function setupIPC(): void {
   registerEvidenceExternalLinkIPC(ipcMain, url => shell.openExternal(url))
+
+  ipcMain.handle('test:firebaseEmulator', async () => firebaseEmulatorBridge)
 
   // P20: Use cached getAll() instead of loadAll() on every IPC call.
   // loadAll() clears the index and re-scans disk — O(N) I/O per reconcile.

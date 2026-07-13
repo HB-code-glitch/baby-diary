@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult } from '../shared/types'
+import type { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult, FirebaseEmulatorBridge } from '../shared/types'
 import type { HealthEvidenceSourceId } from '../shared/healthEvidence'
 
 // Sandboxed preload scripts cannot require local runtime modules. Keep this
@@ -8,6 +8,9 @@ import type { HealthEvidenceSourceId } from '../shared/healthEvidence'
 const EVIDENCE_SOURCE_OPEN_CHANNEL = 'evidence:openSource' as const
 
 const babyDiaryAPI = {
+  getFirebaseEmulator: (): Promise<FirebaseEmulatorBridge | null> =>
+    ipcRenderer.invoke('test:firebaseEmulator'),
+
   openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> =>
     ipcRenderer.invoke(EVIDENCE_SOURCE_OPEN_CHANNEL, sourceId),
 

@@ -72,3 +72,17 @@ export interface DataInfo {
 export type ExportFormat = 'json' | 'csv'
 
 export type SavePdfResult = { saved: true; path: string } | { saved: false }
+
+export type FirebaseEmulatorBridge =
+  | {
+      enabled: true
+      projectId: 'demo-baby-diary'
+      authHost: string
+      authPort: 9099
+      firestoreHost: string
+      firestorePort: 8080
+    }
+  | {
+      enabled: false
+      reason: string
+    }

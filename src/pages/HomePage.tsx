@@ -1647,13 +1647,13 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const sleepBtnLabel = sleepRunning ? t('quickBtn.sleepRunning') : t('quickBtn.sleep')
 
   const quickBtns = [
-    { cls: 'quick-btn-circle quick-btn-circle-pee',     Icon: IconDrop,        label: t('quickBtn.pee'),     badge: '1', onClick: handlePee },
-    { cls: 'quick-btn-circle quick-btn-circle-poop',    Icon: IconPoop,        label: t('quickBtn.poop'),    badge: '2', onClick: handlePoop },
-    { cls: 'quick-btn-circle quick-btn-circle-temp',    Icon: IconThermometer, label: t('quickBtn.temp'),    badge: '3', onClick: (e: React.MouseEvent) => openPopover('temp', e) },
-    { cls: 'quick-btn-circle quick-btn-circle-breast',  Icon: IconHeart,       label: t('quickBtn.breast'),  badge: '4', onClick: (e: React.MouseEvent) => openPopover('breast', e) },
-    { cls: 'quick-btn-circle quick-btn-circle-formula', Icon: IconBottle,      label: t('quickBtn.formula'), badge: '5', onClick: (e: React.MouseEvent) => openPopover('formula', e) },
+    { type: 'pee',     cls: 'quick-btn-circle quick-btn-circle-pee',     Icon: IconDrop,        label: t('quickBtn.pee'),     badge: '1', onClick: handlePee },
+    { type: 'poop',    cls: 'quick-btn-circle quick-btn-circle-poop',    Icon: IconPoop,        label: t('quickBtn.poop'),    badge: '2', onClick: handlePoop },
+    { type: 'temp',    cls: 'quick-btn-circle quick-btn-circle-temp',    Icon: IconThermometer, label: t('quickBtn.temp'),    badge: '3', onClick: (e: React.MouseEvent) => openPopover('temp', e) },
+    { type: 'breast',  cls: 'quick-btn-circle quick-btn-circle-breast',  Icon: IconHeart,       label: t('quickBtn.breast'),  badge: '4', onClick: (e: React.MouseEvent) => openPopover('breast', e) },
+    { type: 'formula', cls: 'quick-btn-circle quick-btn-circle-formula', Icon: IconBottle,      label: t('quickBtn.formula'), badge: '5', onClick: (e: React.MouseEvent) => openPopover('formula', e) },
     { cls: `quick-btn-circle quick-btn-circle-sleep${sleepRunning ? ' quick-btn-running' : ''}`,
-      Icon: IconMoon, label: sleepBtnLabel, badge: '6', onClick: handleSleepButtonClick },
+      type: 'sleep', Icon: IconMoon, label: sleepBtnLabel, badge: '6', onClick: handleSleepButtonClick },
   ]
 
   return (
@@ -1702,13 +1702,14 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
       {/* ── Quick record banners ── */}
       <div className="quick-record-row" ref={quickRecordRef} id="quick-record-row" data-tour="quick-row">
-        {quickBtns.map(({ cls, Icon, label, badge, onClick }, i) => (
+        {quickBtns.map(({ type, cls, Icon, label, badge, onClick }, i) => (
           <div
             key={badge}
             className="quick-record-slot stagger-mount"
             style={{ '--i': i } as React.CSSProperties}
           >
             <button
+              data-quick-record={type}
               className={cls}
               onClick={onClick as React.MouseEventHandler}
             >
