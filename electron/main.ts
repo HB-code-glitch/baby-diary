@@ -1,14 +1,20 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
+import { pathToFileURL } from 'url'
 import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
 import { DiaryEvent, AppSettings, ExportFormat, SavePdfResult } from '../shared/types'
 import { attachUpdaterWindow, setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
 import { registerEvidenceExternalLinkIPC } from './evidenceExternalLink'
+import { hardenBrowserWindow } from './windowSecurity'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
+const rendererEntryPath = path.join(__dirname, '../../dist/index.html')
+const rendererEntryUrl = isDev
+  ? 'http://localhost:5173/'
+  : pathToFileURL(rendererEntryPath).toString()
 
 // E2E 전용: 환경변수가 설정된 경우 임시 디렉토리를 userData로 사용한다 (실 데이터 오염 방지).
 if (process.env.BABYDIARY_TEST_USERDATA) {
@@ -43,12 +49,14 @@ function createWindow(): void {
     minHeight: 640,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
     },
     title: 'Baby Diary',
     show: false,
   })
+  hardenBrowserWindow(mainWindow, rendererEntryUrl)
 
   attachUpdaterWindow(mainWindow)
 
@@ -56,7 +64,7 @@ function createWindow(): void {
     mainWindow.loadURL('http://localhost:5173')
     mainWindow.webContents.openDevTools()
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'))
+    mainWindow.loadFile(rendererEntryPath)
   }
 
   mainWindow.once('ready-to-show', () => {
@@ -201,17 +209,19 @@ function setupIPC(): void {
       show: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
       },
     })
+    hardenBrowserWindow(printWin, rendererEntryUrl)
 
     try {
       // 3. Load the same app at #/report -- shares the same preload+store hydration
       if (isDev) {
         await printWin.loadURL('http://localhost:5173/#/report')
       } else {
-        await printWin.loadFile(path.join(__dirname, '../../dist/index.html'), { hash: '/report' })
+        await printWin.loadFile(rendererEntryPath, { hash: '/report' })
       }
 
       // 4. MF-06: wait for report:ready IPC from renderer (store init + render done)

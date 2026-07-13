@@ -8,6 +8,7 @@ interface WorkflowStep {
   if?: string
   'continue-on-error'?: unknown
   env?: Record<string, string>
+  with?: Record<string, string | number>
 }
 
 interface WorkflowJob {
@@ -50,6 +51,7 @@ function parseWorkflow(source = workflowSource): ReleaseWorkflow {
 }
 
 const workflow = parseWorkflow()
+const REQUIRED_NODE_VERSION = '24.18.0'
 
 const PACKAGED_E2E_SPECS: PackagedE2ESpec[] = [
   {
@@ -116,6 +118,16 @@ function packagedE2EContractErrors(candidate: ReleaseWorkflow, spec: PackagedE2E
   return errors
 }
 
+function nodeRuntimeContractErrors(candidate: ReleaseWorkflow): string[] {
+  return Object.entries(candidate.jobs).flatMap(([jobName, job]) => {
+    const setupSteps = job.steps.filter(step => step.uses === 'actions/setup-node@v4')
+    if (setupSteps.length !== 1) return [`${jobName} must have exactly one setup-node step`]
+    return setupSteps[0].with?.['node-version'] === REQUIRED_NODE_VERSION
+      ? []
+      : [`${jobName} must use Node ${REQUIRED_NODE_VERSION}`]
+  })
+}
+
 describe('release workflow CI gates', () => {
   it('is valid YAML 1.2 and rejects duplicate mapping keys at nested levels', () => {
     expect(workflow.name).toBe('Build')
@@ -151,6 +163,20 @@ describe('release workflow CI gates', () => {
       'release-win',
       'release-mac',
     ]))
+  })
+
+  it('pins every CI and release job to the Electron 43 bundled Node runtime', () => {
+    expect(nodeRuntimeContractErrors(workflow)).toEqual([])
+  })
+
+  it('rejects reintroducing Node 20 into any workflow job', () => {
+    for (const jobName of Object.keys(workflow.jobs)) {
+      const mutatedWorkflow = structuredClone(workflow)
+      const setupNode = mutatedWorkflow.jobs[jobName].steps.find(step => step.uses === 'actions/setup-node@v4')
+      expect(setupNode).toBeDefined()
+      setupNode!.with = { ...setupNode!.with, 'node-version': '20' }
+      expect(nodeRuntimeContractErrors(mutatedWorkflow)).toContain(`${jobName} must use Node ${REQUIRED_NODE_VERSION}`)
+    }
   })
 
   it.each(PACKAGED_E2E_SPECS)('$jobName builds and launches the packaged platform app', spec => {
