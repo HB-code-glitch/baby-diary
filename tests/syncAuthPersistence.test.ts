@@ -19,6 +19,11 @@ const firebase = vi.hoisted(() => ({
   fbSignUp: vi.fn(),
   fbSignOut: vi.fn(),
   getFirebaseAuth: vi.fn(() => null),
+  preflightFirebasePersistence: vi.fn(async () => ({
+    version: 1,
+    configIdentity: 'test-config',
+    appName: 'baby-diary-test',
+  })),
 }))
 
 vi.mock('../src/sync/firebase', () => firebase)

@@ -22,6 +22,7 @@ async function flushMicrotasks(turns = 8): Promise<void> {
 }
 
 const harness = vi.hoisted(() => ({
+  preflightFirebasePersistence: vi.fn(),
   initFirebase: vi.fn(),
   teardownFirebase: vi.fn(),
   fbSignOut: vi.fn(),
@@ -39,6 +40,8 @@ const harness = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/sync/firebase', () => ({
+  preflightFirebasePersistence: (...args: unknown[]) =>
+    harness.preflightFirebasePersistence(...args),
   initFirebase: (...args: unknown[]) => harness.initFirebase(...args),
   teardownFirebase: (...args: unknown[]) => harness.teardownFirebase(...args),
   fbSignIn: vi.fn(),
@@ -148,6 +151,11 @@ describe('serialized sync lifecycle', () => {
     vi.clearAllMocks()
     localStorage.clear()
     harness.authListeners.clear()
+    harness.preflightFirebasePersistence.mockResolvedValue({
+      version: 1,
+      configIdentity: 'test-config',
+      appName: 'baby-diary-test',
+    })
     harness.authCallbacks.length = 0
     harness.emitCurrentUserOnSubscribe = false
     harness.snapshots.clear()
@@ -435,7 +443,7 @@ describe('serialized sync lifecycle', () => {
     await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
   })
 
-  it('restarts immediately while the replaced signed-in network read never resolves', async () => {
+  it('claims first, then restarts while the replaced signed-in network read never resolves', async () => {
     const userRead = deferred<never>()
     harness.getDoc.mockImplementationOnce(() => userRead.promise)
     const engine = await import('../src/sync/syncEngine')
@@ -446,11 +454,33 @@ describe('serialized sync lifecycle', () => {
     await vi.waitFor(() => expect(harness.getDoc).toHaveBeenCalledTimes(1))
 
     const restarting = engine.restartSync(config('project-B'), 'family-B')
-    expect(harness.authListeners.size).toBe(0)
+    expect(harness.authListeners.size).toBe(1)
     expect(harness.snapshots.size).toBe(0)
     await restarting
     await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
     expect(harness.initFirebase.mock.calls.at(-1)?.[0]).toMatchObject({ projectId: 'project-B' })
+  })
+
+  it('keeps the working runtime attached when a replacement persistence claim fails', async () => {
+    const engine = await import('../src/sync/syncEngine')
+    await engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
+    harness.initFirebase.mockClear()
+    harness.teardownFirebase.mockClear()
+    const replacementClaim = deferred<never>()
+    harness.preflightFirebasePersistence.mockReturnValueOnce(replacementClaim.promise)
+
+    const replacing = engine.restartSync(config('project-B'), 'family-B')
+    await flushMicrotasks()
+    expect(harness.authListeners.size).toBe(1)
+    expect(harness.initFirebase).not.toHaveBeenCalled()
+    expect(harness.teardownFirebase).not.toHaveBeenCalled()
+
+    replacementClaim.reject(new Error('replacement claim unavailable'))
+    await expect(replacing).rejects.toThrow('replacement claim unavailable')
+    expect(harness.authListeners.size).toBe(1)
+    expect(harness.initFirebase).not.toHaveBeenCalled()
+    expect(harness.teardownFirebase).not.toHaveBeenCalled()
   })
 
   it('finishes local stop even when Firebase teardown never resolves', async () => {
@@ -476,7 +506,7 @@ describe('serialized sync lifecycle', () => {
     harness.teardownFirebase.mockReturnValueOnce(deferred<void>().promise)
 
     const restarting = engine.restartSync(config('project-B'), 'family-B')
-    expect(harness.authListeners.size).toBe(0)
+    expect(harness.authListeners.size).toBe(1)
     await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(2), { timeout: 250 })
     await restarting
     await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))

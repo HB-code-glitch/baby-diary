@@ -20,6 +20,11 @@ import { registerEvidenceExternalLinkIPC } from './evidenceExternalLink'
 import { hardenBrowserWindow } from './windowSecurity'
 import { readFirebaseEmulatorBridge } from './firebaseEmulatorConfig'
 import { createSyncE2EGuard, readSyncE2EGuardConfig } from './syncE2EGuard'
+import {
+  FirebasePersistenceRegistry,
+  detectPreexistingFirebaseProfile,
+} from './store/firebasePersistenceRegistry'
+import { registerFirebasePersistenceIPC } from './firebasePersistenceIPC'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 const rendererEntryPath = path.join(__dirname, '../../dist/index.html')
@@ -59,6 +64,7 @@ let mainWindow: BrowserWindow | null = null
 let eventLog: EventLog
 let settingsStore: SettingsStore
 let backupManager: BackupManager
+let firebasePersistenceRegistry: FirebasePersistenceRegistry
 let settingsChangeSequence = 0
 let runtimeRecoveryLocked = false
 
@@ -281,6 +287,12 @@ function setupIPC(): void {
   registerEvidenceExternalLinkIPC(ipcMain, url => shell.openExternal(url))
 
   ipcMain.handle('test:firebaseEmulator', async () => firebaseEmulatorBridge)
+
+  registerFirebasePersistenceIPC(
+    ipcMain,
+    firebasePersistenceRegistry,
+    () => mainWindow,
+  )
 
   // P20: Use cached getAll() instead of loadAll() on every IPC call.
   // loadAll() clears the index and re-scans disk — O(N) I/O per reconcile.
@@ -569,6 +581,14 @@ app.on('second-instance', () => {
 app.whenReady().then(() => {
   syncE2EGuard?.installSessionGuard(session.defaultSession, rendererResourceRoot)
   const userDataPath = app.getPath('userData')
+  // Snapshot released-profile eligibility before current startup constructors can
+  // create settings/journal/backup files. The immutable registry then prevents
+  // every later restart from reclassifying a fresh profile as legacy.
+  const firebaseProfileEligibility = detectPreexistingFirebaseProfile(userDataPath)
+  firebasePersistenceRegistry = FirebasePersistenceRegistry.open(
+    userDataPath,
+    firebaseProfileEligibility,
+  )
 
   backupManager = new BackupManager(userDataPath)
   eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })

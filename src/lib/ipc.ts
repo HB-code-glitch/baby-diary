@@ -44,6 +44,11 @@ import {
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
 import { v4 as uuidv4 } from 'uuid'
+import {
+  getDigestFirebasePersistenceIdentity,
+  type FirebaseConfig,
+  type FirebasePersistenceClaim,
+} from '../../shared/firebasePersistence'
 
 export interface SettingsChangedPayload {
   sequence: number
@@ -54,6 +59,7 @@ declare global {
   interface Window {
     babyDiary: {
       getFirebaseEmulator: () => Promise<FirebaseEmulatorBridge | null>
+      claimFirebasePersistence: (config: FirebaseConfig) => Promise<FirebasePersistenceClaim>
       openEvidenceSource: (sourceId: HealthEvidenceSourceId) => Promise<void>
       listEvents: () => Promise<DiaryEvent[]>
       listEventMutations: () => Promise<DiaryEvent[]>
@@ -373,6 +379,14 @@ function mockCommit(rawOperation: unknown): BabyInfoSettingsCommitResult {
 
 const mockBabyDiary: Window['babyDiary'] = {
   getFirebaseEmulator: async () => null,
+  claimFirebasePersistence: async config => {
+    const identity = getDigestFirebasePersistenceIdentity(config)
+    return {
+      version: 1,
+      configIdentity: identity.configIdentity,
+      appName: identity.appName,
+    }
+  },
   openEvidenceSource: async (sourceId: HealthEvidenceSourceId): Promise<void> => {
     if (!getEvidenceSourceById(sourceId)) throw new Error('Unknown health evidence source')
     throw new Error('EVIDENCE_LINK_UNAVAILABLE')
@@ -538,6 +552,8 @@ export class BabyInfoCommitClientError extends Error {
 
 export const ipc = {
   getFirebaseEmulator: (): Promise<FirebaseEmulatorBridge | null> => getApi().getFirebaseEmulator(),
+  claimFirebasePersistence: (config: FirebaseConfig): Promise<FirebasePersistenceClaim> =>
+    getApi().claimFirebasePersistence(config),
   openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> => getApi().openEvidenceSource(sourceId),
   listEvents: (): Promise<DiaryEvent[]> => getApi().listEvents(),
   listEventMutations: (): Promise<DiaryEvent[]> => getApi().listEventMutations(),

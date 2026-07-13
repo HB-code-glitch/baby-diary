@@ -22,6 +22,10 @@ const emulatorBridge = vi.hoisted(() => ({
   getFirebaseEmulator: vi.fn<() => Promise<null>>(async () => null),
 }))
 
+const persistenceBridge = vi.hoisted(() => ({
+  claimFirebasePersistence: vi.fn(),
+}))
+
 const firebase = vi.hoisted(() => {
   type MockConfig = {
     apiKey: string
@@ -178,6 +182,8 @@ const firebase = vi.hoisted(() => {
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
     getFirebaseEmulator: () => emulatorBridge.getFirebaseEmulator(),
+    claimFirebasePersistence: (config: unknown) =>
+      persistenceBridge.claimFirebasePersistence(config),
   },
 }))
 
@@ -224,6 +230,16 @@ describe('Firebase auth persistence and service leases', () => {
     firebase.reset()
     emulatorBridge.getFirebaseEmulator.mockReset()
     emulatorBridge.getFirebaseEmulator.mockResolvedValue(null)
+    persistenceBridge.claimFirebasePersistence.mockReset()
+    persistenceBridge.claimFirebasePersistence.mockImplementation(async firebaseConfig => {
+      const identity = await import('../shared/firebasePersistence')
+        .then(module => module.getDigestFirebasePersistenceIdentity(firebaseConfig))
+      return {
+        version: 1,
+        configIdentity: identity.configIdentity,
+        appName: identity.appName,
+      }
+    })
   })
 
   it('preserves a restored session choice during renderer reload', async () => {
@@ -486,10 +502,73 @@ describe('Firebase auth persistence and service leases', () => {
     const secondName = firebase.initializeApp.mock.calls.at(-1)?.[1]
     const secondIdentity = module.getFirebasePersistenceIdentity({ ...config })
 
-    expect(firstName).toMatch(/^baby-diary-[a-f0-9]{16}$/)
+    expect(firstName).toMatch(/^baby-diary-[a-f0-9]{64}$/)
     expect(secondName).toBe(firstName)
     expect(secondIdentity).toEqual(firstIdentity)
     expect(String(firstName)).not.toContain('owner')
+  })
+
+  it('uses the main-owned v0.3.8 claim before any Firebase SDK initialization', async () => {
+    const configIdentity = JSON.stringify({
+      apiKey: config.apiKey,
+      authDomain: config.authDomain,
+      projectId: config.projectId,
+      storageBucket: config.storageBucket,
+      messagingSenderId: config.messagingSenderId,
+      appId: config.appId,
+    })
+    persistenceBridge.claimFirebasePersistence.mockResolvedValueOnce({
+      version: 1,
+      configIdentity,
+      appName: 'baby-diary',
+    })
+    const { initFirebase } = await import('../src/sync/firebase')
+
+    await initFirebase(config, 'legacy-owner')
+
+    expect(persistenceBridge.claimFirebasePersistence).toHaveBeenCalledWith(config)
+    expect(firebase.initializeApp).toHaveBeenCalledWith(config, 'baby-diary')
+    expect(persistenceBridge.claimFirebasePersistence.mock.invocationCallOrder[0]).toBeLessThan(
+      firebase.initializeApp.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('creates no digest Firebase app when registry publication/claim fails', async () => {
+    persistenceBridge.claimFirebasePersistence.mockRejectedValueOnce(
+      new Error('registry publication failed'),
+    )
+    const { initFirebase } = await import('../src/sync/firebase')
+
+    await expect(initFirebase(config, 'claim-failure')).rejects.toThrow(
+      'registry publication failed',
+    )
+    expect(firebase.initializeApp).not.toHaveBeenCalled()
+    expect(firebase.initializeFirestore).not.toHaveBeenCalled()
+    expect(firebase.getAuth).not.toHaveBeenCalled()
+  })
+
+  it('keeps the working runtime and performs no cleanup when a replacement claim fails', async () => {
+    const module = await import('../src/sync/firebase')
+    const working = await module.initFirebase(config, 'working-owner')
+    expect(working).not.toBeNull()
+    firebase.initializeApp.mockClear()
+    firebase.initializeFirestore.mockClear()
+    firebase.terminate.mockClear()
+    firebase.deleteApp.mockClear()
+    persistenceBridge.claimFirebasePersistence.mockRejectedValueOnce(
+      new Error('replacement claim unavailable'),
+    )
+
+    await expect(module.initFirebase(configFor('project-b'), 'replacement-owner'))
+      .rejects.toThrow('replacement claim unavailable')
+
+    expect(module.getDb()).toBe(working?.db)
+    expect(module.getFirebaseAuth()).toBe(working?.auth)
+    expect(firebase.initializeApp).not.toHaveBeenCalled()
+    expect(firebase.initializeFirestore).not.toHaveBeenCalled()
+    expect(firebase.terminate).not.toHaveBeenCalled()
+    expect(firebase.deleteApp).not.toHaveBeenCalled()
+    expect(firebase.apps).toHaveLength(1)
   })
 
   it('keeps omitted keepLoggedIn as a local-persistence sign-in', async () => {

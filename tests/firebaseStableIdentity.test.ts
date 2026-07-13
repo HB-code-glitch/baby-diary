@@ -28,6 +28,18 @@ afterEach(async () => {
 })
 
 describe('stable Firebase SDK persistence identity', () => {
+  it('uses the released v0.3.8 app name as the actual Auth and Firestore persistence key', () => {
+    const app = initializeApp(config, 'baby-diary')
+    createdNames.push(app.name)
+    const auth = getAuth(app)
+    const db = getFirestore(app)
+
+    expect(auth.name).toBe('baby-diary')
+    expect((db as unknown as { _persistenceKey: string })._persistenceKey).toBe('baby-diary')
+    expect(`firebase:authUser:${config.apiKey}:${auth.name}`)
+      .toBe(`firebase:authUser:${config.apiKey}:baby-diary`)
+  })
+
   it('matches the installed Auth and Firestore persistence-key inputs across module reloads', async () => {
     let firebaseModule = await import('../src/sync/firebase')
     const first = firebaseModule.getFirebasePersistenceIdentity(config)

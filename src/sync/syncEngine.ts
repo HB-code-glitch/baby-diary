@@ -49,8 +49,11 @@ import {
   fbSignUp,
   fbSignOut,
   getFirebaseAuth,
+  preflightFirebasePersistence,
   FirebaseConfig,
 } from './firebase'
+import type { FirebasePersistenceClaim } from '../../shared/firebasePersistence'
+import { DEFAULT_FIREBASE_CONFIG } from '../../shared/defaultFirebaseConfig'
 
 export {
   makeBabyInfoDocId,
@@ -275,6 +278,7 @@ let _state: SyncState = { status: 'no-config', detail: '', pendingCount: 0 }
  * _unsubAuth if the current generation still matches — preventing a stale
  * in-flight then() from overwriting a newer auth listener. */
 let _generation = 0
+let _configurationRequestVersion = 0
 
 interface InitializedFirebaseRuntime {
   config: FirebaseConfig
@@ -552,32 +556,18 @@ function generateInviteCode(): string {
  * Callers (useSyncLifecycle) already await ipc.getSettings() before calling
  * configure, so the async change is safe.
  *
- * Defense: if cfg is null/absent (e.g. older-exe-written settings with firebase:null),
- * import and use DEFAULT_FIREBASE_CONFIG so status never stalls at 'no-config'.
- * This mirrors the fallback already present in useSyncLifecycle but makes the engine
- * self-healing even when called directly with a null config.
+ * A null config resolves to the exact historical default. The main process must claim
+ * that config's immutable persistence namespace before the active runtime is detached;
+ * a rejected claim therefore leaves the current Auth/Firestore runtime untouched.
  */
 async function configureInternal(
-  cfg: FirebaseConfig | null,
+  effectiveCfg: FirebaseConfig,
   familyIdValue: string,
   generation: number,
   lease: PendingFirebaseInitialization,
+  persistenceClaim: FirebasePersistenceClaim,
 ): Promise<InitializedFirebaseRuntime | null> {
   const familyId = familyIdValue === '' ? '' : assertFamilyId(familyIdValue)
-  // Defensive fallback: a null config must never leave the engine at 'no-config'.
-  // Dynamically import DEFAULT_FIREBASE_CONFIG to avoid a circular-module issue
-  // (syncEngine ← useSync ← defaultFirebaseConfig is fine; direct import also OK here).
-  let effectiveCfg = cfg
-  if (!effectiveCfg) {
-    try {
-      const { DEFAULT_FIREBASE_CONFIG } = await import('./defaultFirebaseConfig')
-      if (!initializationLeaseIsCurrent(lease)) return null
-      effectiveCfg = DEFAULT_FIREBASE_CONFIG
-      console.warn('[syncEngine] configure: null config — falling back to DEFAULT_FIREBASE_CONFIG')
-    } catch {
-      // If the dynamic import somehow fails, fall through to old no-config path
-    }
-  }
 
   try {
     if (familyId && typeof ipc.getBabyInfoSummary === 'function') {
@@ -603,17 +593,11 @@ async function configureInternal(
     throw err
   }
 
-  if (!effectiveCfg) {
-    if (!initializationLeaseIsCurrent(lease)) return null
-    if (generation === _generation) {
-      _config = null
-      _familyId = familyId
-      setState({ status: 'no-config', detail: 'no firebase config', pendingCount: totalPendingCount() })
-    }
-    return null
-  }
-
-  const result = await initFirebase(effectiveCfg, `sync-${generation}`)
+  const result = await initFirebase(
+    effectiveCfg,
+    `sync-${generation}`,
+    persistenceClaim,
+  )
   if (!initializationLeaseIsCurrent(lease)) return null
   if (!result) {
     if (generation === _generation) {
@@ -643,10 +627,11 @@ function publishInitializedFirebaseRuntime(runtime: InitializedFirebaseRuntime):
 }
 
 function beginFirebaseInitialization(
-  cfg: FirebaseConfig | null,
+  cfg: FirebaseConfig,
   familyId: string,
   generation: number,
   startAfterInitialization: boolean,
+  persistenceClaim: FirebasePersistenceClaim,
 ): Promise<void> {
   const lease: PendingFirebaseInitialization = {
     generation,
@@ -655,7 +640,13 @@ function beginFirebaseInitialization(
     promise: Promise.resolve(null),
   }
   _pendingFirebaseInitialization = lease
-  const operation = configureInternal(cfg, familyId, generation, lease)
+  const operation = configureInternal(
+    cfg,
+    familyId,
+    generation,
+    lease,
+    persistenceClaim,
+  )
   lease.promise = operation
   const clearLease = () => {
     if (_pendingFirebaseInitialization === lease) _pendingFirebaseInitialization = null
@@ -664,14 +655,41 @@ function beginFirebaseInitialization(
   return operation.then(() => undefined)
 }
 
-/** Configure without allowing network initialization to block a newer lease. */
+interface PreparedFirebaseConfiguration {
+  config: FirebaseConfig
+  familyId: string
+  persistenceClaim: FirebasePersistenceClaim
+}
+
+async function prepareFirebaseConfiguration(
+  cfg: FirebaseConfig | null,
+  familyIdValue: string,
+): Promise<PreparedFirebaseConfiguration> {
+  const familyId = familyIdValue === '' ? '' : assertFamilyId(familyIdValue)
+  const config = cfg ?? DEFAULT_FIREBASE_CONFIG
+  const persistenceClaim = await preflightFirebasePersistence(config)
+  return { config, familyId, persistenceClaim }
+}
+
+/** Claim first; only the latest successful preflight may detach a working runtime. */
 export function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
-  supersedeActiveSignOut()
-  const generation = ++_generation
-  invalidateConfiguredRuntime(false)
-  setState({ status: 'detached', detail: 'reconfiguring sync', pendingCount: totalPendingCount() })
-  void stopRuntime(generation, false)
-  return beginFirebaseInitialization(cfg, familyId, generation, false)
+  const requestVersion = ++_configurationRequestVersion
+  return (async () => {
+    const prepared = await prepareFirebaseConfiguration(cfg, familyId)
+    if (requestVersion !== _configurationRequestVersion) return
+    supersedeActiveSignOut()
+    const generation = ++_generation
+    invalidateConfiguredRuntime(false)
+    setState({ status: 'detached', detail: 'reconfiguring sync', pendingCount: totalPendingCount() })
+    void stopRuntime(generation, false)
+    await beginFirebaseInitialization(
+      prepared.config,
+      prepared.familyId,
+      generation,
+      false,
+      prepared.persistenceClaim,
+    )
+  })()
 }
 
 /** 회원가입 (신규 사용자) */
@@ -690,6 +708,7 @@ export async function signIn(email: string, password: string, keepLoggedIn = tru
 
 /** 로그아웃. Local detach is immediate; success is published only after Auth confirms it. */
 export function signOutSync(): Promise<void> {
+  _configurationRequestVersion += 1
   supersedeActiveSignOut()
   const auth = _auth
   const pendingInitialization = !auth
@@ -1099,6 +1118,7 @@ async function stopRuntime(generation: number, publishState = true): Promise<voi
 
 /** 동기화 중단. Generation is invalidated synchronously. */
 export function stop(): Promise<void> {
+  _configurationRequestVersion += 1
   supersedeActiveSignOut()
   const generation = ++_generation
   invalidateConfiguredRuntime(false)
@@ -1109,14 +1129,22 @@ export function stop(): Promise<void> {
 
 /** Latest restart owns Firebase/listeners without awaiting any older network work. */
 export function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
-  supersedeActiveSignOut()
-  const generation = ++_generation
-  invalidateConfiguredRuntime(false)
-  setState({ status: 'detached', detail: 'sync restart detached', pendingCount: totalPendingCount() })
-  void stopRuntime(generation, false)
+  const requestVersion = ++_configurationRequestVersion
   return (async () => {
-    if (generation !== _generation) return
-    await beginFirebaseInitialization(cfg, familyId, generation, true)
+    const prepared = await prepareFirebaseConfiguration(cfg, familyId)
+    if (requestVersion !== _configurationRequestVersion) return
+    supersedeActiveSignOut()
+    const generation = ++_generation
+    invalidateConfiguredRuntime(false)
+    setState({ status: 'detached', detail: 'sync restart detached', pendingCount: totalPendingCount() })
+    void stopRuntime(generation, false)
+    await beginFirebaseInitialization(
+      prepared.config,
+      prepared.familyId,
+      generation,
+      true,
+      prepared.persistenceClaim,
+    )
     if (generation !== _generation) return
     await startInternal(generation)
   })()

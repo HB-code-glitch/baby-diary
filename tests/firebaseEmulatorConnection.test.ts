@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FirebaseEmulatorBridge } from '../shared/types'
+import { getDigestFirebasePersistenceIdentity } from '../shared/firebasePersistence'
 
 const FIREBASE_REGISTRY = Symbol.for('baby-diary.firebase.service-registry.v1')
 
@@ -77,6 +78,14 @@ function exposeBridge(value: FirebaseEmulatorBridge | null) {
     writable: true,
     value: {
       getFirebaseEmulator: vi.fn(async () => value),
+      claimFirebasePersistence: vi.fn(async config => {
+        const identity = getDigestFirebasePersistenceIdentity(config)
+        return {
+          version: 1,
+          configIdentity: identity.configIdentity,
+          appName: identity.appName,
+        }
+      }),
     },
   })
 }

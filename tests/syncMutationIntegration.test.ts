@@ -27,6 +27,11 @@ const harness = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/sync/firebase', () => ({
+  preflightFirebasePersistence: vi.fn(async () => ({
+    version: 1,
+    configIdentity: 'test-config',
+    appName: 'baby-diary-test',
+  })),
   initFirebase: vi.fn(async () => ({ auth: harness.auth, db: harness.db })),
   teardownFirebase: vi.fn(async () => undefined),
   fbSignIn: vi.fn(),

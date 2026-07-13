@@ -13,15 +13,21 @@ import type {
   Auth,
   UserCredential,
 } from 'firebase/auth'
-import type { AppSettings } from '../../shared/types'
 import { ipc } from '../lib/ipc'
+import {
+  canonicalFirebaseConfig,
+  getDigestFirebasePersistenceIdentity,
+  parseFirebasePersistenceClaim,
+  type FirebaseConfig,
+  type FirebasePersistenceClaim,
+} from '../../shared/firebasePersistence'
 
-const APP_NAME_PREFIX = 'baby-diary'
 const EMULATOR_CONNECTED = Symbol.for('baby-diary.firebase.emulator-connected')
 const FIREBASE_SERVICE_REGISTRY = Symbol.for('baby-diary.firebase.service-registry.v1')
 const MAX_REGISTRY_ENTRIES = 4
 
-export type FirebaseConfig = NonNullable<AppSettings['firebase']>
+export type { FirebaseConfig } from '../../shared/firebasePersistence'
+export { canonicalFirebaseConfig } from '../../shared/firebasePersistence'
 
 const FIREBASE_CONFIG_FIELDS = [
   'apiKey',
@@ -81,36 +87,26 @@ let _lease: FirebaseLease | null = null
 let _localRequestVersion = 0
 let _pendingConfigIdentity: string | null = null
 
-export function canonicalFirebaseConfig(config: FirebaseConfig): string {
-  return JSON.stringify(Object.fromEntries(
-    FIREBASE_CONFIG_FIELDS.map(field => [field, config[field]]),
-  ))
-}
-
-function fnv1a32(value: string, seed: number): string {
-  let hash = seed >>> 0
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash.toString(16).padStart(8, '0')
-}
-
 /** Stable inputs used by the installed Auth and Firestore persistence-key schemes. */
 export function getFirebasePersistenceIdentity(config: FirebaseConfig): {
   appName: string
   authUserKey: string
   firestorePersistenceKey: string
 } {
-  const canonical = canonicalFirebaseConfig(config)
-  const digest = fnv1a32(canonical, 0x811c9dc5)
-    + fnv1a32([...canonical].reverse().join(''), 0x9e3779b9)
-  const appName = `${APP_NAME_PREFIX}-${digest}`
+  const identity = getDigestFirebasePersistenceIdentity(config)
   return {
-    appName,
-    authUserKey: `firebase:authUser:${config.apiKey}:${appName}`,
-    firestorePersistenceKey: appName,
+    appName: identity.appName,
+    authUserKey: identity.authUserKey,
+    firestorePersistenceKey: identity.firestorePersistenceKey,
   }
+}
+
+/** Resolve and validate main-owned persistence ownership before any runtime is detached. */
+export async function preflightFirebasePersistence(
+  config: FirebaseConfig,
+): Promise<FirebasePersistenceClaim> {
+  const rawClaim = await ipc.claimFirebasePersistence(config)
+  return parseFirebasePersistenceClaim(rawClaim, config)
 }
 
 function existingAppMatchesConfig(app: FirebaseApp, config: FirebaseConfig): boolean {
@@ -570,6 +566,7 @@ async function acquireLeaseService(
 export async function initFirebase(
   config: FirebaseConfig | null,
   ownerToken = 'default',
+  preflightClaim?: FirebasePersistenceClaim,
 ): Promise<FirebaseService | null> {
   if (!config) return null
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(ownerToken)) {
@@ -577,7 +574,6 @@ export async function initFirebase(
   }
 
   const configIdentity = canonicalFirebaseConfig(config)
-  const identity = getFirebasePersistenceIdentity(config)
   const requestVersion = ++_localRequestVersion
   _pendingConfigIdentity = configIdentity
 
@@ -587,7 +583,11 @@ export async function initFirebase(
   }
 
   // Validate the renderer-provided emulator profile before releasing a working lease.
-  const emulator = await ipc.getFirebaseEmulator()
+  const [emulator, rawPersistenceClaim] = await Promise.all([
+    ipc.getFirebaseEmulator(),
+    preflightClaim ?? preflightFirebasePersistence(config),
+  ])
+  const persistenceClaim = parseFirebasePersistenceClaim(rawPersistenceClaim, config)
   if (requestVersion !== _localRequestVersion && _pendingConfigIdentity !== configIdentity) return null
   if (emulator && !emulator.enabled) {
     throw new Error(`Firebase emulator configuration rejected: ${emulator.reason}`)
@@ -603,7 +603,7 @@ export async function initFirebase(
     registry,
     config,
     configIdentity,
-    identity.appName,
+    persistenceClaim.appName,
     ownerToken,
   )
   const { entry, lease } = prepared
