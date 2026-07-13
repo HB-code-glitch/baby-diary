@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { format, parseISO } from 'date-fns'
 import { IconX } from './icons'
 import { useTranslation } from 'react-i18next'
@@ -17,6 +18,53 @@ const FOCUSABLE_SELECTOR = [
   'a[href]',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
+
+interface BackgroundInertLease {
+  references: number
+  previousInert: string | null
+  previousAriaHidden: string | null
+}
+
+const backgroundInertLeases = new Map<HTMLElement, BackgroundInertLease>()
+
+function restoreAttribute(element: HTMLElement, name: string, value: string | null) {
+  if (value === null) element.removeAttribute(name)
+  else element.setAttribute(name, value)
+}
+
+function acquireBackgroundInert(): () => void {
+  if (typeof document === 'undefined') return () => undefined
+  const background = document.querySelector<HTMLElement>('.app-shell')
+    ?? document.getElementById('root')
+  if (!background) return () => undefined
+
+  const activeLease = backgroundInertLeases.get(background)
+  if (activeLease) {
+    activeLease.references += 1
+  } else {
+    backgroundInertLeases.set(background, {
+      references: 1,
+      previousInert: background.getAttribute('inert'),
+      previousAriaHidden: background.getAttribute('aria-hidden'),
+    })
+    background.setAttribute('inert', '')
+    background.setAttribute('aria-hidden', 'true')
+  }
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const lease = backgroundInertLeases.get(background)
+    if (!lease) return
+    lease.references -= 1
+    if (lease.references > 0) return
+
+    backgroundInertLeases.delete(background)
+    restoreAttribute(background, 'inert', lease.previousInert)
+    restoreAttribute(background, 'aria-hidden', lease.previousAriaHidden)
+  }
+}
 
 export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalProps) {
   const { t } = useTranslation()
@@ -40,11 +88,13 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
 
   useEffect(() => {
     mountedRef.current = true
+    const releaseBackgroundInert = acquireBackgroundInert()
     inputRef.current?.focus()
     return () => {
       mountedRef.current = false
+      releaseBackgroundInert()
       const trigger = restoreFocusRef.current
-      if (trigger?.isConnected) trigger.focus()
+      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus()
     }
   }, [])
 
@@ -115,7 +165,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     }
   }
 
-  return (
+  const overlay = (
     <div
       data-time-edit-modal
       className="time-edit-backdrop"
@@ -188,4 +238,6 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
       </form>
     </div>
   )
+
+  return typeof document === 'undefined' ? overlay : createPortal(overlay, document.body)
 }

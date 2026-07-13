@@ -92,6 +92,10 @@ it('contains modal scroll and removes touch delay from History actions', () => {
   expect(css).toMatch(/\.cal-day-cell,[^}]*\.timeline-action-button,[^}]*\.time-edit-control\s*\{[^}]*touch-action:\s*manipulation/s)
 })
 
+it('keeps the time editor fixed across the full viewport', () => {
+  expect(css).toMatch(/\.time-edit-backdrop\s*\{[^}]*position:\s*fixed[^}]*inset:\s*0/s)
+})
+
 it('keeps the visible alert above the time-edit backdrop', () => {
   const backdropZ = Number(css.match(/\.time-edit-backdrop\s*\{[^}]*z-index:\s*(\d+)/s)?.[1])
   const toastZ = Number(css.match(/\.toast-container\s*\{[^}]*z-index:\s*(\d+)/s)?.[1])

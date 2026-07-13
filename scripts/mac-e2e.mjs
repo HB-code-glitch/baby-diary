@@ -857,6 +857,32 @@ async function main() {
       await page.locator('[data-time-edit-input]').evaluate(input => document.activeElement === input),
       'time editor initially focuses the date input',
     )
+    const timeEditOverlayEvidence = await page.locator('[data-time-edit-modal]').evaluate(backdrop => {
+      const rect = backdrop.getBoundingClientRect()
+      const appShell = document.querySelector('.app-shell')
+      const settingsNav = document.querySelector('[data-tour="nav-settings"]')
+      const settingsRect = settingsNav?.getBoundingClientRect()
+      const hitAtSettings = settingsRect
+        ? document.elementFromPoint(settingsRect.left + settingsRect.width / 2, settingsRect.top + settingsRect.height / 2)
+        : null
+      return {
+        parentIsBody: backdrop.parentElement === document.body,
+        coversViewport: Math.abs(rect.left) <= 1
+          && Math.abs(rect.top) <= 1
+          && Math.abs(rect.width - window.innerWidth) <= 1
+          && Math.abs(rect.height - window.innerHeight) <= 1,
+        appShellInert: appShell?.hasAttribute('inert') ?? false,
+        appShellAriaHidden: appShell?.getAttribute('aria-hidden'),
+        sidebarHitIsBackdrop: hitAtSettings?.closest('[data-time-edit-modal]') === backdrop,
+      }
+    })
+    assert(timeEditOverlayEvidence.parentIsBody, 'time editor portal is a direct child of document.body')
+    assert(timeEditOverlayEvidence.coversViewport, 'time editor overlay covers the complete viewport')
+    assert(
+      timeEditOverlayEvidence.appShellInert && timeEditOverlayEvidence.appShellAriaHidden === 'true',
+      'time editor makes the app shell inert and hidden from assistive technology',
+    )
+    assert(timeEditOverlayEvidence.sidebarHitIsBackdrop, 'time editor overlay intercepts pointer input above the sidebar')
     const timeEditTargets = await timeEditDialog.locator('input, button').evaluateAll(controls => controls.map(control => {
       const rect = control.getBoundingClientRect()
       return { width: rect.width, height: rect.height }
@@ -866,6 +892,24 @@ async function main() {
       `time editor targets are at least 40px (${JSON.stringify(timeEditTargets)})`,
     )
     await shot(page, 'history-day-edit')
+    await shot(page, 'history-day-edit-global-overlay')
+
+    const settingsNavBounds = await page.locator('[data-tour="nav-settings"]').boundingBox()
+    assert(!!settingsNavBounds, 'Settings sidebar target has measurable bounds while time editor is open')
+    if (settingsNavBounds) {
+      await page.mouse.click(
+        settingsNavBounds.x + settingsNavBounds.width / 2,
+        settingsNavBounds.y + settingsNavBounds.height / 2,
+      )
+      await page.waitForTimeout(150)
+    }
+    assert(await page.locator('[data-tour="calendar"]').count() === 1, 'sidebar pointer attempt does not leave History')
+    assert(await page.locator('[data-tour="settings-main"]').count() === 0, 'sidebar pointer attempt cannot navigate to Settings')
+
+    if (await timeEditDialog.count() === 0) {
+      await editHistoryEvent.click()
+      await page.waitForSelector('[data-time-edit-modal] [role="dialog"]', { timeout: 5000 })
+    }
     await page.keyboard.press('Escape')
     assert(
       await editHistoryEvent.evaluate(button => document.activeElement === button),
@@ -1101,6 +1145,12 @@ async function main() {
     await page.click('[data-tour="nav-settings"]')
     await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
 
+    const settingsSaveForLanguageSwitch = page.locator('[data-tour="settings-main"] .btn-primary').first()
+    assert(await settingsSaveForLanguageSwitch.isVisible(), 'Settings save action is available for language-switch toast coverage')
+    await settingsSaveForLanguageSwitch.click()
+    await page.waitForSelector('.toast', { timeout: 5000 })
+    assert(await page.locator('.toast').count() > 0, 'an old-language toast is visible before switching languages')
+
     // Click 日本語 button
     const jaBtn = await page.$('button[lang="ja"]')
     assert(!!jaBtn, 'Japanese language button found')
@@ -1108,6 +1158,7 @@ async function main() {
       await jaBtn.click()
       await page.waitForTimeout(600)
     }
+    assert(await page.locator('.toast').count() === 0, 'language switch clears every old-language toast before Japanese UI renders')
 
     const jaEvidenceCenter = page.locator('[data-tour="age-guidance"]')
     assert(/年齢別エビデンスセンター/.test(await jaEvidenceCenter.textContent()), 'Japanese evidence-center title is localized')
@@ -1306,8 +1357,8 @@ async function main() {
       failures.push(`${errorCount} unexpected console error(s): ${consoleErrors.slice(0, 3).join(' | ')}`)
     }
 
-    if (screenshotIndex !== 40) {
-      failures.push(`Expected exactly 40 screenshots, got ${screenshotIndex}`)
+    if (screenshotIndex !== 41) {
+      failures.push(`Expected exactly 41 screenshots, got ${screenshotIndex}`)
     }
     const screenshotFiles = fs.readdirSync(SCREENSHOTS_DIR)
       .filter(name => /^\d{2}-.+\.png$/.test(name))

@@ -108,11 +108,11 @@ describe('EventTimeline focus recovery and live feedback', () => {
     editEvent.mockRejectedValueOnce(new Error('edit failed'))
     await render([FIRST])
     await act(async () => container.querySelector<HTMLButtonElement>('[data-event-action="edit"]')!.click())
-    const confirm = container.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!
+    const confirm = document.body.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!
     await act(async () => confirm.click())
 
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull()
-    expect(container.querySelector<HTMLInputElement>('[data-time-edit-input]')?.disabled).toBe(false)
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(document.body.querySelector<HTMLInputElement>('[data-time-edit-input]')?.disabled).toBe(false)
     expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1)
   })
 
@@ -123,7 +123,7 @@ describe('EventTimeline focus recovery and live feedback', () => {
     await act(async () => trigger.click())
 
     await render([{ ...FIRST, rev: FIRST.rev + 1 }])
-    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
     await act(async () => dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
 
     expect(document.activeElement).toBe(container.querySelector('[data-event-action="edit"]'))
@@ -136,9 +136,9 @@ describe('EventTimeline focus recovery and live feedback', () => {
     await act(async () => trigger.click())
 
     await render([SECOND])
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!.click())
+    await act(async () => document.body.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!.click())
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
     expect(document.activeElement).toBe(container.querySelector(`[data-event-id="${SECOND.id}"] [data-event-action="edit"]`))
   })
 })

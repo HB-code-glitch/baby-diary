@@ -11,7 +11,7 @@ const CURRENT_AT = new Date(2026, 6, 13, 10, 30, 0).toISOString()
 function Harness({ onConfirm }: { onConfirm: (value: string) => Promise<void> | void }) {
   const [open, setOpen] = useState(false)
   return (
-    <>
+    <div className="app-shell" data-test-app-shell>
       <button data-modal-trigger type="button" onClick={() => setOpen(true)}>open</button>
       {open && (
         <TimeEditModal
@@ -20,7 +20,22 @@ function Harness({ onConfirm }: { onConfirm: (value: string) => Promise<void> | 
           onClose={() => setOpen(false)}
         />
       )}
-    </>
+    </div>
+  )
+}
+
+function ModalCountHarness({ count }: { count: number }) {
+  return (
+    <div className="app-shell" data-test-app-shell>
+      {Array.from({ length: count }, (_, index) => (
+        <TimeEditModal
+          key={index}
+          currentAt={CURRENT_AT}
+          onConfirm={vi.fn()}
+          onClose={vi.fn()}
+        />
+      ))}
+    </div>
   )
 }
 
@@ -56,9 +71,9 @@ describe('TimeEditModal accessibility and async safety', () => {
 
   it('connects dialog name, description, and label and initially focuses the date input', async () => {
     await open()
-    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
-    const input = container.querySelector<HTMLInputElement>('[data-time-edit-input]')!
-    const label = container.querySelector<HTMLLabelElement>('label[for]')!
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
+    const input = document.body.querySelector<HTMLInputElement>('[data-time-edit-input]')!
+    const label = document.body.querySelector<HTMLLabelElement>('label[for]')!
 
     expect(dialog.getAttribute('aria-modal')).toBe('true')
     expect(document.getElementById(dialog.getAttribute('aria-labelledby')!)?.textContent).toBe('시간 수정')
@@ -67,16 +82,16 @@ describe('TimeEditModal accessibility and async safety', () => {
     expect(input.name).toBe('recordedAt')
     expect(input.autocomplete).toBe('off')
     expect(document.activeElement).toBe(input)
-    expect(container.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t('timeEdit.close')}"]`)).not.toBeNull()
+    expect(document.body.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t('timeEdit.close')}"]`)).not.toBeNull()
     expect(input.classList.contains('time-edit-input')).toBe(true)
     expect(Array.from(dialog.querySelectorAll('button')).every(button => button.classList.contains('time-edit-control'))).toBe(true)
   })
 
   it('traps Tab within the dialog and restores the trigger after Escape', async () => {
     const trigger = await open()
-    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
-    const close = container.querySelector<HTMLButtonElement>('[data-time-edit-action="close"]')!
-    const confirm = container.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
+    const close = document.body.querySelector<HTMLButtonElement>('[data-time-edit-action="close"]')!
+    const confirm = document.body.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!
 
     confirm.focus()
     await act(async () => keyDown(dialog, 'Tab'))
@@ -86,7 +101,7 @@ describe('TimeEditModal accessibility and async safety', () => {
     expect(document.activeElement).toBe(confirm)
 
     await act(async () => keyDown(dialog, 'Escape'))
-    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
     expect(document.activeElement).toBe(trigger)
   })
 
@@ -95,8 +110,8 @@ describe('TimeEditModal accessibility and async safety', () => {
     const pending = new Promise<void>(done => { resolve = done })
     const onConfirm = vi.fn(() => pending)
     await open(onConfirm)
-    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!
-    const input = container.querySelector<HTMLInputElement>('[data-time-edit-input]')!
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
+    const input = document.body.querySelector<HTMLInputElement>('[data-time-edit-input]')!
 
     await act(async () => {
       keyDown(input, 'Enter')
@@ -124,13 +139,64 @@ describe('TimeEditModal accessibility and async safety', () => {
     ))
     const trigger = container.querySelector<HTMLButtonElement>('[data-modal-trigger]')!
     await act(async () => trigger.click())
-    const confirm = container.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!
+    const confirm = document.body.querySelector<HTMLButtonElement>('[data-time-edit-action="confirm"]')!
     await act(async () => confirm.click())
 
     expect(onConfirm).toHaveBeenCalledTimes(1)
-    const input = container.querySelector<HTMLInputElement>('[data-time-edit-input]')!
+    const input = document.body.querySelector<HTMLInputElement>('[data-time-edit-input]')!
     expect(input.disabled).toBe(false)
     expect(confirm.disabled).toBe(false)
     expect(document.activeElement).toBe(input)
+  })
+
+  it('portals the viewport overlay to body and makes the app shell inert until close', async () => {
+    const trigger = await open()
+    const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
+    const backdrop = document.body.querySelector<HTMLElement>('[data-time-edit-modal]')!
+
+    expect(backdrop.parentElement).toBe(document.body)
+    expect(appShell.hasAttribute('inert')).toBe(true)
+    expect(appShell.getAttribute('aria-hidden')).toBe('true')
+
+    await act(async () => keyDown(backdrop.querySelector<HTMLElement>('[role="dialog"]')!, 'Escape'))
+
+    expect(document.body.querySelector('[data-time-edit-modal]')).toBeNull()
+    expect(appShell.hasAttribute('inert')).toBe(false)
+    expect(appShell.hasAttribute('aria-hidden')).toBe(false)
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('restores pre-existing inert and aria-hidden values exactly', async () => {
+    await act(async () => root.render(<Harness onConfirm={vi.fn()} />))
+    const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
+    appShell.setAttribute('inert', 'pre-existing')
+    appShell.setAttribute('aria-hidden', 'false')
+    const trigger = container.querySelector<HTMLButtonElement>('[data-modal-trigger]')!
+
+    await act(async () => trigger.click())
+    expect(appShell.getAttribute('inert')).toBe('')
+    expect(appShell.getAttribute('aria-hidden')).toBe('true')
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
+    await act(async () => keyDown(dialog, 'Escape'))
+    expect(appShell.getAttribute('inert')).toBe('pre-existing')
+    expect(appShell.getAttribute('aria-hidden')).toBe('false')
+  })
+
+  it('keeps the app shell inert until the final concurrent modal unmounts', async () => {
+    await act(async () => root.render(<ModalCountHarness count={2} />))
+    const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
+    expect(document.body.querySelectorAll('[data-time-edit-modal]')).toHaveLength(2)
+    expect(appShell.hasAttribute('inert')).toBe(true)
+
+    await act(async () => root.render(<ModalCountHarness count={1} />))
+    expect(document.body.querySelectorAll('[data-time-edit-modal]')).toHaveLength(1)
+    expect(appShell.hasAttribute('inert')).toBe(true)
+    expect(appShell.getAttribute('aria-hidden')).toBe('true')
+
+    await act(async () => root.render(<ModalCountHarness count={0} />))
+    expect(document.body.querySelectorAll('[data-time-edit-modal]')).toHaveLength(0)
+    expect(appShell.hasAttribute('inert')).toBe(false)
+    expect(appShell.hasAttribute('aria-hidden')).toBe(false)
   })
 })

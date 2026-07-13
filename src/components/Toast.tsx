@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useRef } from 'react'
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 interface ToastItem {
@@ -24,7 +24,7 @@ export function useToast() {
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
@@ -41,6 +41,22 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     const timer = setTimeout(() => removeToast(id), 4000)
     timers.current.set(id, timer)
   }, [removeToast])
+
+  const clearToasts = useCallback(() => {
+    for (const timer of timers.current.values()) clearTimeout(timer)
+    timers.current.clear()
+    setToasts(prev => prev.length === 0 ? prev : [])
+  }, [])
+
+  useEffect(() => {
+    i18n.on('languageChanged', clearToasts)
+    return () => i18n.off('languageChanged', clearToasts)
+  }, [clearToasts, i18n])
+
+  useEffect(() => () => {
+    for (const timer of timers.current.values()) clearTimeout(timer)
+    timers.current.clear()
+  }, [])
 
   return (
     <ToastContext.Provider value={{ showToast }}>
