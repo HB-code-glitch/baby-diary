@@ -23,10 +23,62 @@ function flattenReleasePages(value) {
   return Array.isArray(value) ? value.flatMap(flattenReleasePages) : [value]
 }
 
+function matchingReleasesForTag(payload, tag) {
+  return flattenReleasePages(payload)
+    .filter(candidate => candidate && typeof candidate === 'object' && candidate.tag_name === tag)
+}
+
+function validatePaginatedReleaseResponse(payload) {
+  if (!Array.isArray(payload) || payload.length === 0 || payload.some(page => !Array.isArray(page))) {
+    return { errors: ['invalid paginated release response'], releases: [] }
+  }
+
+  const releases = payload.flat()
+  const hasMalformedRelease = releases.some(release => (
+    !release
+    || typeof release !== 'object'
+    || Array.isArray(release)
+    || typeof release.tag_name !== 'string'
+    || release.tag_name.length === 0
+    || typeof release.draft !== 'boolean'
+    || typeof release.prerelease !== 'boolean'
+  ))
+  if (hasMalformedRelease) {
+    return { errors: ['invalid paginated release response'], releases: [] }
+  }
+
+  return { errors: [], releases }
+}
+
+export function validateReleasePreUpload(payload, { tag }) {
+  if (typeof tag !== 'string' || tag.trim().length === 0) {
+    return { errors: ['target tag is required'], releaseCount: 0 }
+  }
+
+  const response = validatePaginatedReleaseResponse(payload)
+  if (response.errors.length > 0) {
+    return { errors: response.errors, releaseCount: 0 }
+  }
+
+  const matchingReleases = response.releases.filter(release => release.tag_name === tag)
+  if (matchingReleases.length > 1) {
+    return {
+      errors: [`expected at most one release for ${tag}, found ${matchingReleases.length}`],
+      releaseCount: matchingReleases.length,
+    }
+  }
+  if (matchingReleases.length === 0) return { errors: [], releaseCount: 0 }
+
+  const release = matchingReleases[0]
+  const errors = []
+  if (release.draft !== true) errors.push(`release ${tag} must be a draft before upload`)
+  if (release.prerelease !== false) errors.push(`release ${tag} must not be a prerelease`)
+  return { errors, releaseCount: 1 }
+}
+
 export function validateReleaseAssets(payload, { tag, version }) {
   const errors = []
-  const matchingReleases = flattenReleasePages(payload)
-    .filter(candidate => candidate && typeof candidate === 'object' && candidate.tag_name === tag)
+  const matchingReleases = matchingReleasesForTag(payload, tag)
 
   if (matchingReleases.length !== 1) {
     return {
@@ -97,6 +149,7 @@ async function readStandardInput() {
 const tag = readOption('--tag')
 const version = readOption('--version')
 const inputPath = readOption('--input')
+const preUpload = process.argv.includes('--pre-upload')
 const source = inputPath ? await readFile(inputPath, 'utf8') : await readStandardInput()
 
 let payload
@@ -108,11 +161,19 @@ try {
 }
 
 if (payload !== undefined) {
-  const { errors, assetCount } = validateReleaseAssets(payload, { tag, version })
+  const result = preUpload
+    ? validateReleasePreUpload(payload, { tag })
+    : validateReleaseAssets(payload, { tag, version })
+  const { errors } = result
   if (errors.length > 0) {
     for (const error of errors) console.error(`[release-assets] ${error}`)
     process.exitCode = 1
+  } else if (preUpload) {
+    const message = result.releaseCount === 0
+      ? 'safe to upload: no existing release'
+      : 'safe to resume private draft'
+    console.log(`[release-assets] ${tag} ${message}`)
   } else {
-    console.log(`[release-assets] ${tag} (${version}) verified ${assetCount} assets`)
+    console.log(`[release-assets] ${tag} (${version}) verified ${result.assetCount} assets`)
   }
 }

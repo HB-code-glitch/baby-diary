@@ -50,17 +50,97 @@ function releaseFixture(): ReleaseFixture {
   }
 }
 
-function runValidator(payload: unknown) {
-  return spawnSync(process.execPath, [
+function runValidator(payload: unknown, {
+  preUpload = false,
+  includeTag = true,
+} = {}) {
+  const args = [
     'scripts/validate-release-assets.mjs',
-    '--tag', TAG,
-    '--version', VERSION,
-  ], {
+  ]
+  if (includeTag) args.push('--tag', TAG)
+  if (preUpload) args.push('--pre-upload')
+  else args.push('--version', VERSION)
+
+  return spawnSync(process.execPath, args, {
     cwd: process.cwd(),
     input: JSON.stringify(payload),
     encoding: 'utf8',
   })
 }
+
+describe('pre-upload release guard', () => {
+  it('allows an empty, valid paginated release response', () => {
+    const result = runValidator([[]], { preUpload: true })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('safe to upload: no existing release')
+  })
+
+  it('allows a normal first upload when the target tag does not exist', () => {
+    const unrelatedRelease = { ...releaseFixture(), tag_name: 'v0.3.8', draft: false }
+
+    const result = runValidator([[unrelatedRelease]], { preUpload: true })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('safe to upload: no existing release')
+  })
+
+  it('allows a failed draft upload to be resumed', () => {
+    const result = runValidator([[releaseFixture()]], { preUpload: true })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('safe to resume private draft')
+  })
+
+  it('rejects rerunning an already-public tag before any upload can mutate it', () => {
+    const fixture = releaseFixture()
+    fixture.draft = false
+
+    const result = runValidator([[fixture]], { preUpload: true })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('must be a draft before upload')
+  })
+
+  it('rejects a prerelease target before any upload can mutate it', () => {
+    const fixture = releaseFixture()
+    fixture.prerelease = true
+
+    const result = runValidator([[fixture]], { preUpload: true })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('must not be a prerelease')
+    expect(result.stderr).not.toContain('missing assets')
+  })
+
+  it('rejects duplicate matching releases across paginated API results', () => {
+    const result = runValidator([[releaseFixture()], [releaseFixture()]], { preUpload: true })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(`expected at most one release for ${TAG}, found 2`)
+  })
+
+  it.each([
+    { label: 'an API error object', payload: { message: 'Bad credentials' } },
+    { label: 'a non-paginated release array', payload: [releaseFixture()] },
+    { label: 'an empty outer page list', payload: [] },
+    { label: 'a malformed release object', payload: [[{ draft: true, prerelease: false }]] },
+  ])('fails closed for $label', ({ payload }) => {
+    const result = runValidator(payload, { preUpload: true })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('invalid paginated release response')
+    expect(result.stdout).not.toContain('safe to upload')
+  })
+
+  it('fails closed when the target tag argument is missing', () => {
+    const result = runValidator([[]], { preUpload: true, includeTag: false })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('target tag is required')
+    expect(result.stdout).not.toContain('safe to upload')
+  })
+})
 
 describe('release asset validator', () => {
   it('accepts the exact 14-asset v0.3.9 draft fixture', () => {

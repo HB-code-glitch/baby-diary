@@ -64,6 +64,7 @@ const workflow = parseWorkflow()
 const REQUIRED_NODE_VERSION = '24.18.0'
 const RELEASE_TAG_CONDITION = "startsWith(github.ref, 'refs/tags/v')"
 const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
+const RELEASE_UPLOAD_TARGET_STEP_NAME = 'Verify release upload target is absent or a private draft'
 const REQUIRED_RELEASE_NEEDS = ['release-preflight', 'e2e-win', 'e2e-mac']
 const REQUIRED_PUBLISH_NEEDS = ['build-mac', 'release-win', 'release-mac']
 const RELEASE_CRITICAL_JOBS = [
@@ -203,6 +204,41 @@ function releasePreflightContractErrors(candidate: ReleaseWorkflow): string[] {
   ]) {
     if (!command.includes(requiredFragment)) errors.push(`tag/version validation is missing: ${requiredFragment}`)
   }
+
+  const targetValidationSteps = job.steps.filter(step => step.name === RELEASE_UPLOAD_TARGET_STEP_NAME)
+  if (targetValidationSteps.length !== 1) {
+    errors.push('release-preflight must have exactly one upload-target validation step')
+    return errors
+  }
+
+  const targetValidationStep = targetValidationSteps[0]
+  const targetValidationIndex = job.steps.indexOf(targetValidationStep)
+  if (targetValidationIndex <= validationIndex) {
+    errors.push('upload-target validation must run after tag/version validation')
+  }
+  if (targetValidationStep.if != null) errors.push('upload-target validation must not be conditional')
+  if (Boolean(targetValidationStep['continue-on-error'])) {
+    errors.push('upload-target validation must fail the job')
+  }
+  if (targetValidationStep.env?.GH_TOKEN !== '${{ secrets.RELEASE_TOKEN }}') {
+    errors.push('upload-target validation must authenticate with RELEASE_TOKEN')
+  }
+
+  const targetCommand = normalizedRun(targetValidationStep) ?? ''
+  for (const requiredFragment of [
+    'set -euo pipefail',
+    'gh api --paginate --slurp',
+    'repos/HB-code-glitch/baby-diary-releases/releases?per_page=100',
+    'node scripts/validate-release-assets.mjs --pre-upload',
+    '--tag "${GITHUB_REF_NAME}"',
+  ]) {
+    if (!targetCommand.includes(requiredFragment)) {
+      errors.push(`upload-target validation is missing: ${requiredFragment}`)
+    }
+  }
+  if (/releases\/tags\//.test(targetCommand)) {
+    errors.push('upload-target validation must use authenticated list releases, not the tag endpoint')
+  }
   return errors
 }
 
@@ -329,11 +365,16 @@ describe('release workflow CI gates', () => {
       return command == null ? [] : [{ jobName, command }]
     }))
     const validationCommands = commands.filter(({ command }) => command.includes('validate-release-assets.mjs'))
+    const preUploadValidations = validationCommands.filter(({ command }) => command.includes('--pre-upload'))
+    const finalAssetValidations = validationCommands.filter(({ command }) => !command.includes('--pre-upload'))
     const publicTransitions = commands.filter(({ command }) => /gh\s+release\s+edit[\s\S]*--draft=false[\s\S]*--latest/.test(command))
 
-    expect(validationCommands).toHaveLength(1)
-    expect(validationCommands[0].jobName).toBe('publish-release')
-    expect(validationCommands[0].command).toContain('gh api --paginate --slurp')
+    expect(validationCommands).toHaveLength(2)
+    expect(preUploadValidations).toHaveLength(1)
+    expect(preUploadValidations[0].jobName).toBe('release-preflight')
+    expect(finalAssetValidations).toHaveLength(1)
+    expect(finalAssetValidations[0].jobName).toBe('publish-release')
+    expect(finalAssetValidations[0].command).toContain('gh api --paginate --slurp')
     expect(publicTransitions).toHaveLength(1)
     expect(publicTransitions[0].jobName).toBe('publish-release')
   })
@@ -419,6 +460,58 @@ describe('release workflow CI gates', () => {
 
     expect(matching.status, matching.stderr).toBe(0)
     expect(mismatched.status).not.toBe(0)
+  })
+
+  it('checks the authenticated external release state before either platform upload', () => {
+    expect(releasePreflightContractErrors(workflow)).toEqual([])
+
+    const preflight = workflow.jobs['release-preflight']
+    const localValidationIndex = preflight.steps.findIndex(step => step.name === RELEASE_PREFLIGHT_STEP_NAME)
+    const targetValidationIndex = preflight.steps.findIndex(step => step.name === RELEASE_UPLOAD_TARGET_STEP_NAME)
+    expect(targetValidationIndex).toBeGreaterThan(localValidationIndex)
+
+    for (const jobName of ['release-win', 'release-mac']) {
+      expect(normalizedNeeds(workflow.jobs[jobName])).toContain('release-preflight')
+    }
+  })
+
+  it('rejects fail-open conditions around the external release preflight', () => {
+    const jobContinue = structuredClone(workflow)
+    jobContinue.jobs['release-preflight']['continue-on-error'] = true
+    expect(releaseFailOpenContractErrors(jobContinue)).toContain(
+      'release-preflight must not continue on error',
+    )
+
+    const stepContinue = structuredClone(workflow)
+    const targetStep = stepContinue.jobs['release-preflight'].steps
+      .find(step => step.name === RELEASE_UPLOAD_TARGET_STEP_NAME)
+    expect(targetStep).toBeDefined()
+    targetStep!['continue-on-error'] = true
+    expect(releasePreflightContractErrors(stepContinue)).toContain(
+      'upload-target validation must fail the job',
+    )
+
+    const stepAlways = structuredClone(workflow)
+    const alwaysTargetStep = stepAlways.jobs['release-preflight'].steps
+      .find(step => step.name === RELEASE_UPLOAD_TARGET_STEP_NAME)
+    expect(alwaysTargetStep).toBeDefined()
+    alwaysTargetStep!.if = 'always()'
+    expect(releasePreflightContractErrors(stepAlways)).toContain(
+      'upload-target validation must not be conditional',
+    )
+
+    const jobAlways = structuredClone(workflow)
+    jobAlways.jobs['release-preflight'].if = `${RELEASE_TAG_CONDITION} && always()`
+    expect(releasePreflightContractErrors(jobAlways)).not.toEqual([])
+
+    const noPipefail = structuredClone(workflow)
+    const noPipefailTargetStep = noPipefail.jobs['release-preflight'].steps
+      .find(step => step.name === RELEASE_UPLOAD_TARGET_STEP_NAME)
+    expect(noPipefailTargetStep).toBeDefined()
+    noPipefailTargetStep!.run = normalizedRun(noPipefailTargetStep!)?.replace('set -euo pipefail\n', '')
+    expect(releasePreflightContractErrors(noPipefail)).toContain(
+      'upload-target validation is missing: set -euo pipefail',
+    )
   })
 
   it.each(['release-win', 'release-mac'])('$jobName waits for preflight and both packaged E2E jobs', jobName => {

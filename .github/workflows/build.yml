@@ -102,6 +102,13 @@ jobs:
           if (actual !== expected) {
           console.error('Release tag ' + actual + ' must equal ' + expected);
           process.exit(1) }"
+      - name: Verify release upload target is absent or a private draft
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
+            | node scripts/validate-release-assets.mjs --pre-upload --tag "${GITHUB_REF_NAME}"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
   release-win:
     needs: [release-preflight, e2e-win, e2e-mac]
