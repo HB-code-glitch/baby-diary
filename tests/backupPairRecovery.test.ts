@@ -461,6 +461,38 @@ describe('verified settings/journal pair recovery', () => {
     })).toThrow(/file.?count|too many/i)
   })
 
+  it('accepts the 128-file production boundary and closes every held source handle', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(233)])
+    for (let index = 0; index < 125; index += 1) {
+      fs.writeFileSync(
+        path.join(snapshot.snapshot, 'data', `boundary-${String(index).padStart(3, '0')}.jsonl`),
+        '{}\n',
+      )
+    }
+    writeManifest(snapshot.snapshot)
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot)).not.toThrow()
+    const moved = `${snapshot.snapshot}-moved`
+    fs.renameSync(snapshot.snapshot, moved)
+    fs.renameSync(moved, snapshot.snapshot)
+  })
+
+  it('rejects 129 manifest files at the production fd budget and leaves no handle behind', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(234)])
+    for (let index = 0; index < 126; index += 1) {
+      fs.writeFileSync(
+        path.join(snapshot.snapshot, 'data', `overflow-${String(index).padStart(3, '0')}.jsonl`),
+        '{}\n',
+      )
+    }
+    writeManifest(snapshot.snapshot)
+
+    expect(() => verifyBackupSnapshot(snapshot.snapshot)).toThrow(/file.?count|too many/i)
+    const moved = `${snapshot.snapshot}-moved`
+    fs.renameSync(snapshot.snapshot, moved)
+    fs.renameSync(moved, snapshot.snapshot)
+  })
+
   it('rejects aggregate snapshot bytes with overflow-safe accounting', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(115)])
     const exactBytes = fs.statSync(path.join(snapshot.snapshot, 'settings.json')).size
@@ -619,9 +651,9 @@ describe('verified settings/journal pair recovery', () => {
         const result = fs.mkdirSync(target, options)
         const resolved = path.resolve(String(target))
         if (!swapped && path.dirname(resolved) === path.resolve(forensicRoot)) {
-          swapped = true
           fs.rmSync(resolved, { recursive: true, force: true })
           fs.symlinkSync(outside, resolved, process.platform === 'win32' ? 'junction' : 'dir')
+          swapped = true
         }
         return result
       },
@@ -680,6 +712,110 @@ describe('verified settings/journal pair recovery', () => {
     ) => void)(tmpDir, { durableFs })).toThrow(/forensic|preserv/i)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(original.settings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
+  })
+
+  it('never preserves an A-settings/B-journal mixture when both live files change at the open seam', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(228)])
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const settingsA = Buffer.from('{ corrupt-settings-A', 'utf8')
+    const settingsB = Buffer.from('{ corrupt-settings-B', 'utf8')
+    const journalA = Buffer.from('{"broken-journal":"A"', 'utf8')
+    const journalB = Buffer.from('{"broken-journal":"B"', 'utf8')
+    expect(settingsB.byteLength).toBe(settingsA.byteLength)
+    expect(journalB.byteLength).toBe(journalA.byteLength)
+    fs.writeFileSync(settingsPath, settingsA)
+    fs.writeFileSync(journalPath, journalA)
+
+    const realNative = fs.realpathSync.native.bind(fs.realpathSync)
+    let changed = false
+    let userDataRootRealpaths = 0
+    const realpathSpy = vi.spyOn(fs.realpathSync, 'native').mockImplementation(((target: fs.PathLike): string => {
+      if (path.resolve(String(target)) === path.resolve(tmpDir)) userDataRootRealpaths += 1
+      if (!changed && userDataRootRealpaths === 3) {
+        const settingsFd = fs.openSync(settingsPath, 'r+')
+        const journalFd = fs.openSync(journalPath, 'r+')
+        try {
+          expect(fs.writeSync(settingsFd, settingsB, 0, settingsB.byteLength, 0))
+            .toBe(settingsB.byteLength)
+          expect(fs.writeSync(journalFd, journalB, 0, journalB.byteLength, 0))
+            .toBe(journalB.byteLength)
+          changed = true
+        } finally {
+          fs.closeSync(journalFd)
+          fs.closeSync(settingsFd)
+        }
+      }
+      return realNative(target)
+    }) as typeof fs.realpathSync.native)
+
+    let error: Error & Record<string, unknown>
+    try {
+      error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+        platform: 'win32',
+        startupId: 'mixed-forensic-source-boot-0',
+      }))
+    } finally {
+      realpathSpy.mockRestore()
+    }
+    expect(changed).toBe(true)
+    expect(error!.message).toMatch(/forensic preservation|settings|changed|identity/i)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+    expect(fs.readFileSync(settingsPath)).toEqual(settingsB)
+    expect(fs.readFileSync(journalPath)).toEqual(journalB)
+    expect(forensicFootprint(tmpDir).archives).toBe(0)
+  })
+
+  it('streams a 128 MiB live forensic source with short reads and bounded allocations', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(231)])
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), '{ corrupt-live-settings')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const prefix = fs.readFileSync(path.join(snapshot.snapshot, BABY_INFO_JOURNAL_FILE))
+    const fixture = syntheticMaximumJournal(prefix)
+    fs.writeFileSync(journalPath, prefix)
+    fs.truncateSync(journalPath, fixture.size)
+    const journalIdentity = fs.statSync(journalPath)
+    const reads: Array<{ position: number; requested: number; returned: number }> = []
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        if (position === null) throw new Error('forensic source reads must be positional')
+        const opened = fs.fstatSync(fd)
+        if (opened.dev === journalIdentity.dev && opened.ino === journalIdentity.ino) {
+          const returned = Math.min(length, 32 * 1024)
+          const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+          fixture.readInto(target, offset, returned, position)
+          reads.push({ position, requested: length, returned })
+          return returned
+        }
+        return fs.readSync(fd, buffer, offset, length, position)
+      },
+    }
+
+    let error: Error & Record<string, unknown> | undefined
+    const startedAt = Date.now()
+    const allocations = guardBufferAllocations(64 * 1024, () => {
+      error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+        platform: 'win32',
+        startupId: 'forensic-maximum-source-boot-0',
+        durableFs,
+      }))
+    })
+    const elapsedMs = Date.now() - startedAt
+
+    expect(error).toMatchObject({ restartRequired: true, primaryUntouched: true })
+    expect(Math.max(...allocations.map(allocation => allocation.size))).toBeLessThanOrEqual(64 * 1024)
+    expect(reads.some(read => read.returned < read.requested)).toBe(true)
+    expect(Math.max(...reads.map(read => read.requested))).toBeLessThanOrEqual(64 * 1024)
+    expect(reads.reduce((total, read) => total + read.returned, 0)).toBe(fixture.size * 3)
+    expect(reads.filter(read => read.position + read.returned === fixture.size)).toHaveLength(3)
+    expect(elapsedMs).toBeLessThan(20_000)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(true)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+    const forensicRoot = path.join(tmpDir, 'recovery-forensics')
+    const archive = path.join(forensicRoot, fs.readdirSync(forensicRoot)[0])
+    expect(fs.statSync(path.join(archive, BABY_INFO_JOURNAL_FILE)).size).toBe(fixture.size)
   })
 
   it('bounds deterministic forensic archive allocation when every suffix is occupied', () => {
@@ -1220,15 +1356,26 @@ describe('verified settings/journal pair recovery', () => {
   ) => {
     const bootPrefix = `maximum-${label.replaceAll(' ', '-')}`
     const prepared = prepareMaximumCompletedRestore(tmpDir, index, bootPrefix, advanceSettings)
-    const readRequests: Array<{ position: number; length: number }> = []
+    const journalPaths = new Map<string, string>([
+      ['backup', path.join(tmpDir, 'backups', '2026-07-13_10-20-30', BABY_INFO_JOURNAL_FILE)],
+      ['staging', path.join(tmpDir, RESTORE_STAGING_DIR, BABY_INFO_JOURNAL_FILE)],
+      ['live', path.join(tmpDir, BABY_INFO_JOURNAL_FILE)],
+    ].filter(([, target]) => fs.existsSync(target)).map(([source, target]) => {
+      const identity = fs.statSync(target)
+      return [`${identity.dev}:${identity.ino}`, source]
+    }))
+    const readRequests: Array<{ source: string; position: number; length: number }> = []
     const streamingFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         if (position === null) throw new Error('maximum journal reads must be positional')
-        if (fs.fstatSync(fd).size !== prepared.fixture.size) {
+        const opened = fs.fstatSync(fd)
+        if (opened.size !== prepared.fixture.size) {
           return fs.readSync(fd, buffer, offset, length, position)
         }
-        readRequests.push({ position, length })
+        const source = journalPaths.get(`${opened.dev}:${opened.ino}`)
+        if (!source) throw new Error('unexpected maximum-size journal source')
+        readRequests.push({ source, position, length })
         const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
         return prepared.fixture.readInto(target, offset, length, position)
       },
@@ -1252,10 +1399,21 @@ describe('verified settings/journal pair recovery', () => {
     expect(Math.max(...allocations.map(allocation => allocation.size)), `RSS growth diagnostic only: ${rssGrowthDiagnostic}`)
       .toBeLessThanOrEqual(64 * 1024)
     expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
+    const expectedJournalPasses = prepared.expectedJournalFiles === 3 ? 10 : 6
     expect(readRequests.reduce((total, request) => total + request.length, 0))
-      .toBe(prepared.fixture.size * prepared.expectedJournalFiles * 2)
+      .toBe(prepared.fixture.size * expectedJournalPasses)
     expect(readRequests.filter(request => request.position + request.length === prepared.fixture.size))
-      .toHaveLength(prepared.expectedJournalFiles * 2)
+      .toHaveLength(expectedJournalPasses)
+    const eofCounts = Object.fromEntries(Array.from(journalPaths.values()).map(source => [
+      source,
+      readRequests.filter(request => (
+        request.source === source
+        && request.position + request.length === prepared.fixture.size
+      )).length,
+    ]))
+    expect(eofCounts).toEqual(prepared.expectedJournalFiles === 3
+      ? { backup: 4, staging: 2, live: 4 }
+      : { backup: 3, live: 3 })
     expect(elapsedMs).toBeLessThan(10_000)
     expect(fs.existsSync(prepared.intentPath)).toBe(false)
     expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8')).profile.name)
@@ -1284,20 +1442,27 @@ describe('verified settings/journal pair recovery', () => {
     if (replacePath) fs.writeFileSync(temporary, changedBytes)
 
     let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         const count = fs.readSync(fd, buffer, offset, length, position)
         const opened = fs.fstatSync(fd)
         if (!mutated && opened.dev === journalIdentity.dev && opened.ino === journalIdentity.ino) {
-          mutated = true
           if (replacePath) {
-            fs.renameSync(temporary, settingsPath)
+            try {
+              fs.renameSync(temporary, settingsPath)
+              mutated = true
+            } catch (error) {
+              renameFailure = error as NodeJS.ErrnoException
+              throw error
+            }
           } else {
             const settingsFd = fs.openSync(settingsPath, 'r+')
             try {
               expect(fs.writeSync(settingsFd, changedBytes, 0, changedBytes.byteLength, 0))
                 .toBe(changedBytes.byteLength)
+              mutated = true
             } finally {
               fs.closeSync(settingsFd)
             }
@@ -1312,8 +1477,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: `settings-race-${label}-boot-3`,
       durableFs,
     }))
-    expect(mutated).toBe(true)
-    expect(error.message).toMatch(/settings|changed|identity|path/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/settings|changed|identity|path/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
     for (const [name, bytes] of stagedBefore) {
@@ -1345,6 +1515,7 @@ describe('verified settings/journal pair recovery', () => {
       .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
 
     let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
@@ -1355,14 +1526,20 @@ describe('verified settings/journal pair recovery', () => {
           && opened.ino === journalIdentity.ino
           && position !== null
           && position + count === opened.size) {
-          mutated = true
           if (replacePath) {
-            fs.renameSync(replacement, journalPath)
+            try {
+              fs.renameSync(replacement, journalPath)
+              mutated = true
+            } catch (error) {
+              renameFailure = error as NodeJS.ErrnoException
+              throw error
+            }
           } else {
             const journalFd = fs.openSync(journalPath, 'r+')
             try {
               expect(fs.writeSync(journalFd, changedJournal, 0, changedJournal.byteLength, 0))
                 .toBe(changedJournal.byteLength)
+              mutated = true
             } finally {
               fs.closeSync(journalFd)
             }
@@ -1377,8 +1554,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: `journal-race-${label}-boot-3`,
       durableFs,
     }))
-    expect(mutated).toBe(true)
-    expect(error.message).toMatch(/journal|changed|identity|path/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/journal|changed|identity|path/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
     for (const [name, bytes] of stagedBefore) {
@@ -1413,6 +1595,7 @@ describe('verified settings/journal pair recovery', () => {
 
     let settingsPasses = 0
     let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
@@ -1424,14 +1607,20 @@ describe('verified settings/journal pair recovery', () => {
           && position + count === opened.size) {
           settingsPasses += 1
           if (!mutated && settingsPasses === 2) {
-            mutated = true
             if (replacePath) {
-              fs.renameSync(replacement, journalPath)
+              try {
+                fs.renameSync(replacement, journalPath)
+                mutated = true
+              } catch (error) {
+                renameFailure = error as NodeJS.ErrnoException
+                throw error
+              }
             } else {
               const journalFd = fs.openSync(journalPath, 'r+')
               try {
                 expect(fs.writeSync(journalFd, journalAfter, 0, journalAfter.byteLength, 0))
                   .toBe(journalAfter.byteLength)
+                mutated = true
               } finally {
                 fs.closeSync(journalFd)
               }
@@ -1447,8 +1636,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: `live-held-${label.replaceAll(' ', '-')}-boot-3`,
       durableFs,
     }))
-    expect(mutated).toBe(true)
-    expect(error.message).toMatch(/journal|changed|identity|path/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/journal|changed|identity|path/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
     for (const [name, bytes] of stagedBefore) {
@@ -1476,6 +1670,7 @@ describe('verified settings/journal pair recovery', () => {
     fs.writeFileSync(replacement, replacePath ? beforeData : changedData)
 
     let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
@@ -1486,14 +1681,20 @@ describe('verified settings/journal pair recovery', () => {
           && opened.ino === dataIdentity.ino
           && position !== null
           && position + count === opened.size) {
-          mutated = true
           if (replacePath) {
-            fs.renameSync(replacement, dataPath)
+            try {
+              fs.renameSync(replacement, dataPath)
+              mutated = true
+            } catch (error) {
+              renameFailure = error as NodeJS.ErrnoException
+              throw error
+            }
           } else {
             const dataFd = fs.openSync(dataPath, 'r+')
             try {
               expect(fs.writeSync(dataFd, changedData, 0, changedData.byteLength, 0))
                 .toBe(changedData.byteLength)
+              mutated = true
             } finally {
               fs.closeSync(dataFd)
             }
@@ -1508,8 +1709,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: `aux-race-${label}-boot-3`,
       durableFs,
     }))
-    expect(mutated).toBe(true)
-    expect(error.message).toMatch(/backup|changed|checksum|identity|path/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/backup|changed|checksum|identity|path/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
@@ -1556,20 +1762,27 @@ describe('verified settings/journal pair recovery', () => {
       .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
 
     let rewritten = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         const count = fs.readSync(fd, buffer, offset, length, position)
         const opened = fs.fstatSync(fd)
         if (!rewritten && opened.dev === laterIdentity.dev && opened.ino === laterIdentity.ino) {
-          rewritten = true
           if (replacePath) {
-            fs.renameSync(replacementPath, targetPath)
+            try {
+              fs.renameSync(replacementPath, targetPath)
+              rewritten = true
+            } catch (error) {
+              renameFailure = error as NodeJS.ErrnoException
+              throw error
+            }
           } else {
             const targetFd = fs.openSync(targetPath, 'r+')
             try {
               expect(fs.writeSync(targetFd, targetAfter, 0, targetAfter.byteLength, 0))
                 .toBe(targetAfter.byteLength)
+              rewritten = true
             } finally {
               fs.closeSync(targetFd)
             }
@@ -1584,8 +1797,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: `closed-proof-${relativeTarget === BABY_INFO_JOURNAL_FILE ? 'journal' : 'data'}-${replacePath ? 'swap' : 'rewrite'}-boot-3`,
       durableFs,
     }))
-    expect(rewritten).toBe(true)
-    expect(error.message).toMatch(/backup|changed|identity|path/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(rewritten).toBe(false)
+    } else {
+      expect(rewritten).toBe(true)
+      expect(error.message).toMatch(/backup|changed|identity|path/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
     for (const [name, bytes] of stagedBefore) {
@@ -1594,6 +1812,203 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.readFileSync(targetPath)).toEqual(replacePath ? targetBefore : targetAfter)
     expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+  })
+
+  it.each([
+    ['backup manifest same-inode rewrite', 'backup', false],
+    ['backup manifest atomic path swap', 'backup', true],
+    ['forensic manifest same-inode rewrite', 'forensic', false],
+    ['forensic manifest atomic path swap', 'forensic', true],
+  ])('keeps the %s held until the final Windows cleanup decision', (
+    _label,
+    targetKind,
+    replacePath,
+  ) => {
+    const completed = reachPrimaryVerifiedWindowsRestore(
+      tmpDir,
+      targetKind === 'backup'
+        ? (replacePath ? 225 : 224)
+        : (replacePath ? 227 : 226),
+      `held-manifest-${targetKind}-${replacePath ? 'swap' : 'rewrite'}`,
+    )
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const targetPath = targetKind === 'backup'
+      ? path.join(tmpDir, 'backups', '2026-07-13_10-20-30', MANIFEST_FILE)
+      : path.join(completed.forensicArchive, MANIFEST_FILE)
+    const triggerPath = targetKind === 'backup'
+      ? path.join(completed.forensicArchive, 'settings.json')
+      : path.join(tmpDir, 'settings.json')
+    const triggerIdentity = fs.statSync(triggerPath)
+    const targetBefore = fs.readFileSync(targetPath)
+    const targetAfter = Buffer.from(targetBefore)
+    targetAfter[0] = targetAfter[0] === 0x7b ? 0x5b : 0x7b
+    const replacement = path.join(
+      tmpDir,
+      `.held-${targetKind}-manifest-replacement-${replacePath ? 'swap' : 'rewrite'}`,
+    )
+    if (replacePath) fs.writeFileSync(replacement, targetBefore)
+    const liveBefore = ['settings.json', BABY_INFO_JOURNAL_FILE]
+      .map(name => [name, fs.readFileSync(path.join(tmpDir, name))] as const)
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+
+    let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
+    const durableFs: InstrumentedDurableFileOps = {
+      ...fs,
+      readSync(fd, buffer, offset, length, position) {
+        const count = fs.readSync(fd, buffer, offset, length, position)
+        const opened = fs.fstatSync(fd)
+        if (!mutated
+          && !renameFailure
+          && opened.dev === triggerIdentity.dev
+          && opened.ino === triggerIdentity.ino
+          && position !== null
+          && position + count === opened.size) {
+          if (replacePath) {
+            try {
+              fs.renameSync(replacement, targetPath)
+              mutated = true
+            } catch (error) {
+              renameFailure = error as NodeJS.ErrnoException
+              throw error
+            }
+          } else {
+            const targetFd = fs.openSync(targetPath, 'r+')
+            try {
+              expect(fs.writeSync(targetFd, targetAfter, 0, targetAfter.byteLength, 0))
+                .toBe(targetAfter.byteLength)
+              mutated = true
+            } finally {
+              fs.closeSync(targetFd)
+            }
+          }
+        }
+        return count
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `held-manifest-${targetKind}-${replacePath ? 'swap' : 'rewrite'}-boot-3`,
+      durableFs,
+    }))
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+      expect(fs.readFileSync(targetPath)).toEqual(targetBefore)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/manifest|backup|forensic|changed|identity|path/i)
+      expect(fs.readFileSync(targetPath)).toEqual(replacePath ? targetBefore : targetAfter)
+    }
+    expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    for (const [name, bytes] of stagedBefore) {
+      expect(fs.readFileSync(path.join(stagingPath, name))).toEqual(bytes)
+    }
+    for (const [name, bytes] of liveBefore) {
+      expect(fs.readFileSync(path.join(tmpDir, name))).toEqual(bytes)
+    }
+  })
+
+  it('revalidates a held manifest between cleanup steps after two data files and a short-read 128 MiB scan', () => {
+    const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 232, 'held-manifest-maximum')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const transaction = JSON.parse(completed.staleIntent.toString('utf8'))
+    transaction.lastWindowsStartupId = ''
+    const expectedIntent = Buffer.from(JSON.stringify(transaction, null, 2), 'utf8')
+    fs.writeFileSync(intentPath, expectedIntent)
+    fs.writeFileSync(path.join(stagingPath, 'restore-transaction.json'), expectedIntent)
+    const snapshot = path.join(tmpDir, 'backups', '2026-07-13_10-20-30')
+    const largeDataPath = path.join(snapshot, 'data', '2026-07.jsonl')
+    const secondDataPath = path.join(snapshot, 'data', '2026-08.jsonl')
+    fs.writeFileSync(secondDataPath, '{"second":true}\n')
+    writeManifest(snapshot)
+    const prefix = fs.readFileSync(path.join(snapshot, BABY_INFO_JOURNAL_FILE))
+    const fixture = syntheticMaximumJournal(prefix)
+    fs.truncateSync(largeDataPath, fixture.size)
+    const manifestPath = path.join(snapshot, MANIFEST_FILE)
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const largeEntry = manifest.files.find((entry: { path: string }) => entry.path === 'data/2026-07.jsonl')
+    largeEntry.size = fixture.size
+    largeEntry.sha256 = fixture.sha256
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+    const manifestBefore = fs.readFileSync(manifestPath)
+    const manifestAfter = Buffer.from(manifestBefore)
+    manifestAfter[0] = manifestAfter[0] === 0x7b ? 0x5b : 0x7b
+    const largeIdentity = fs.statSync(largeDataPath)
+    const reads: Array<{ position: number; requested: number; returned: number }> = []
+    const stagedBefore = ['settings.json', BABY_INFO_JOURNAL_FILE, 'restore-transaction.json']
+      .map(name => [name, fs.readFileSync(path.join(stagingPath, name))] as const)
+    let mutated = false
+    let largeDataEofs = 0
+    const posixOps = simulatedPosixOps()
+    const durableFs: InstrumentedDurableFileOps = {
+      ...posixOps,
+      openSync(target, flags, mode) {
+        if (!mutated
+          && path.resolve(String(target)) === path.resolve(tmpDir)
+          && !fs.existsSync(stagingPath)
+          && fs.existsSync(intentPath)) {
+          const manifestFd = fs.openSync(manifestPath, 'r+')
+          try {
+            expect(fs.writeSync(manifestFd, manifestAfter, 0, manifestAfter.byteLength, 0))
+              .toBe(manifestAfter.byteLength)
+            mutated = true
+          } finally {
+            fs.closeSync(manifestFd)
+          }
+        }
+        return posixOps.openSync(target, flags, mode)
+      },
+      readSync(fd, buffer, offset, length, position) {
+        if (position === null) throw new Error('cleanup evidence reads must be positional')
+        const opened = fs.fstatSync(fd)
+        if (opened.dev === largeIdentity.dev && opened.ino === largeIdentity.ino) {
+          const returned = Math.min(length, 32 * 1024)
+          const target = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+          fixture.readInto(target, offset, returned, position)
+          reads.push({ position, requested: length, returned })
+          if (position + returned === fixture.size) {
+            largeDataEofs += 1
+          }
+          return returned
+        }
+        return fs.readSync(fd, buffer, offset, length, position)
+      },
+    }
+
+    let error: Error & Record<string, unknown> | undefined
+    const startedAt = Date.now()
+    let allocations: Array<{ method: string; size: number }> = []
+    allocations = guardBufferAllocations(64 * 1024, () => {
+      try {
+        recoverSettingsAndJournalPair(tmpDir, {
+          platform: 'linux',
+          durableFs,
+        })
+      } catch (caught) {
+        if (!(caught instanceof Error)) throw caught
+        error = caught as Error & Record<string, unknown>
+      }
+    })
+    const elapsedMs = Date.now() - startedAt
+
+    expect(error).toBeDefined()
+    expect(error!.message).toMatch(/manifest|backup|changed|identity|path/i)
+    expect(fs.readFileSync(manifestPath)).toEqual(manifestAfter)
+    expect(Math.max(...allocations.map(allocation => allocation.size))).toBeLessThanOrEqual(64 * 1024)
+    expect(reads.some(read => read.returned < read.requested)).toBe(true)
+    expect(Math.max(...reads.map(read => read.requested))).toBeLessThanOrEqual(64 * 1024)
+    expect(reads.reduce((total, read) => total + read.returned, 0)).toBe(fixture.size * 3)
+    expect(reads.filter(read => read.position + read.returned === fixture.size)).toHaveLength(3)
+    expect(elapsedMs).toBeLessThan(20_000)
+    expect(fs.readFileSync(intentPath)).toEqual(expectedIntent)
+    expect(fs.existsSync(stagingPath)).toBe(false)
+    expect(stagedBefore).toHaveLength(3)
   })
 
   it('rejects a backup file added after its bounded pre-scan inventory', () => {
@@ -1640,19 +2055,25 @@ describe('verified settings/journal pair recovery', () => {
     const dataDir = path.join(snapshot, 'data')
     const displacedDataDir = path.join(tmpDir, '.displaced-backup-data')
     let swapped = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         const count = fs.readSync(fd, buffer, offset, length, position)
         const opened = fs.fstatSync(fd)
         if (!swapped && opened.dev === journalIdentity.dev && opened.ino === journalIdentity.ino) {
-          swapped = true
-          fs.renameSync(dataDir, displacedDataDir)
-          fs.mkdirSync(dataDir)
-          fs.copyFileSync(
-            path.join(displacedDataDir, '2026-07.jsonl'),
-            path.join(dataDir, '2026-07.jsonl'),
-          )
+          try {
+            fs.renameSync(dataDir, displacedDataDir)
+            fs.mkdirSync(dataDir)
+            fs.copyFileSync(
+              path.join(displacedDataDir, '2026-07.jsonl'),
+              path.join(dataDir, '2026-07.jsonl'),
+            )
+            swapped = true
+          } catch (error) {
+            renameFailure = error as NodeJS.ErrnoException
+            throw error
+          }
         }
         return count
       },
@@ -1663,8 +2084,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: 'backup-set-swap-boot-3',
       durableFs,
     }))
-    expect(swapped).toBe(true)
-    expect(error.message).toMatch(/directory|identity|backup|changed/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(swapped).toBe(false)
+    } else {
+      expect(swapped).toBe(true)
+      expect(error.message).toMatch(/directory|identity|backup|changed/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
   })
@@ -1728,6 +2154,7 @@ describe('verified settings/journal pair recovery', () => {
 
     let settingsPasses = 0
     let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
     const durableFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
@@ -1739,14 +2166,20 @@ describe('verified settings/journal pair recovery', () => {
           && position + count === opened.size) {
           settingsPasses += 1
           if (!mutated && settingsPasses === 2) {
-            mutated = true
             if (replacePath) {
-              fs.renameSync(replacement, forensicJournalPath)
+              try {
+                fs.renameSync(replacement, forensicJournalPath)
+                mutated = true
+              } catch (error) {
+                renameFailure = error as NodeJS.ErrnoException
+                throw error
+              }
             } else {
               const journalFd = fs.openSync(forensicJournalPath, 'r+')
               try {
                 expect(fs.writeSync(journalFd, journalAfter, 0, journalAfter.byteLength, 0))
                   .toBe(journalAfter.byteLength)
+                mutated = true
               } finally {
                 fs.closeSync(journalFd)
               }
@@ -1762,8 +2195,13 @@ describe('verified settings/journal pair recovery', () => {
       startupId: `forensic-held-${label.replaceAll(' ', '-')}-boot-3`,
       durableFs,
     }))
-    expect(mutated).toBe(true)
-    expect(error.message).toMatch(/forensic|journal|changed|identity|path/i)
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/forensic|journal|changed|identity|path/i)
+    }
     expect(fs.readFileSync(intentPath)).toEqual(completed.staleIntent)
     expect(fs.existsSync(stagingPath)).toBe(true)
     for (const [name, bytes] of stagedBefore) {
@@ -1858,8 +2296,11 @@ describe('verified settings/journal pair recovery', () => {
 
     expect(Math.max(...allocations.map(allocation => allocation.size))).toBeLessThanOrEqual(64 * 1024)
     expect(Math.max(...readRequests.map(request => request.length))).toBeLessThanOrEqual(64 * 1024)
-    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(fixture.size * 2)
-    expect(readRequests.filter(request => request.position + request.length === fixture.size)).toHaveLength(2)
+    const expectedPasses = descriptorMatches ? 3 : 2
+    expect(readRequests.reduce((total, request) => total + request.length, 0))
+      .toBe(fixture.size * expectedPasses)
+    expect(readRequests.filter(request => request.position + request.length === fixture.size))
+      .toHaveLength(expectedPasses)
     expect(elapsedMs).toBeLessThan(10_000)
     if (descriptorMatches) {
       expect(caught).toBeUndefined()
@@ -1872,7 +2313,7 @@ describe('verified settings/journal pair recovery', () => {
     }
   })
 
-  it('handles real-disk short reads, reaches each bounded EOF twice, and closes every source handle', () => {
+  it('handles real-disk short reads through every cleanup revalidation and closes every source handle', () => {
     const completed = reachPrimaryVerifiedWindowsRestore(tmpDir, 215, 'short-read')
     const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
     const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
@@ -1909,22 +2350,25 @@ describe('verified settings/journal pair recovery', () => {
       'utf8',
     )
 
-    const targetIdentities = new Set([snapshotJournalPath, liveJournalPath, stagingJournalPath].map(target => {
+    const targetIdentities = new Map([snapshotJournalPath, liveJournalPath, stagingJournalPath].map(target => {
       const stat = fs.statSync(target)
-      return `${stat.dev}:${stat.ino}`
+      const source = target === snapshotJournalPath
+        ? 'backup'
+        : target === stagingJournalPath ? 'staging' : 'live'
+      return [`${stat.dev}:${stat.ino}`, source]
     }))
-    const reads: Array<{ position: number; requested: number; count: number }> = []
+    const reads: Array<{ source: string; position: number; requested: number; count: number }> = []
     const shortReadFs: InstrumentedDurableFileOps = {
       ...fs,
       readSync(fd, buffer, offset, length, position) {
         const opened = fs.fstatSync(fd)
-        const isTarget = opened.size === journalBytes.byteLength
-          && targetIdentities.has(`${opened.dev}:${opened.ino}`)
+        const source = targetIdentities.get(`${opened.dev}:${opened.ino}`)
+        const isTarget = opened.size === journalBytes.byteLength && source !== undefined
         const requested = isTarget ? Math.min(length, 4 * 1024) : length
         const count = fs.readSync(fd, buffer, offset, requested, position)
         if (isTarget) {
           if (position === null) throw new Error('short-read verification must be positional')
-          reads.push({ position, requested, count })
+          reads.push({ source, position, requested, count })
         }
         return count
       },
@@ -1936,8 +2380,15 @@ describe('verified settings/journal pair recovery', () => {
       durableFs: shortReadFs,
     })).not.toThrow()
     expect(Math.max(...reads.map(read => read.requested))).toBeLessThanOrEqual(4 * 1024)
-    expect(reads.reduce((total, read) => total + read.count, 0)).toBe(journalBytes.byteLength * 6)
-    expect(reads.filter(read => read.position + read.count === journalBytes.byteLength)).toHaveLength(6)
+    expect(reads.reduce((total, read) => total + read.count, 0)).toBe(journalBytes.byteLength * 10)
+    expect(reads.filter(read => read.position + read.count === journalBytes.byteLength)).toHaveLength(10)
+    expect(Object.fromEntries(['backup', 'staging', 'live'].map(source => [
+      source,
+      reads.filter(read => (
+        read.source === source
+        && read.position + read.count === journalBytes.byteLength
+      )).length,
+    ]))).toEqual({ backup: 4, staging: 2, live: 4 })
     expect(fs.existsSync(intentPath)).toBe(false)
     expect(fs.existsSync(stagingPath)).toBe(false)
 
@@ -2036,8 +2487,10 @@ describe('verified settings/journal pair recovery', () => {
       Math.max(...readRequests.map(request => request.length)),
       `RSS growth diagnostic only: ${rssGrowth}`,
     ).toBeLessThanOrEqual(64 * 1024)
-    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(maximumJournalBytes * 2)
+    expect(readRequests.reduce((total, request) => total + request.length, 0)).toBe(maximumJournalBytes * 3)
     expect(readRequests.at(-1)!.position + readRequests.at(-1)!.length).toBe(maximumJournalBytes)
+    expect(readRequests.filter(request => request.position + request.length === maximumJournalBytes))
+      .toHaveLength(3)
     expect(elapsedMs).toBeLessThan(10_000)
     expect(fs.existsSync(intentPath)).toBe(false)
 
@@ -2460,6 +2913,85 @@ describe('verified settings/journal pair recovery', () => {
     )
   })
 
+  it.each([
+    ['same-inode rewrite', false],
+    ['atomic path swap', true],
+  ])('keeps POSIX primary-verified evidence when the live journal suffers a cleanup-window %s', (
+    _label,
+    replacePath,
+  ) => {
+    const snapshot = writeSnapshot(
+      tmpDir,
+      '2026-07-13_10-20-30',
+      [mutation(replacePath ? 230 : 229)],
+    )
+    writeCorruptLivePair(tmpDir)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const expectedRestoredSettings = fs.readFileSync(path.join(snapshot.snapshot, 'settings.json'))
+    const expectedRestoredJournal = Buffer.from(snapshot.journal)
+    const changedJournal = Buffer.from(expectedRestoredJournal)
+    changedJournal[0] = changedJournal[0] === 0x7b ? 0x5b : 0x7b
+    const replacement = path.join(tmpDir, '.posix-cleanup-journal-replacement')
+    if (replacePath) fs.writeFileSync(replacement, expectedRestoredJournal)
+
+    const posixOps = simulatedPosixOps()
+    let mutated = false
+    let renameFailure: NodeJS.ErrnoException | undefined
+    const durableFs: DurableFileOps = {
+      ...posixOps,
+      renameSync(oldPath, newPath) {
+        const destination = path.resolve(String(newPath))
+        const isIntent = destination === path.resolve(intentPath)
+        let phase: string | undefined
+        if (isIntent) {
+          try { phase = JSON.parse(fs.readFileSync(oldPath, 'utf8')).phase } catch { /* not transaction bytes */ }
+        }
+        posixOps.renameSync(oldPath, newPath)
+        if (!mutated && !renameFailure && phase === 'primary-verified') {
+          if (replacePath) {
+            try {
+              fs.renameSync(replacement, journalPath)
+              mutated = true
+            } catch (error) {
+              renameFailure = error as NodeJS.ErrnoException
+              throw error
+            }
+          } else {
+            const journalFd = fs.openSync(journalPath, 'r+')
+            try {
+              expect(fs.writeSync(journalFd, changedJournal, 0, changedJournal.byteLength, 0))
+                .toBe(changedJournal.byteLength)
+              mutated = true
+            } finally {
+              fs.closeSync(journalFd)
+            }
+          }
+        }
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs,
+    }))
+    if (renameFailure) {
+      expect(['EACCES', 'EBUSY', 'EPERM']).toContain(renameFailure.code)
+      expect(mutated).toBe(false)
+      expect(fs.readFileSync(journalPath)).toEqual(expectedRestoredJournal)
+    } else {
+      expect(mutated).toBe(true)
+      expect(error.message).toMatch(/live|journal|changed|identity|path|verification/i)
+      expect(fs.readFileSync(journalPath)).toEqual(
+        replacePath ? expectedRestoredJournal : changedJournal,
+      )
+    }
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(expectedRestoredSettings)
+    expect(JSON.parse(fs.readFileSync(intentPath, 'utf8')).phase).toBe('primary-verified')
+    expect(fs.existsSync(stagingPath)).toBe(true)
+  })
+
   it('commits intent removal with parent-directory fsync before POSIX staging cleanup', () => {
     writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(109)])
     writeCorruptLivePair(tmpDir)
@@ -2497,7 +3029,7 @@ describe('verified settings/journal pair recovery', () => {
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
   })
 
-  it('recovers production POSIX orphan staging after intent deletion and a cleanup crash', () => {
+  it('keeps POSIX intent deletion last when cleanup reports a crash after unlink', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(149)])
     writeCorruptLivePair(tmpDir)
     const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
@@ -2506,6 +3038,9 @@ describe('verified settings/journal pair recovery', () => {
     const durableFs: DurableFileOps = {
       ...posixOps,
       unlinkSync(target) {
+        if (path.resolve(String(target)) === path.resolve(path.join(tmpDir, RESTORE_INTENT_FILE))) {
+          expect(fs.existsSync(stagingPath)).toBe(false)
+        }
         posixOps.unlinkSync(target)
         if (failAfterIntentDeletion
           && path.resolve(String(target)) === path.resolve(path.join(tmpDir, RESTORE_INTENT_FILE))) {
@@ -2518,7 +3053,7 @@ describe('verified settings/journal pair recovery', () => {
     expect(() => new SettingsStore(tmpDir, { platform: 'linux', durableFs }))
       .toThrow(/simulated POSIX crash after intent deletion/i)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_INTENT_FILE))).toBe(false)
-    expect(fs.existsSync(stagingPath)).toBe(true)
+    expect(fs.existsSync(stagingPath)).toBe(false)
 
     expect(() => new SettingsStore(tmpDir, { platform: 'linux', durableFs })).not.toThrow()
     expect(fs.existsSync(stagingPath)).toBe(false)
@@ -2741,6 +3276,110 @@ describe('verified settings/journal pair recovery', () => {
       expect(fs.existsSync(staging)).toBe(false)
     },
   )
+
+  it.each([
+    ['backup manifest', 'backup'],
+    ['live journal', 'live'],
+  ] as const)('keeps legacy v1 backup and live evidence held across cleanup: %s', (
+    _label,
+    targetKind,
+  ) => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(235)])
+    const settingsBytes = fs.readFileSync(path.join(snapshot.snapshot, 'settings.json'))
+    const journalBytes = snapshot.journal
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    fs.mkdirSync(stagingPath)
+    fs.writeFileSync(path.join(stagingPath, 'settings.json'), settingsBytes)
+    fs.writeFileSync(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), journalBytes)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const legacyIntent = Buffer.from(JSON.stringify({
+      version: 1,
+      snapshotId: '2026-07-13_10-20-30',
+      settings: { size: settingsBytes.byteLength, sha256: digest(settingsBytes) },
+      journal: { size: journalBytes.byteLength, sha256: digest(journalBytes) },
+    }, null, 2), 'utf8')
+    fs.writeFileSync(intentPath, legacyIntent)
+    writeCorruptLivePair(tmpDir)
+
+    const targetPath = targetKind === 'backup'
+      ? path.join(snapshot.snapshot, MANIFEST_FILE)
+      : path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const targetBefore = targetKind === 'backup'
+      ? fs.readFileSync(targetPath)
+      : Buffer.from(journalBytes)
+    const targetAfter = Buffer.from(targetBefore)
+    targetAfter[0] = targetAfter[0] === 0x7b ? 0x5b : 0x7b
+    let mutated = false
+    const posixOps = simulatedPosixOps()
+    const durableFs: DurableFileOps = {
+      ...posixOps,
+      openSync(target, flags, mode) {
+        if (!mutated
+          && path.resolve(String(target)) === path.resolve(tmpDir)
+          && !fs.existsSync(stagingPath)
+          && fs.existsSync(intentPath)) {
+          const targetFd = fs.openSync(targetPath, 'r+')
+          try {
+            expect(fs.writeSync(targetFd, targetAfter, 0, targetAfter.byteLength, 0))
+              .toBe(targetAfter.byteLength)
+            mutated = true
+          } finally {
+            fs.closeSync(targetFd)
+          }
+        }
+        return posixOps.openSync(target, flags, mode)
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs,
+    }))
+    expect(mutated).toBe(true)
+    expect(error.message).toMatch(/backup|manifest|live|journal|changed|identity|path/i)
+    expect(error).toMatchObject({ originalsPreserved: false })
+    expect(fs.readFileSync(intentPath)).toEqual(legacyIntent)
+    expect(fs.existsSync(stagingPath)).toBe(false)
+    expect(fs.readFileSync(targetPath)).toEqual(targetAfter)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(settingsBytes)
+  })
+
+  it('does not grant legacy cleanup authority to a forged v3 epoch transaction', () => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(236)])
+    const settingsBytes = fs.readFileSync(path.join(snapshot.snapshot, 'settings.json'))
+    const journalBytes = snapshot.journal
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), settingsBytes)
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), journalBytes)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    fs.mkdirSync(stagingPath)
+    fs.writeFileSync(path.join(stagingPath, 'settings.json'), settingsBytes)
+    fs.writeFileSync(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), journalBytes)
+    const forged = Buffer.from(JSON.stringify({
+      version: 3,
+      snapshotId: '2026-07-13_10-20-30',
+      snapshotTimestamp: '1970-01-01T00:00:00.000Z',
+      settings: { size: settingsBytes.byteLength, sha256: digest(settingsBytes) },
+      journal: { size: journalBytes.byteLength, sha256: digest(journalBytes) },
+      phase: 'primary-verified',
+      windowsVerifiedStartups: 0,
+      lastWindowsStartupId: '',
+      forensicArchiveId: '',
+      forensicManifest: null,
+    }, null, 2), 'utf8')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    fs.writeFileSync(intentPath, forged)
+    fs.writeFileSync(path.join(stagingPath, 'restore-transaction.json'), forged)
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs: simulatedPosixOps(),
+    }))
+    expect(error.message).toMatch(/primary-verified|exact verified backup/i)
+    expect(fs.readFileSync(intentPath)).toEqual(forged)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(settingsBytes)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(journalBytes)
+  })
 
   it('throws a structured recoverable error and preserves both originals when no pair verifies', () => {
     const original = writeCorruptLivePair(tmpDir)

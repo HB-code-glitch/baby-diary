@@ -35,9 +35,13 @@ const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 const STREAM_CHUNK_BYTES = 64 * 1024
 const MAX_FORENSIC_ARCHIVE_ALLOCATION_ATTEMPTS = 64
 const MAX_FORENSIC_ARCHIVES = 64
+const LEGACY_TRANSACTION_TIMESTAMP = new Date(0).toISOString()
+let forensicStreamSequence = 0
 
 export const DEFAULT_BACKUP_RESOURCE_LIMITS = Object.freeze({
-  maxSnapshotFiles: 4_096,
+  // Every verified file descriptor remains open until the cleanup decision.
+  // Keep the production evidence set within common desktop soft-fd budgets.
+  maxSnapshotFiles: 128,
   maxCandidates: 1_024,
   maxTotalSnapshotBytes: 768 * 1024 * 1024,
 })
@@ -412,6 +416,23 @@ interface OpenRegularFile {
   relativePath: string
 }
 
+interface HeldEvidence<T> {
+  value: T
+  assertStable(): void
+  close(): void
+}
+
+interface ExpectedOpenRegularFile {
+  source: OpenRegularFile
+  expected: DigestDescriptor
+}
+
+function closeOpenRegularFiles(sources: readonly OpenRegularFile[]): void {
+  for (let index = sources.length - 1; index >= 0; index -= 1) {
+    fs.closeSync(sources[index].fd)
+  }
+}
+
 function openRegularFileOnce(
   root: string,
   relativePath: string,
@@ -532,6 +553,24 @@ function stableHashOpenRegularFile(
     throw new Error(`backup file changed between descriptor passes: ${source.relativePath}`)
   }
   return first
+}
+
+function assertOpenRegularFileContent(
+  evidence: ExpectedOpenRegularFile,
+  options: BackupReadOptions,
+): void {
+  const actual = hashOpenRegularFilePass(evidence.source, options)
+  if (!sameDescriptor(actual, evidence.expected)) {
+    throw new Error(`backup file content changed: ${evidence.source.relativePath}`)
+  }
+}
+
+function assertHeldRegularFilesStable(
+  evidence: readonly ExpectedOpenRegularFile[],
+  options: BackupReadOptions,
+): void {
+  for (const item of evidence) assertOpenRegularFileContent(item, options)
+  for (const item of evidence) assertOpenFileUnchanged(item.source)
 }
 
 /**
@@ -852,19 +891,22 @@ export function verifyBackupSnapshot(
     }
   }
 
-  const manifestBytes = readRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
-  const manifest = parseManifest(manifestBytes, now, limits)
-  const manifestPaths = manifest.files.map(entry => entry.path)
-  const beforePaths = actualSnapshotPaths(snapshotDir, limits)
-  if (beforePaths.length !== manifestPaths.length
-    || beforePaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
-    throw new Error('backup manifest does not enumerate the complete staged set')
-  }
-  assertVerificationDirectories()
-
   const evidenceSources: OpenRegularFile[] = []
-  let settingsSource: OpenRegularFile | undefined
   try {
+    const manifestSource = openRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
+    evidenceSources.push(manifestSource)
+    const manifestBytes = readOpenRegularFile(manifestSource, options)
+    assertOpenFileUnchanged(manifestSource)
+    const manifest = parseManifest(manifestBytes, now, limits)
+    const manifestPaths = manifest.files.map(entry => entry.path)
+    const beforePaths = actualSnapshotPaths(snapshotDir, limits)
+    if (beforePaths.length !== manifestPaths.length
+      || beforePaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
+      throw new Error('backup manifest does not enumerate the complete staged set')
+    }
+    assertVerificationDirectories()
+
+    let settingsSource: OpenRegularFile | undefined
     let settingsBytes: Buffer | undefined
     let journalBytes: Buffer | undefined
     for (const entry of manifest.files) {
@@ -902,6 +944,10 @@ export function verifyBackupSnapshot(
     if (!settingsAfterScan.equals(settingsBytes)) {
       throw new Error('backup settings changed while journal/data files were scanned')
     }
+    const manifestAfterScan = readOpenRegularFile(manifestSource, options)
+    if (!manifestAfterScan.equals(manifestBytes)) {
+      throw new Error('backup manifest changed while journal/data files were scanned')
+    }
     assertVerificationDirectories()
     const afterPaths = actualSnapshotPaths(snapshotDir, limits)
     if (afterPaths.length !== manifestPaths.length
@@ -909,6 +955,10 @@ export function verifyBackupSnapshot(
       throw new Error('backup manifest set changed during verification')
     }
     assertVerificationDirectories()
+    assertOpenRegularFileContent(
+      { source: manifestSource, expected: descriptor(manifestBytes) },
+      options,
+    )
     for (const source of evidenceSources) assertOpenFileUnchanged(source)
     return pairFromBuffers(
       path.basename(snapshotDir),
@@ -936,10 +986,10 @@ interface VerifiedSnapshotIdentity {
  * the journal or auxiliary files. Public backup selection still returns its
  * immutable buffers; this path needs only independently verified identity.
  */
-function verifyBackupSnapshotIdentity(
+function holdBackupSnapshotIdentity(
   snapshotDir: string,
   options: RecoveryOptions,
-): VerifiedSnapshotIdentity {
+): HeldEvidence<VerifiedSnapshotIdentity> {
   const now = options.now ?? new Date()
   const limits = resourceLimits(options.limits)
   const snapshotAbsolute = path.resolve(snapshotDir)
@@ -967,41 +1017,85 @@ function verifyBackupSnapshotIdentity(
       || entries[0].isSymbolicLink()) {
       throw new Error('legacy backup must contain only settings.json')
     }
-    const settingsBytes = readRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
-    const settings = parseSettingsBytes(settingsBytes)
-    if (!isLegacySettings(settings)) throw new Error('journal-aware backup is missing its manifest')
-    const afterEntries = boundedDirectoryEntries(snapshotDir, 2, 'legacy backup entry')
-    if (afterEntries.length !== 1
-      || afterEntries[0].name !== SETTINGS_FILE
-      || !afterEntries[0].isFile()
-      || afterEntries[0].isSymbolicLink()) {
-      throw new Error('legacy backup changed during verification')
+    const settingsSource = openRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
+    try {
+      const settingsBytes = readOpenRegularFile(settingsSource, options)
+      const settings = parseSettingsBytes(settingsBytes)
+      if (!isLegacySettings(settings)) throw new Error('journal-aware backup is missing its manifest')
+      const afterEntries = boundedDirectoryEntries(snapshotDir, 2, 'legacy backup entry')
+      if (afterEntries.length !== 1
+        || afterEntries[0].name !== SETTINGS_FILE
+        || !afterEntries[0].isFile()
+        || afterEntries[0].isSymbolicLink()) {
+        throw new Error('legacy backup changed during verification')
+      }
+      const settingsAfterScan = readOpenRegularFile(settingsSource, options)
+      if (!settingsAfterScan.equals(settingsBytes)) {
+        throw new Error('legacy backup settings changed during verification')
+      }
+      assertOpenFileUnchanged(settingsSource)
+      assertVerificationDirectories()
+      const value: VerifiedSnapshotIdentity = {
+        snapshotId: path.basename(snapshotDir),
+        snapshotTimestamp: parseLegacySnapshotTimestamp(path.basename(snapshotDir), now),
+        settingsDescriptor: descriptor(settingsBytes),
+        journalDescriptor: { size: 0, sha256: sha256(new Uint8Array(0)) },
+      }
+      let closed = false
+      return {
+        value,
+        assertStable() {
+          if (closed) throw new Error('legacy backup evidence is already closed')
+          const current = readOpenRegularFile(settingsSource, options)
+          if (!current.equals(settingsBytes)) {
+            throw new Error('legacy backup settings changed before cleanup')
+          }
+          const currentEntries = boundedDirectoryEntries(snapshotDir, 2, 'legacy backup entry')
+          if (currentEntries.length !== 1
+            || currentEntries[0].name !== SETTINGS_FILE
+            || !currentEntries[0].isFile()
+            || currentEntries[0].isSymbolicLink()) {
+            throw new Error('legacy backup changed before cleanup')
+          }
+          assertVerificationDirectories()
+          assertOpenFileUnchanged(settingsSource)
+        },
+        close() {
+          if (closed) return
+          closed = true
+          fs.closeSync(settingsSource.fd)
+        },
+      }
+    } catch (error) {
+      fs.closeSync(settingsSource.fd)
+      throw error
+    }
+  }
+
+  const evidenceSources: OpenRegularFile[] = []
+  const expectedEvidence: ExpectedOpenRegularFile[] = []
+  try {
+    const manifestSource = openRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
+    evidenceSources.push(manifestSource)
+    const manifestBytes = readOpenRegularFile(manifestSource, options)
+    const manifestDescriptor = descriptor(manifestBytes)
+    expectedEvidence.push({ source: manifestSource, expected: manifestDescriptor })
+    assertOpenFileUnchanged(manifestSource)
+    const manifest = parseManifest(manifestBytes, now, limits)
+    const manifestPaths = manifest.files.map(entry => entry.path)
+    const beforePaths = actualSnapshotPaths(snapshotDir, limits)
+    if (beforePaths.length !== manifestPaths.length
+      || beforePaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
+      throw new Error('backup manifest does not enumerate the complete staged set')
     }
     assertVerificationDirectories()
-    return {
-      snapshotId: path.basename(snapshotDir),
-      snapshotTimestamp: parseLegacySnapshotTimestamp(path.basename(snapshotDir), now),
-      settingsDescriptor: descriptor(settingsBytes),
-      journalDescriptor: { size: 0, sha256: sha256(new Uint8Array(0)) },
-    }
-  }
 
-  const manifestBytes = readRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
-  const manifest = parseManifest(manifestBytes, now, limits)
-  const manifestPaths = manifest.files.map(entry => entry.path)
-  const beforePaths = actualSnapshotPaths(snapshotDir, limits)
-  if (beforePaths.length !== manifestPaths.length
-    || beforePaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
-    throw new Error('backup manifest does not enumerate the complete staged set')
-  }
-  assertVerificationDirectories()
-
-  const settingsEntry = manifest.files[0]
-  const settingsSource = openRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
-  const evidenceSources: OpenRegularFile[] = [settingsSource]
-  let settingsBytes: Buffer
-  let journalResult: StreamedJournalResult | undefined
-  try {
+    const settingsEntry = manifest.files[0]
+    const settingsSource = openRegularFileOnce(snapshotDir, SETTINGS_FILE, options)
+    evidenceSources.push(settingsSource)
+    expectedEvidence.push({ source: settingsSource, expected: settingsEntry })
+    let settingsBytes: Buffer
+    let journalResult: StreamedJournalResult | undefined
     settingsBytes = readOpenRegularFile(settingsSource, options)
     assertOpenFileUnchanged(settingsSource)
     if (!sameDescriptor(descriptor(settingsBytes), settingsEntry)) {
@@ -1011,6 +1105,7 @@ function verifyBackupSnapshotIdentity(
       if (entry.path === BABY_INFO_JOURNAL_FILE) {
         const journalSource = openRegularFileOnce(snapshotDir, entry.path, options)
         evidenceSources.push(journalSource)
+        expectedEvidence.push({ source: journalSource, expected: entry })
         journalResult = streamOpenJournal(journalSource, options, { allowTornFinal: false })
         if (!sameDescriptor(journalResult.descriptor, entry)) {
           throw new Error(`backup checksum mismatch: ${entry.path}`)
@@ -1019,6 +1114,7 @@ function verifyBackupSnapshotIdentity(
       }
       const dataSource = openRegularFileOnce(snapshotDir, entry.path, options)
       evidenceSources.push(dataSource)
+      expectedEvidence.push({ source: dataSource, expected: entry })
       const actual = stableHashOpenRegularFile(dataSource, options)
       if (!sameDescriptor(actual, entry)) {
         throw new Error(`backup checksum mismatch: ${entry.path}`)
@@ -1030,6 +1126,10 @@ function verifyBackupSnapshotIdentity(
     if (!settingsAfterScan.equals(settingsBytes)) {
       throw new Error('backup settings changed while journal/data files were scanned')
     }
+    const manifestAfterScan = readOpenRegularFile(manifestSource, options)
+    if (!manifestAfterScan.equals(manifestBytes)) {
+      throw new Error('backup manifest changed while journal/data files were scanned')
+    }
     assertVerificationDirectories()
     const afterPaths = actualSnapshotPaths(snapshotDir, limits)
     if (afterPaths.length !== manifestPaths.length
@@ -1038,19 +1138,39 @@ function verifyBackupSnapshotIdentity(
     }
     assertVerificationDirectories()
     for (const source of evidenceSources) assertOpenFileUnchanged(source)
-  } finally {
-    for (let index = evidenceSources.length - 1; index >= 0; index -= 1) {
-      fs.closeSync(evidenceSources[index].fd)
-    }
-  }
 
-  const settings = parseSettingsBytes(settingsBytes)
-  validateProjection(settings, journalResult!.journal)
-  return {
-    snapshotId: path.basename(snapshotDir),
-    snapshotTimestamp: manifest.snapshotTimestamp,
-    settingsDescriptor: descriptor(settingsBytes),
-    journalDescriptor: journalResult!.descriptor,
+    const settings = parseSettingsBytes(settingsBytes)
+    validateProjection(settings, journalResult!.journal)
+    const value: VerifiedSnapshotIdentity = {
+      snapshotId: path.basename(snapshotDir),
+      snapshotTimestamp: manifest.snapshotTimestamp,
+      settingsDescriptor: descriptor(settingsBytes),
+      journalDescriptor: journalResult!.descriptor,
+    }
+    let closed = false
+    return {
+      value,
+      assertStable() {
+        if (closed) throw new Error('backup evidence is already closed')
+        assertHeldRegularFilesStable(expectedEvidence, options)
+        assertVerificationDirectories()
+        const finalPaths = actualSnapshotPaths(snapshotDir, limits)
+        if (finalPaths.length !== manifestPaths.length
+          || finalPaths.some((relativePath, index) => relativePath !== manifestPaths[index])) {
+          throw new Error('backup manifest set changed before cleanup')
+        }
+        assertVerificationDirectories()
+        for (const source of evidenceSources) assertOpenFileUnchanged(source)
+      },
+      close() {
+        if (closed) return
+        closed = true
+        closeOpenRegularFiles(evidenceSources)
+      },
+    }
+  } catch (error) {
+    closeOpenRegularFiles(evidenceSources)
+    throw error
   }
 }
 
@@ -1280,7 +1400,7 @@ function normalizeTransaction(intent: ParsedRestoreIntent): RestoreTransactionFi
   return {
     version: 3,
     snapshotId: intent.snapshotId,
-    snapshotTimestamp: intent.version === 1 ? new Date(0).toISOString() : intent.snapshotTimestamp,
+    snapshotTimestamp: intent.version === 1 ? LEGACY_TRANSACTION_TIMESTAMP : intent.snapshotTimestamp,
     settings: intent.settings,
     journal: intent.journal,
     phase: intent.version === 1 ? 'prepared' : intent.phase,
@@ -1341,11 +1461,12 @@ function sameTransactionControls(left: RestoreTransactionFile, right: RestoreTra
     && left.lastWindowsStartupId === right.lastWindowsStartupId
 }
 
-function transactionMatchesVerifiedBackup(
+function holdTransactionVerifiedBackup(
   userDataPath: string,
   transaction: RestoreTransactionFile,
   options: RecoveryOptions,
-): boolean {
+  allowLegacyTimestamp = false,
+): HeldEvidence<VerifiedSnapshotIdentity> {
   const roots = [path.join(userDataPath, 'backups')]
   if (options.documentsBackupDir
     && path.resolve(options.documentsBackupDir) !== path.resolve(roots[0])) {
@@ -1355,29 +1476,36 @@ function transactionMatchesVerifiedBackup(
   const budget: CandidateBudget = { entriesSeen: 0 }
   for (const root of roots) {
     for (const candidate of listSnapshotCandidates(root, limits, budget)) {
+      let held: HeldEvidence<VerifiedSnapshotIdentity> | undefined
       try {
-        const identity = verifyBackupSnapshotIdentity(candidate, options)
+        held = holdBackupSnapshotIdentity(candidate, options)
+        const identity = held.value
         if (identity.snapshotId === transaction.snapshotId
-          && identity.snapshotTimestamp === transaction.snapshotTimestamp
+          && (identity.snapshotTimestamp === transaction.snapshotTimestamp
+            || (allowLegacyTimestamp
+              && transaction.snapshotTimestamp === LEGACY_TRANSACTION_TIMESTAMP))
           && sameDescriptor(identity.settingsDescriptor, transaction.settings)
           && sameDescriptor(identity.journalDescriptor, transaction.journal)) {
-          return true
+          const matched = held
+          held = undefined
+          return matched
         }
       } catch { /* only an independently verified exact identity can match */ }
+      finally { held?.close() }
     }
   }
-  return false
+  throw new Error('primary-verified transaction identity does not match an exact verified backup')
 }
 
-function verifyStreamedPair(
+function holdVerifiedStreamedPair(
   directory: string,
   transaction: RestoreTransactionFile,
   options: RecoveryOptions,
   allowTornFinal: boolean,
-): {
+): HeldEvidence<{
   settingsDescriptor: DigestDescriptor
   journalDescriptor: DigestDescriptor
-} {
+}> {
   const absolute = path.resolve(directory)
   const parentReal = fs.realpathSync.native(path.dirname(absolute))
   const directoryIdentity = bindDirectChildDirectory(
@@ -1386,12 +1514,14 @@ function verifyStreamedPair(
     'settings/journal verification directory',
   )
   const settingsSource = openRegularFileOnce(directory, SETTINGS_FILE, options)
+  const evidenceSources: OpenRegularFile[] = [settingsSource]
   let journalSource: OpenRegularFile | undefined
   try {
     const settingsBytes = readOpenRegularFile(settingsSource, options)
     assertOpenFileUnchanged(settingsSource)
     const settings = parseSettingsBytes(settingsBytes)
     journalSource = openRegularFileOnce(directory, BABY_INFO_JOURNAL_FILE, options)
+    evidenceSources.push(journalSource)
     const journalResult = streamOpenJournal(journalSource, options, {
       allowTornFinal,
       requiredPrefix: transaction.journal,
@@ -1404,13 +1534,53 @@ function verifyStreamedPair(
     assertOpenFileUnchanged(journalSource)
     assertBoundDirectory(directoryIdentity)
     validateProjection(settings, journalResult.journal)
-    return {
+    const value = {
       settingsDescriptor: descriptor(settingsBytes),
       journalDescriptor: journalResult.descriptor,
     }
+    let closed = false
+    return {
+      value,
+      assertStable() {
+        if (closed) throw new Error('settings/journal evidence is already closed')
+        const finalSettings = readOpenRegularFile(settingsSource, options)
+        if (!sameDescriptor(descriptor(finalSettings), value.settingsDescriptor)
+          || !finalSettings.equals(settingsBytes)) {
+          throw new Error('settings changed before cleanup')
+        }
+        const finalJournal = hashOpenRegularFilePass(journalSource!, options)
+        if (!sameDescriptor(finalJournal, value.journalDescriptor)) {
+          throw new Error('journal changed before cleanup')
+        }
+        assertBoundDirectory(directoryIdentity)
+        for (const source of evidenceSources) assertOpenFileUnchanged(source)
+      },
+      close() {
+        if (closed) return
+        closed = true
+        closeOpenRegularFiles(evidenceSources)
+      },
+    }
+  } catch (error) {
+    closeOpenRegularFiles(evidenceSources)
+    throw error
+  }
+}
+
+function verifyStreamedPair(
+  directory: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+  allowTornFinal: boolean,
+): {
+  settingsDescriptor: DigestDescriptor
+  journalDescriptor: DigestDescriptor
+} {
+  const held = holdVerifiedStreamedPair(directory, transaction, options, allowTornFinal)
+  try {
+    return held.value
   } finally {
-    if (journalSource) fs.closeSync(journalSource.fd)
-    fs.closeSync(settingsSource.fd)
+    held.close()
   }
 }
 
@@ -1426,39 +1596,77 @@ function verifyCompletedRestoreStaging(
   }
 }
 
-function classifyCompletedRestoreLivePair(
-  userDataPath: string,
-  transaction: RestoreTransactionFile,
-  options: RecoveryOptions,
-): 'exact-restored' | 'valid-advancement' {
-  const pair = verifyStreamedPair(userDataPath, transaction, options, true)
-  return sameDescriptor(pair.settingsDescriptor, transaction.settings)
-    && sameDescriptor(pair.journalDescriptor, transaction.journal)
-    ? 'exact-restored'
-    : 'valid-advancement'
-}
-
-function verifyCompletedRestoreLiveState(
+function holdCompletedRestoreLiveState(
   userDataPath: string,
   transaction: RestoreTransactionFile,
   options: RecoveryOptions,
   onForensicVerified?: () => void,
-): 'exact-restored' | 'valid-advancement' {
+  existingLive?: HeldEvidence<{
+    settingsDescriptor: DigestDescriptor
+    journalDescriptor: DigestDescriptor
+  }>,
+  allowLegacyWithoutForensic = false,
+): HeldEvidence<'exact-restored' | 'valid-advancement'> {
   const platform = options.platform ?? process.platform
+  const hasForensicArchive = transaction.forensicArchiveId.length > 0
+  const isLegacyWithoutForensic = allowLegacyWithoutForensic
+    && transaction.snapshotTimestamp === LEGACY_TRANSACTION_TIMESTAMP
+    && !hasForensicArchive
+    && transaction.forensicManifest === null
   if (transaction.phase !== 'primary-verified'
     || transaction.windowsVerifiedStartups !== 0
-    || transaction.forensicManifest === null
-    || (platform === 'win32' && transaction.lastWindowsStartupId.length === 0)
-    || (platform !== 'win32' && transaction.lastWindowsStartupId.length !== 0)
-    || !transactionMatchesVerifiedBackup(userDataPath, transaction, options)) {
+    || (!hasForensicArchive && !isLegacyWithoutForensic)
+    || (transaction.forensicManifest !== null && !hasForensicArchive)
+    || (platform === 'win32'
+      && transaction.lastWindowsStartupId.length === 0
+      && !isLegacyWithoutForensic)
+    || (platform !== 'win32' && transaction.lastWindowsStartupId.length !== 0)) {
     throw new Error('primary-verified transaction identity does not match an exact verified backup')
   }
 
-  verifyForensicEvidence(userDataPath, transaction, options)
-  onForensicVerified?.()
+  let backup: HeldEvidence<VerifiedSnapshotIdentity> | undefined
+  let forensic: HeldEvidence<void> | undefined
+  let live: HeldEvidence<{
+    settingsDescriptor: DigestDescriptor
+    journalDescriptor: DigestDescriptor
+  }> | undefined = existingLive
   try {
-    return classifyCompletedRestoreLivePair(userDataPath, transaction, options)
+    backup = holdTransactionVerifiedBackup(
+      userDataPath,
+      transaction,
+      options,
+      isLegacyWithoutForensic,
+    )
+    if (hasForensicArchive) {
+      forensic = holdForensicEvidence(userDataPath, transaction, options)
+      onForensicVerified?.()
+    }
+    live ??= holdVerifiedStreamedPair(userDataPath, transaction, options, true)
+    const value = sameDescriptor(live.value.settingsDescriptor, transaction.settings)
+      && sameDescriptor(live.value.journalDescriptor, transaction.journal)
+      ? 'exact-restored' as const
+      : 'valid-advancement' as const
+    let closed = false
+    return {
+      value,
+      assertStable() {
+        if (closed) throw new Error('completed restore evidence is already closed')
+        backup!.assertStable()
+        forensic?.assertStable()
+        live!.assertStable()
+      },
+      close() {
+        if (closed) return
+        closed = true
+        live!.close()
+        forensic?.close()
+        backup!.close()
+      },
+    }
   } catch (error) {
+    live?.close()
+    forensic?.close()
+    backup?.close()
     throw new Error(
       `primary-verified live settings/journal pair is neither exact nor a valid advancement: ${error instanceof Error ? error.message : String(error)}`,
     )
@@ -1511,13 +1719,15 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
   let forensicConfirmed = platform !== 'win32'
   try {
     const parsedIntent = readTransactionFile(userDataPath, RESTORE_INTENT_FILE, { platform })
+    const isLegacyIntent = parsedIntent.version === 1
     const intentTransaction = normalizeTransaction(parsedIntent)
+    if (isLegacyIntent && !intentTransaction.forensicArchiveId) forensicConfirmed = false
     if (intentTransaction.phase === 'primary-verified') {
       primaryWriteStarted = true
       completedRestoreWasPublished = true
     }
     if (!fs.existsSync(stagingPath)) {
-      if (intentTransaction.phase !== 'primary-verified') {
+      if (intentTransaction.phase !== 'primary-verified' && !isLegacyIntent) {
         throw new SettingsRecoveryError(
           'Restore intent survived but its verified staging directory is missing.',
           [],
@@ -1527,10 +1737,20 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
         )
       }
 
-      verifyCompletedRestoreLiveState(userDataPath, intentTransaction, options, () => {
+      primaryWriteStarted = true
+      completedRestoreWasPublished = true
+      const completedTransaction: RestoreTransactionFile = isLegacyIntent
+        ? { ...intentTransaction, phase: 'primary-verified' }
+        : intentTransaction
+      const held = holdCompletedRestoreLiveState(userDataPath, completedTransaction, options, () => {
         forensicConfirmed = true
-      })
-      removeIntentDurably(userDataPath, platform, ops)
+      }, undefined, isLegacyIntent)
+      try {
+        held.assertStable()
+        removeIntentDurably(userDataPath, platform, ops)
+      } finally {
+        held.close()
+      }
       return true
     }
     let transaction = intentTransaction
@@ -1561,11 +1781,17 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
         // reconstruct missing stage metadata.
         writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
       }
-      verifyCompletedRestoreLiveState(userDataPath, transaction, options, () => {
+      const held = holdCompletedRestoreLiveState(userDataPath, transaction, options, () => {
         forensicConfirmed = true
-      })
-      removeIntentDurably(userDataPath, platform, ops)
-      removeStagingDurably(userDataPath, platform, ops)
+      }, undefined, isLegacyIntent)
+      try {
+        held.assertStable()
+        removeStagingDurably(userDataPath, platform, ops)
+        held.assertStable()
+        removeIntentDurably(userDataPath, platform, ops)
+      } finally {
+        held.close()
+      }
       return true
     }
 
@@ -1618,20 +1844,38 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     primaryWriteStarted = true
     writeDurably(path.join(userDataPath, SETTINGS_FILE), pair.settingsBytes, platform, ops)
     writeDurably(path.join(userDataPath, BABY_INFO_JOURNAL_FILE), pair.journalBytes, platform, ops)
-    verifyPairDirectory(userDataPath, transaction, { platform })
+    const publicationLive = holdVerifiedStreamedPair(userDataPath, transaction, options, false)
+    try {
+      if (!sameDescriptor(publicationLive.value.settingsDescriptor, transaction.settings)
+        || !sameDescriptor(publicationLive.value.journalDescriptor, transaction.journal)) {
+        throw new Error('published live settings/journal pair checksum mismatch')
+      }
 
-    transaction = { ...transaction, phase: 'primary-verified', windowsVerifiedStartups: 0 }
-    writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
-    writeDurably(intentPath, transactionBytes(transaction), platform, ops)
-    if (platform === 'win32') {
-      throw new SettingsRestoreFinalizationError()
+      transaction = { ...transaction, phase: 'primary-verified', windowsVerifiedStartups: 0 }
+      writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+      // A parsed v1 outer intent is the provenance marker for the narrow
+      // no-forensic compatibility path; retain it as the last authority.
+      if (!isLegacyIntent) writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+      if (platform === 'win32') {
+        publicationLive.assertStable()
+        throw new SettingsRestoreFinalizationError()
+      }
+      completedRestoreWasPublished = true
+      const held = holdCompletedRestoreLiveState(userDataPath, transaction, options, () => {
+        forensicConfirmed = true
+      }, publicationLive, isLegacyIntent)
+      try {
+        held.assertStable()
+        removeStagingDurably(userDataPath, platform, ops)
+        held.assertStable()
+        removeIntentDurably(userDataPath, platform, ops)
+      } finally {
+        held.close()
+      }
+      return true
+    } finally {
+      publicationLive.close()
     }
-    removeIntentDurably(userDataPath, platform, ops)
-
-    // This branch is POSIX-only because Windows returned through the dedicated
-    // final-verification restart gate above.
-    removeStagingDurably(userDataPath, platform, ops)
-    return true
   } catch (error) {
     if (error instanceof SettingsRecoveryError) throw error
     const message = `Unable to resume the settings/journal restore transaction: ${error instanceof Error ? error.message : String(error)}`
@@ -1673,10 +1917,16 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
     }
     if (parsed.phase === 'primary-verified') {
       completedRestoreWasPublished = true
-      verifyCompletedRestoreLiveState(userDataPath, parsed, options, () => {
+      const held = holdCompletedRestoreLiveState(userDataPath, parsed, options, () => {
         forensicConfirmed = true
       })
-      removeStagingDurably(userDataPath, platform, ops)
+      try {
+        held.assertStable()
+        removeStagingDurably(userDataPath, platform, ops)
+        held.assertStable()
+      } finally {
+        held.close()
+      }
       return true
     }
 
@@ -1759,6 +2009,98 @@ interface ForensicEvidence {
   preserved: boolean
 }
 
+interface HeldOriginalEvidence extends ExpectedOpenRegularFile {
+  relativePath: string
+}
+
+function hashForensicSourceSet(
+  sources: readonly OpenRegularFile[],
+  options: BackupReadOptions,
+): { evidenceDigest: string; originals: HeldOriginalEvidence[] } {
+  const aggregate = createHash('sha256')
+  aggregate.update(Buffer.from('baby-diary-forensic-v1\0', 'utf8'))
+  const originals: HeldOriginalEvidence[] = []
+  const readSync = positionalReadSync(options)
+  for (const source of sources) {
+    const nameBytes = Buffer.from(source.relativePath, 'utf8')
+    const frame = Buffer.alloc(12)
+    frame.writeUInt32BE(nameBytes.byteLength, 0)
+    frame.writeBigUInt64BE(BigInt(source.opened.size), 4)
+    aggregate.update(frame)
+    aggregate.update(nameBytes)
+
+    const content = createHash('sha256')
+    const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+    let offset = 0
+    while (offset < source.opened.size) {
+      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
+      const count = readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0 || count > requested) {
+        throw new Error(`forensic source changed during read: ${source.relativePath}`)
+      }
+      const bytes = chunk.subarray(0, count)
+      content.update(bytes)
+      aggregate.update(bytes)
+      offset += count
+    }
+    assertOpenFileUnchanged(source)
+    originals.push({
+      relativePath: source.relativePath,
+      source,
+      expected: { size: source.opened.size, sha256: content.digest('hex') },
+    })
+  }
+  for (const source of sources) assertOpenFileUnchanged(source)
+  return { evidenceDigest: aggregate.digest('hex').slice(0, 16), originals }
+}
+
+function streamOpenForensicSourceDurably(
+  original: HeldOriginalEvidence,
+  destination: string,
+  options: RecoveryOptions,
+): void {
+  const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
+  const temporary = `${destination}.tmp-${process.pid}-${forensicStreamSequence++}`
+  const readSync = positionalReadSync(options)
+  const content = createHash('sha256')
+  const chunk = Buffer.alloc(Math.min(
+    STREAM_CHUNK_BYTES,
+    Math.max(1, original.source.opened.size),
+  ))
+  let fd: number | undefined
+  let renamed = false
+  try {
+    fd = ops.openSync(temporary, 'wx', 0o600)
+    let offset = 0
+    while (offset < original.source.opened.size) {
+      const requested = Math.min(chunk.byteLength, original.source.opened.size - offset)
+      const count = readSync(original.source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0 || count > requested) {
+        throw new Error(`forensic source changed during copy: ${original.relativePath}`)
+      }
+      const bytes = chunk.subarray(0, count)
+      content.update(bytes)
+      writeAllSync(fd, bytes, ops)
+      offset += count
+    }
+    ops.fsyncSync(fd)
+    ops.closeSync(fd)
+    fd = undefined
+    const copied = { size: original.source.opened.size, sha256: content.digest('hex') }
+    assertOpenFileUnchanged(original.source)
+    if (!sameDescriptor(copied, original.expected)) {
+      throw new Error(`forensic source changed between hash and copy: ${original.relativePath}`)
+    }
+    ops.renameSync(temporary, destination)
+    renamed = true
+  } finally {
+    if (fd !== undefined) ops.closeSync(fd)
+    if (!renamed && ops.existsSync(temporary)) {
+      try { ops.unlinkSync(temporary) } catch { /* preserve the original failure */ }
+    }
+  }
+}
+
 interface BoundDirectoryIdentity {
   absolute: string
   real: string
@@ -1815,7 +2157,7 @@ function tryReuseForensicEvidence(
   forensicsRoot: string,
   rootIdentity: BoundDirectoryIdentity,
   archiveId: string,
-  originals: Map<string, Buffer>,
+  originals: readonly HeldOriginalEvidence[],
   options: BackupReadOptions,
 ): ForensicEvidence | undefined {
   try {
@@ -1831,7 +2173,10 @@ function tryReuseForensicEvidence(
     }
     assertForensicDirectories()
 
-    const expectedNames = [BACKUP_MANIFEST_FILE, ...Array.from(originals.keys())].sort()
+    const expectedNames = [
+      BACKUP_MANIFEST_FILE,
+      ...originals.map(original => original.relativePath),
+    ].sort()
     const actualEntries = boundedDirectoryEntries(
       archiveDir,
       3,
@@ -1858,11 +2203,14 @@ function tryReuseForensicEvidence(
       || raw.source !== 'baby-diary-recovery'
       || typeof raw.archivedAt !== 'string'
       || !Array.isArray(raw.files)
-      || raw.files.length !== originals.size) {
+      || raw.files.length !== originals.length) {
       return undefined
     }
     strictTimestamp(raw.archivedAt, options.now ?? new Date())
 
+    const originalsByPath = new Map(
+      originals.map(original => [original.relativePath, original] as const),
+    )
     const seen = new Set<string>()
     for (const value of raw.files) {
       if (!isRecord(value)
@@ -1872,16 +2220,17 @@ function tryReuseForensicEvidence(
         || !validDigestDescriptor({ size: value.size, sha256: value.sha256 })) {
         return undefined
       }
-      const original = originals.get(value.path)
+      const original = originalsByPath.get(value.path)
       if (!original) return undefined
-      const expected = descriptor(original)
-      if (value.size !== expected.size || value.sha256 !== expected.sha256) return undefined
+      if (value.size !== original.expected.size || value.sha256 !== original.expected.sha256) {
+        return undefined
+      }
       assertForensicDirectories()
-      const archived = readRegularFileOnce(archiveDir, value.path, options)
-      if (!archived.equals(original)) return undefined
+      const archived = hashRegularFileOnce(archiveDir, value.path, options)
+      if (!sameDescriptor(archived, original.expected)) return undefined
       seen.add(value.path)
     }
-    if (seen.size !== originals.size) return undefined
+    if (seen.size !== originals.length) return undefined
     assertForensicDirectories()
     const afterEntries = boundedDirectoryEntries(
       archiveDir,
@@ -1913,17 +2262,20 @@ function preserveOriginals(
   const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
   const now = options.now ?? new Date()
   const archivedAt = now.toISOString()
-  const originals = new Map<string, Buffer>()
-  for (const relativePath of [SETTINGS_FILE, BABY_INFO_JOURNAL_FILE]) {
-    if (fs.existsSync(path.join(userDataPath, relativePath))) {
-      originals.set(relativePath, readRegularFileOnce(userDataPath, relativePath, { platform }))
+  const sourceFiles: OpenRegularFile[] = []
+  try {
+    for (const relativePath of [SETTINGS_FILE, BABY_INFO_JOURNAL_FILE]) {
+      if (fs.existsSync(path.join(userDataPath, relativePath))) {
+        sourceFiles.push(openRegularFileOnce(userDataPath, relativePath, options))
+      }
     }
-  }
-  if (originals.size === 0) {
-    throw new Error('no regular primary files were available for forensic preservation')
-  }
+    if (sourceFiles.length === 0) {
+      throw new Error('no regular primary files were available for forensic preservation')
+    }
+    for (const source of sourceFiles) assertOpenFileUnchanged(source)
+    const { evidenceDigest, originals } = hashForensicSourceSet(sourceFiles, options)
 
-  const forensicsRoot = path.join(userDataPath, RECOVERY_FORENSICS_DIR)
+    const forensicsRoot = path.join(userDataPath, RECOVERY_FORENSICS_DIR)
   let forensicsRootCreated = false
   try {
     ops.mkdirSync(forensicsRoot)
@@ -1940,9 +2292,6 @@ function preserveOriginals(
     userDataReal,
     'forensic preservation root',
   )
-  const evidenceDigest = sha256(Buffer.concat(Array.from(originals.entries()).flatMap(
-    ([name, bytes]) => [Buffer.from(name, 'utf8'), bytes],
-  ))).slice(0, 16)
   assertBoundDirectory(rootIdentity)
   const existingArchives = boundedDirectoryEntries(
     forensicsRoot,
@@ -1957,9 +2306,12 @@ function preserveOriginals(
       rootIdentity,
       entry.name,
       originals,
-      { platform, now },
+      { ...options, platform, now },
     )
-    if (reused) return reused
+    if (reused) {
+      assertHeldRegularFilesStable(originals, options)
+      return reused
+    }
   }
   assertBoundDirectory(rootIdentity)
   if (existingArchives.length >= MAX_FORENSIC_ARCHIVES) {
@@ -2001,11 +2353,15 @@ function preserveOriginals(
   }
 
   const entries: BackupManifestEntry[] = []
-  for (const [relativePath, bytes] of Array.from(originals.entries())) {
+  for (const original of originals) {
     assertForensicDirectories()
-    writeDurably(path.join(archiveDir, relativePath), bytes, platform, ops)
+    streamOpenForensicSourceDurably(
+      original,
+      path.join(archiveDir, original.relativePath),
+      options,
+    )
     assertForensicDirectories()
-    entries.push({ path: relativePath, ...descriptor(bytes) })
+    entries.push({ path: original.relativePath, ...original.expected })
   }
   const manifest: ForensicManifest = {
     version: 1,
@@ -2045,10 +2401,17 @@ function preserveOriginals(
   // Confirm the durable archive from one-handle reads before any primary write.
   for (const entry of entries) {
     assertForensicDirectories()
-    assertDescriptor(readRegularFileOnce(archiveDir, entry.path, { platform }), entry, `forensic ${entry.path}`)
+    const archived = hashRegularFileOnce(archiveDir, entry.path, { ...options, platform })
+    if (!sameDescriptor(archived, entry)) {
+      throw new Error(`forensic ${entry.path} checksum mismatch`)
+    }
   }
   assertForensicDirectories()
-  const manifestBytes = readRegularFileOnce(archiveDir, BACKUP_MANIFEST_FILE, { platform })
+  const manifestBytes = readRegularFileOnce(
+    archiveDir,
+    BACKUP_MANIFEST_FILE,
+    { ...options, platform },
+  )
   if (!manifestBytes.equals(forensicManifestBytes)) {
     throw new Error('forensic preservation manifest bytes changed before confirmation')
   }
@@ -2059,18 +2422,22 @@ function preserveOriginals(
   }
   assertExactForensicSet()
   assertForensicDirectories()
-  return {
-    archiveId,
-    manifest: descriptor(forensicManifestBytes),
-    preserved: platform !== 'win32',
+    assertHeldRegularFilesStable(originals, options)
+    return {
+      archiveId,
+      manifest: descriptor(forensicManifestBytes),
+      preserved: platform !== 'win32',
+    }
+  } finally {
+    closeOpenRegularFiles(sourceFiles)
   }
 }
 
-function verifyForensicEvidence(
+function holdForensicEvidence(
   userDataPath: string,
   transaction: RestoreTransactionFile,
   options: BackupReadOptions,
-): void {
+): HeldEvidence<void> {
   if (!transaction.forensicArchiveId
     || transaction.forensicArchiveId.length > 255
     || transaction.forensicArchiveId === '.'
@@ -2097,68 +2464,77 @@ function verifyForensicEvidence(
   }
   assertForensicDirectories()
 
-  const manifestBytes = readRegularFileOnce(archiveDir, BACKUP_MANIFEST_FILE, options)
-  if (transaction.forensicManifest) {
-    assertDescriptor(manifestBytes, transaction.forensicManifest, 'forensic manifest')
-  }
-  let raw: unknown
+  const evidenceSources: OpenRegularFile[] = []
+  const expectedEvidence: ExpectedOpenRegularFile[] = []
   try {
-    raw = JSON.parse(manifestBytes.toString('utf8'))
-  } catch {
-    throw new Error('forensic preservation manifest JSON is invalid')
-  }
-  if (!isRecord(raw)
-    || !exactKeys(raw, ['version', 'source', 'archivedAt', 'files'])
-    || raw.version !== 1
-    || raw.source !== 'baby-diary-recovery'
-    || typeof raw.archivedAt !== 'string'
-    || !Array.isArray(raw.files)
-    || raw.files.length < 1
-    || raw.files.length > 2) {
-    throw new Error('forensic preservation manifest shape is invalid')
-  }
-  strictTimestamp(raw.archivedAt, options.now ?? new Date())
-
-  const expectedNames = new Set([SETTINGS_FILE, BABY_INFO_JOURNAL_FILE])
-  const seen = new Set<string>()
-  const entries = new Map<string, DigestDescriptor>()
-  for (const entry of raw.files) {
-    if (!isRecord(entry)
-      || !exactKeys(entry, ['path', 'size', 'sha256'])
-      || typeof entry.path !== 'string'
-      || !expectedNames.has(entry.path)
-      || seen.has(entry.path)
-      || !validDigestDescriptor({ size: entry.size, sha256: entry.sha256 })) {
-      throw new Error('forensic preservation manifest entry is invalid')
+    const manifestSource = openRegularFileOnce(archiveDir, BACKUP_MANIFEST_FILE, options)
+    evidenceSources.push(manifestSource)
+    const manifestBytes = readOpenRegularFile(manifestSource, options)
+    const manifestDescriptor = descriptor(manifestBytes)
+    expectedEvidence.push({ source: manifestSource, expected: manifestDescriptor })
+    assertOpenFileUnchanged(manifestSource)
+    if (transaction.forensicManifest
+      && !sameDescriptor(manifestDescriptor, transaction.forensicManifest)) {
+      throw new Error('forensic manifest checksum mismatch')
     }
-    seen.add(entry.path)
-    entries.set(entry.path, { size: entry.size as number, sha256: entry.sha256 as string })
-  }
-  const manifestNames = [BACKUP_MANIFEST_FILE, ...Array.from(seen)].sort()
-  const assertExactForensicSet = () => {
-    const actualEntries = boundedDirectoryEntries(
-      archiveDir,
-      3,
-      'forensic archive entry',
-    )
-    const actualNames = actualEntries.map(entry => entry.name).sort()
-    if (actualNames.length !== manifestNames.length
-      || actualNames.some((name, index) => name !== manifestNames[index])
-      || actualEntries.some(entry => entry.isSymbolicLink() || !entry.isFile())) {
-      throw new Error('forensic preservation archive contains an unexpected entry')
+    let raw: unknown
+    try {
+      raw = JSON.parse(manifestBytes.toString('utf8'))
+    } catch {
+      throw new Error('forensic preservation manifest JSON is invalid')
     }
-  }
+    if (!isRecord(raw)
+      || !exactKeys(raw, ['version', 'source', 'archivedAt', 'files'])
+      || raw.version !== 1
+      || raw.source !== 'baby-diary-recovery'
+      || typeof raw.archivedAt !== 'string'
+      || !Array.isArray(raw.files)
+      || raw.files.length < 1
+      || raw.files.length > 2) {
+      throw new Error('forensic preservation manifest shape is invalid')
+    }
+    strictTimestamp(raw.archivedAt, options.now ?? new Date())
 
-  assertExactForensicSet()
-  assertForensicDirectories()
-  const settingsEntry = entries.get(SETTINGS_FILE)
-  const settingsSource = settingsEntry
-    ? openRegularFileOnce(archiveDir, SETTINGS_FILE, options)
-    : undefined
-  const evidenceSources: OpenRegularFile[] = settingsSource ? [settingsSource] : []
-  try {
+    const expectedNames = new Set([SETTINGS_FILE, BABY_INFO_JOURNAL_FILE])
+    const seen = new Set<string>()
+    const entries = new Map<string, DigestDescriptor>()
+    for (const entry of raw.files) {
+      if (!isRecord(entry)
+        || !exactKeys(entry, ['path', 'size', 'sha256'])
+        || typeof entry.path !== 'string'
+        || !expectedNames.has(entry.path)
+        || seen.has(entry.path)
+        || !validDigestDescriptor({ size: entry.size, sha256: entry.sha256 })) {
+        throw new Error('forensic preservation manifest entry is invalid')
+      }
+      seen.add(entry.path)
+      entries.set(entry.path, { size: entry.size as number, sha256: entry.sha256 as string })
+    }
+    const manifestNames = [BACKUP_MANIFEST_FILE, ...Array.from(seen)].sort()
+    const assertExactForensicSet = () => {
+      const actualEntries = boundedDirectoryEntries(
+        archiveDir,
+        3,
+        'forensic archive entry',
+      )
+      const actualNames = actualEntries.map(entry => entry.name).sort()
+      if (actualNames.length !== manifestNames.length
+        || actualNames.some((name, index) => name !== manifestNames[index])
+        || actualEntries.some(entry => entry.isSymbolicLink() || !entry.isFile())) {
+        throw new Error('forensic preservation archive contains an unexpected entry')
+      }
+    }
+
+    assertExactForensicSet()
+    assertForensicDirectories()
+    const settingsEntry = entries.get(SETTINGS_FILE)
+    const settingsSource = settingsEntry
+      ? openRegularFileOnce(archiveDir, SETTINGS_FILE, options)
+      : undefined
     let settingsBytes: Buffer | undefined
     if (settingsSource && settingsEntry) {
+      evidenceSources.push(settingsSource)
+      expectedEvidence.push({ source: settingsSource, expected: settingsEntry })
       settingsBytes = readOpenRegularFile(settingsSource, options)
       assertOpenFileUnchanged(settingsSource)
       if (!sameDescriptor(descriptor(settingsBytes), settingsEntry)) {
@@ -2169,6 +2545,7 @@ function verifyForensicEvidence(
     if (journalEntry) {
       const journalSource = openRegularFileOnce(archiveDir, BABY_INFO_JOURNAL_FILE, options)
       evidenceSources.push(journalSource)
+      expectedEvidence.push({ source: journalSource, expected: journalEntry })
       const actual = stableHashOpenRegularFile(journalSource, options)
       if (!sameDescriptor(actual, journalEntry)) {
         throw new Error(`forensic ${BABY_INFO_JOURNAL_FILE} checksum mismatch`)
@@ -2181,14 +2558,48 @@ function verifyForensicEvidence(
         throw new Error('forensic settings changed while journal evidence was scanned')
       }
     }
+    const manifestAfterScan = readOpenRegularFile(manifestSource, options)
+    if (!manifestAfterScan.equals(manifestBytes)) {
+      throw new Error('forensic manifest changed while evidence files were scanned')
+    }
     assertForensicDirectories()
     assertExactForensicSet()
     assertForensicDirectories()
     for (const source of evidenceSources) assertOpenFileUnchanged(source)
-  } finally {
-    for (let index = evidenceSources.length - 1; index >= 0; index -= 1) {
-      fs.closeSync(evidenceSources[index].fd)
+
+    let closed = false
+    return {
+      value: undefined,
+      assertStable() {
+        if (closed) throw new Error('forensic evidence is already closed')
+        assertHeldRegularFilesStable(expectedEvidence, options)
+        assertForensicDirectories()
+        assertExactForensicSet()
+        assertForensicDirectories()
+        for (const source of evidenceSources) assertOpenFileUnchanged(source)
+      },
+      close() {
+        if (closed) return
+        closed = true
+        closeOpenRegularFiles(evidenceSources)
+      },
     }
+  } catch (error) {
+    closeOpenRegularFiles(evidenceSources)
+    throw error
+  }
+}
+
+function verifyForensicEvidence(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: BackupReadOptions,
+): void {
+  const held = holdForensicEvidence(userDataPath, transaction, options)
+  try {
+    return held.value
+  } finally {
+    held.close()
   }
 }
 
