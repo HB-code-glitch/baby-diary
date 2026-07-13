@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 interface WorkflowStep {
+  name?: string
   uses?: string
   run?: unknown
   if?: string
@@ -52,6 +54,9 @@ function parseWorkflow(source = workflowSource): ReleaseWorkflow {
 
 const workflow = parseWorkflow()
 const REQUIRED_NODE_VERSION = '24.18.0'
+const RELEASE_TAG_CONDITION = "startsWith(github.ref, 'refs/tags/v')"
+const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
+const REQUIRED_RELEASE_NEEDS = ['release-preflight', 'e2e-win', 'e2e-mac']
 
 const PACKAGED_E2E_SPECS: PackagedE2ESpec[] = [
   {
@@ -128,6 +133,90 @@ function nodeRuntimeContractErrors(candidate: ReleaseWorkflow): string[] {
   })
 }
 
+function normalizedNeeds(job: WorkflowJob): string[] {
+  if (job.needs == null) return []
+  return Array.isArray(job.needs) ? job.needs : [job.needs]
+}
+
+function releasePreflightContractErrors(candidate: ReleaseWorkflow): string[] {
+  const errors: string[] = []
+  const job = candidate.jobs['release-preflight']
+  if (!job) return ['missing release-preflight']
+  if (job['runs-on'] !== 'ubuntu-latest') errors.push('release-preflight must run on ubuntu-latest')
+  if (job.if !== RELEASE_TAG_CONDITION) errors.push('release-preflight must run only for v tags')
+
+  const checkoutIndex = job.steps.findIndex(step => step.uses === 'actions/checkout@v4')
+  const validationSteps = job.steps.filter(step => step.name === RELEASE_PREFLIGHT_STEP_NAME)
+  if (checkoutIndex < 0) errors.push('release-preflight must check out package.json')
+  if (validationSteps.length !== 1) {
+    errors.push('release-preflight must have exactly one tag/version validation step')
+    return errors
+  }
+
+  const validationStep = validationSteps[0]
+  const validationIndex = job.steps.indexOf(validationStep)
+  if (validationIndex <= checkoutIndex) errors.push('tag/version validation must run after checkout')
+  if (validationStep.if != null) errors.push('tag/version validation must not be conditional')
+  if (Boolean(validationStep['continue-on-error'])) errors.push('tag/version validation must fail the job')
+
+  const command = normalizedRun(validationStep) ?? ''
+  for (const requiredFragment of [
+    "require('./package.json')",
+    "'v' + version",
+    'process.env.GITHUB_REF_NAME',
+    'actual !== expected',
+    'process.exit(1)',
+  ]) {
+    if (!command.includes(requiredFragment)) errors.push(`tag/version validation is missing: ${requiredFragment}`)
+  }
+  return errors
+}
+
+function releaseGateContractErrors(candidate: ReleaseWorkflow): string[] {
+  const errors = releasePreflightContractErrors(candidate)
+  const publishCommands: Array<{ jobName: string; command: string }> = []
+
+  for (const [jobName, job] of Object.entries(candidate.jobs)) {
+    for (const step of job.steps) {
+      const command = normalizedRun(step)
+      if (command && (/--publish\s+always/.test(command) || /gh\s+release\s+upload/.test(command))) {
+        publishCommands.push({ jobName, command })
+      }
+    }
+  }
+
+  for (const jobName of ['release-win', 'release-mac']) {
+    const job = candidate.jobs[jobName]
+    if (!job) {
+      errors.push(`missing ${jobName}`)
+      continue
+    }
+    if (job.if !== RELEASE_TAG_CONDITION) errors.push(`${jobName} must run only for v tags`)
+    if (/always\s*\(/.test(job.if ?? '')) errors.push(`${jobName} must not bypass failed or skipped needs`)
+    const needs = normalizedNeeds(job)
+    if (needs.length !== REQUIRED_RELEASE_NEEDS.length
+      || !REQUIRED_RELEASE_NEEDS.every(required => needs.includes(required))) {
+      errors.push(`${jobName} must need release-preflight, e2e-win, and e2e-mac`)
+    }
+  }
+
+  for (const { jobName } of publishCommands) {
+    if (!['release-win', 'release-mac'].includes(jobName)) {
+      errors.push(`publish command must not run outside a gated release job: ${jobName}`)
+    }
+  }
+  if (publishCommands.length !== 3) errors.push('expected exactly three gated publish commands')
+  return errors
+}
+
+function releaseTagValidationCode(candidate: ReleaseWorkflow): string | null {
+  const step = candidate.jobs['release-preflight']?.steps
+    .find(candidateStep => candidateStep.name === RELEASE_PREFLIGHT_STEP_NAME)
+  const command = step ? normalizedRun(step) : null
+  const match = command?.match(/^node -e "([\s\S]+)"$/)
+  return match?.[1] ?? null
+}
+
 describe('release workflow CI gates', () => {
   it('is valid YAML 1.2 and rejects duplicate mapping keys at nested levels', () => {
     expect(workflow.name).toBe('Build')
@@ -160,9 +249,22 @@ describe('release workflow CI gates', () => {
       'build-mac',
       'e2e-mac',
       'e2e-win',
+      'release-preflight',
       'release-win',
       'release-mac',
     ]))
+  })
+
+  it('keeps three pull-request jobs and adds one tag-only preflight before two release jobs', () => {
+    const unconditionalJobs = Object.entries(workflow.jobs)
+      .filter(([, job]) => job.if == null)
+      .map(([jobName]) => jobName)
+    const tagOnlyJobs = Object.entries(workflow.jobs)
+      .filter(([, job]) => job.if === RELEASE_TAG_CONDITION)
+      .map(([jobName]) => jobName)
+
+    expect(new Set(unconditionalJobs)).toEqual(new Set(['build-mac', 'e2e-mac', 'e2e-win']))
+    expect(new Set(tagOnlyJobs)).toEqual(new Set(['release-preflight', 'release-win', 'release-mac']))
   })
 
   it('pins every CI and release job to the Electron 43 bundled Node runtime', () => {
@@ -211,12 +313,49 @@ describe('release workflow CI gates', () => {
     expect(packagedE2EContractErrors(mutatedWorkflow, PACKAGED_E2E_SPECS[0])).not.toEqual([])
   })
 
-  it.each([
-    { jobName: 'release-win', e2eJob: 'e2e-win' },
-    { jobName: 'release-mac', e2eJob: 'e2e-mac' },
-  ])('$jobName runs only for v tags after its packaged E2E gate', ({ jobName, e2eJob }) => {
+  it('runs an exact package-version release-tag preflight after checkout', () => {
+    expect(releasePreflightContractErrors(workflow)).toEqual([])
+    const validationCode = releaseTagValidationCode(workflow)
+    expect(validationCode).not.toBeNull()
+    if (!validationCode) return
+
+    const packageVersion = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string }
+    const matching = spawnSync(process.execPath, ['-e', validationCode], {
+      env: { ...process.env, GITHUB_REF_NAME: `v${packageVersion.version}` },
+      encoding: 'utf8',
+    })
+    const mismatched = spawnSync(process.execPath, ['-e', validationCode], {
+      env: { ...process.env, GITHUB_REF_NAME: `v${packageVersion.version}-mismatch` },
+      encoding: 'utf8',
+    })
+
+    expect(matching.status, matching.stderr).toBe(0)
+    expect(mismatched.status).not.toBe(0)
+  })
+
+  it.each(['release-win', 'release-mac'])('$jobName waits for preflight and both packaged E2E jobs', jobName => {
     const releaseJob = workflow.jobs[jobName]
-    expect(releaseJob.needs).toBe(e2eJob)
-    expect(releaseJob.if).toBe("startsWith(github.ref, 'refs/tags/v')")
+    expect(new Set(normalizedNeeds(releaseJob))).toEqual(new Set(REQUIRED_RELEASE_NEEDS))
+    expect(releaseJob.if).toBe(RELEASE_TAG_CONDITION)
+    expect(releaseJob.if).not.toMatch(/always\s*\(/)
+  })
+
+  it('makes preflight failure block every publish command', () => {
+    expect(releaseGateContractErrors(workflow)).toEqual([])
+
+    const bypassedPreflight = structuredClone(workflow)
+    const validationStep = bypassedPreflight.jobs['release-preflight'].steps
+      .find(step => step.name === RELEASE_PREFLIGHT_STEP_NAME)
+    expect(validationStep).toBeDefined()
+    validationStep!['continue-on-error'] = true
+    expect(releaseGateContractErrors(bypassedPreflight)).not.toEqual([])
+
+    const missingNeed = structuredClone(workflow)
+    missingNeed.jobs['release-win'].needs = ['e2e-win', 'e2e-mac']
+    expect(releaseGateContractErrors(missingNeed)).not.toEqual([])
+
+    const alwaysBypass = structuredClone(workflow)
+    alwaysBypass.jobs['release-mac'].if = `${RELEASE_TAG_CONDITION} && always()`
+    expect(releaseGateContractErrors(alwaysBypass)).not.toEqual([])
   })
 })
