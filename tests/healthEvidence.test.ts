@@ -1,11 +1,16 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   HEALTH_EVIDENCE_REVIEW_DATE,
   HEALTH_EVIDENCE_SOURCES,
-  OFFICIAL_EVIDENCE_HOSTS,
   getEvidenceSourceById,
   getEvidenceSources,
 } from '../shared/healthEvidence'
+import {
+  HEALTH_EVIDENCE_URLS,
+  OFFICIAL_EVIDENCE_HOSTS,
+  getEvidenceUrlById,
+} from '../electron/healthEvidenceUrlRegistry'
 
 const requiredSourceIds = [
   'who-infant-feeding',
@@ -53,6 +58,13 @@ const retiredCommercialHosts = [
 ]
 
 describe('HEALTH_EVIDENCE_SOURCES', () => {
+  it('keeps renderer-facing evidence metadata completely URL-free', () => {
+    for (const source of HEALTH_EVIDENCE_SOURCES) {
+      expect('url' in source, `${source.id} leaks a URL field`).toBe(false)
+    }
+    expect(readFileSync(new URL('../shared/healthEvidence.ts', import.meta.url), 'utf8')).not.toContain('https://')
+  })
+
   it('contains every authority source required by the design', () => {
     const ids = new Set(HEALTH_EVIDENCE_SOURCES.map(source => source.id))
     for (const id of requiredSourceIds) {
@@ -70,11 +82,11 @@ describe('HEALTH_EVIDENCE_SOURCES', () => {
   })
 
   it('uses only HTTPS URLs on approved authority hosts', () => {
-    for (const source of HEALTH_EVIDENCE_SOURCES) {
-      const url = new URL(source.url)
-      expect(url.protocol, source.id).toBe('https:')
-      expect(OFFICIAL_EVIDENCE_HOSTS, source.id).toContain(url.hostname)
-      expect(retiredCommercialHosts, source.id).not.toContain(url.hostname)
+    for (const [sourceId, sourceUrl] of Object.entries(HEALTH_EVIDENCE_URLS)) {
+      const url = new URL(sourceUrl)
+      expect(url.protocol, sourceId).toBe('https:')
+      expect(OFFICIAL_EVIDENCE_HOSTS, sourceId).toContain(url.hostname)
+      expect(retiredCommercialHosts, sourceId).not.toContain(url.hostname)
     }
   })
 
@@ -89,23 +101,22 @@ describe('HEALTH_EVIDENCE_SOURCES', () => {
   })
 
   it('uses the verified current CDC child oral-health path', () => {
-    const source = HEALTH_EVIDENCE_SOURCES.find(item => item.id === 'cdc-child-oral-health')
-    expect(source?.url).toBe(
+    expect(getEvidenceUrlById('cdc-child-oral-health')).toBe(
       'https://www.cdc.gov/oral-health/prevention/oral-health-tips-for-children.html'
     )
   })
 
   it('uses exact official emergency-service URLs for Korean and Japanese 119', () => {
-    expect(getEvidenceSourceById('kr-nfa-119')?.url).toBe(
+    expect(getEvidenceUrlById('kr-nfa-119')).toBe(
       'https://nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration'
     )
-    expect(getEvidenceSourceById('jp-fdma-119')?.url).toBe(
+    expect(getEvidenceUrlById('jp-fdma-119')).toBe(
       'https://www.fdma.go.jp/mission/enrichment/kyukyumusen_kinkyutuhou/119.html'
     )
   })
 
   it('uses the exact AAP parent fever source for the 38.3°C infant threshold', () => {
-    expect(getEvidenceSourceById('aap-fever-baby')?.url).toBe(
+    expect(getEvidenceUrlById('aap-fever-baby')).toBe(
       'https://www.healthychildren.org/English/health-issues/conditions/fever/Pages/Fever-and-Your-Baby.aspx'
     )
     expect(OFFICIAL_EVIDENCE_HOSTS).toContain('www.healthychildren.org')
@@ -135,5 +146,7 @@ describe('HEALTH_EVIDENCE_SOURCES', () => {
     expect(known).toBe(HEALTH_EVIDENCE_SOURCES[0])
     expect(getEvidenceSourceById('https://www.who.int/')).toBeNull()
     expect(getEvidenceSourceById('missing-source')).toBeNull()
+    expect(getEvidenceUrlById('https://www.who.int/')).toBeNull()
+    expect(getEvidenceUrlById('missing-source')).toBeNull()
   })
 })

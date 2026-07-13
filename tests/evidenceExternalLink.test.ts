@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { getEvidenceSourceById } from '../shared/healthEvidence'
+import { getEvidenceUrlById } from '../electron/healthEvidenceUrlRegistry'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -48,7 +48,7 @@ describe('evidence external-link IPC boundary', () => {
     await exposedApi.openEvidenceSource('who-infant-feeding')
 
     expect(invoke).toHaveBeenCalledWith(EVIDENCE_SOURCE_OPEN_CHANNEL, 'who-infant-feeding')
-    expect(openExternal).toHaveBeenCalledWith(getEvidenceSourceById('who-infant-feeding')?.url)
+    expect(openExternal).toHaveBeenCalledWith(getEvidenceUrlById('who-infant-feeding'))
   })
 
   it.each([
@@ -66,18 +66,12 @@ describe('evidence external-link IPC boundary', () => {
     expect(openExternal).not.toHaveBeenCalled()
   })
 
-  it('uses the same immutable registry for browser fallback and never accepts a URL', async () => {
+  it('rejects browser fallback without importing or exposing the main-only URL registry', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null)
     const { ipc } = await import('../src/lib/ipc')
 
-    await ipc.openEvidenceSource('who-infant-feeding')
-    expect(open).toHaveBeenCalledWith(
-      getEvidenceSourceById('who-infant-feeding')?.url,
-      '_blank',
-      'noopener,noreferrer',
-    )
-
-    open.mockClear()
+    await expect(ipc.openEvidenceSource('who-infant-feeding')).rejects.toThrow(/EVIDENCE_LINK_UNAVAILABLE/)
+    expect(open).not.toHaveBeenCalled()
     await expect(ipc.openEvidenceSource('https://example.com' as any)).rejects.toThrow(/source/i)
     expect(open).not.toHaveBeenCalled()
   })

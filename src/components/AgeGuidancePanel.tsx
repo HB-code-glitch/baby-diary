@@ -34,6 +34,16 @@ const categoryOrder: readonly AgeGuidanceCategory[] = [
   'general',
 ]
 
+function padLocalDatePart(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+export function getLocalGuidanceDayKey(value: string | Date): string {
+  if (typeof value === 'string') return value
+  if (!Number.isFinite(value.getTime())) return 'invalid-date'
+  return `${value.getFullYear()}-${padLocalDatePart(value.getMonth() + 1)}-${padLocalDatePart(value.getDate())}`
+}
+
 function ControlledDetails({
   className,
   summary,
@@ -74,10 +84,10 @@ function GuidanceItemCard({
   locale: HealthContentLocale
   priority?: boolean
 }) {
-  const urgencyLabel = locale === 'ja'
-    ? { urgent: '緊急', important: '重要', routine: '日常' }[item.urgency]
-    : { urgent: '긴급', important: '중요', routine: '일상' }[item.urgency]
-  const actionTitle = locale === 'ja' ? '確認すること' : '확인할 것'
+  const { i18n } = useTranslation()
+  const t = i18n.getFixedT(locale)
+  const urgencyLabel = t(`ageGuidance.urgency.${item.urgency}`)
+  const actionTitle = t('ageGuidance.actionTitle')
 
   return (
     <ControlledDetails
@@ -106,7 +116,7 @@ function GuidanceItemCard({
 
 export function AgeGuidancePanel({
   birthdate,
-  asOf = new Date(),
+  asOf,
   variant = 'home',
   country,
   onRequestBirthdate,
@@ -114,6 +124,7 @@ export function AgeGuidancePanel({
   const { t, i18n } = useTranslation()
   const locale: HealthContentLocale = i18n.language === 'ja' ? 'ja' : 'ko'
   const [showAll, setShowAll] = useState(false)
+  const asOfDayKey = useMemo(() => getLocalGuidanceDayKey(asOf ?? new Date()), [asOf])
   const categories = Object.fromEntries(
     categoryOrder.map(category => [category, t(`ageGuidance.categories.${category}`)]),
   ) as Record<AgeGuidanceCategory, string>
@@ -131,13 +142,13 @@ export function AgeGuidancePanel({
     categories,
   }
 
-  const stage = getAgeStage(birthdate, asOf)
-  const completedMonths = calculateCompletedCalendarMonths(birthdate, asOf)
+  const stage = getAgeStage(birthdate, asOfDayKey)
+  const completedMonths = calculateCompletedCalendarMonths(birthdate, asOfDayKey)
   const localizedItems = useMemo(
-    () => getAgeGuidanceForDate(birthdate, asOf, country).map(item => localizeAgeGuidance(item, locale)),
-    [birthdate, asOf, country, locale],
+    () => getAgeGuidanceForDate(birthdate, asOfDayKey, country).map(item => localizeAgeGuidance(item, locale)),
+    [birthdate, asOfDayKey, country, locale],
   )
-  const checkpoint = getDevelopmentCheckpointForDate(birthdate, asOf)
+  const checkpoint = getDevelopmentCheckpointForDate(birthdate, asOfDayKey)
 
   if (!birthdate || !stage || completedMonths === null) {
     return (
@@ -195,9 +206,14 @@ export function AgeGuidancePanel({
               {showAll ? copy.less : copy.more(secondary.length)}
             </button>
           )}
-          {showAll && secondary.length > 0 && (
-            <div id="age-guidance-secondary" data-guidance-secondary className="age-guidance-secondary">
-              {secondary.map(item => <GuidanceItemCard key={item.id} item={item} locale={locale} />)}
+          {secondary.length > 0 && (
+            <div
+              id="age-guidance-secondary"
+              data-guidance-secondary
+              className="age-guidance-secondary"
+              hidden={!showAll}
+            >
+              {showAll && secondary.map(item => <GuidanceItemCard key={item.id} item={item} locale={locale} />)}
             </div>
           )}
         </>

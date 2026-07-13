@@ -72,7 +72,7 @@ const mockBabyDiary: Window['babyDiary'] = {
   openEvidenceSource: async (sourceId: HealthEvidenceSourceId): Promise<void> => {
     const source = getEvidenceSourceById(sourceId)
     if (!source) throw new Error('Unknown health evidence source')
-    window.open(source.url, '_blank', 'noopener,noreferrer')
+    throw new Error('EVIDENCE_LINK_UNAVAILABLE')
   },
 
   listEvents: async () => {

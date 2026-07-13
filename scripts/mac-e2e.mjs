@@ -599,21 +599,13 @@ async function main() {
       console.error(`  FAIL breastfeed tip: ${err.message}`)
     }
 
-    // Insights rail should now have breast countdown row
-    try {
-      await page.waitForFunction(
-        () => {
-          const panel = document.querySelector('[data-tour="insights"]')
-          if (!panel) return false
-          return /다음 수유까지|지금이 수유하기/.test(panel.textContent ?? '')
-        },
-        { timeout: 5000 }
-      )
-      assert(true, 'home insights rail shows breastfeed countdown row')
-    } catch {
-      console.log('  (breastfeed countdown not yet visible in insights rail)')
-    }
-    await shot(page, 'breastfeed-countdown')
+    // Retired feeding countdown advice must never reappear in either locale.
+    const insightsText = await page.locator('[data-tour="insights"]').textContent()
+    assert(
+      !/다음 수유까지|지금이 수유하기|次の授乳まで|今が授乳/.test(insightsText ?? ''),
+      'home insights rail does not expose retired feeding countdown advice',
+    )
+    await shot(page, 'breastfeed-home-summary')
 
     // ---------------------------------------------------------------------------
     // 3e. Settings — current-stage evidence center (no live external navigation)

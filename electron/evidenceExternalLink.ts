@@ -1,4 +1,4 @@
-import { getEvidenceSourceById } from '../shared/healthEvidence'
+import { getEvidenceUrlById } from './healthEvidenceUrlRegistry'
 
 export const EVIDENCE_SOURCE_OPEN_CHANNEL = 'evidence:openSource' as const
 
@@ -15,11 +15,11 @@ export function registerEvidenceExternalLinkIPC(
       throw new Error('Unknown health evidence source')
     }
 
-    const source = getEvidenceSourceById(payload)
-    if (!source) {
+    const sourceUrl = getEvidenceUrlById(payload)
+    if (!sourceUrl) {
       throw new Error('Unknown health evidence source')
     }
 
-    await openExternal(source.url)
+    await openExternal(sourceUrl)
   })
 }

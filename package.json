@@ -7,7 +7,7 @@
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "npm run typecheck && npm test",
-    "build": "npm run typecheck && tsc -p tsconfig.node.json && vite build",
+    "build": "npm run typecheck && tsc -p tsconfig.node.json && vite build && node scripts/verify-renderer-evidence-boundary.mjs",
     "build:win": "npm run build && electron-builder --win && powershell -ExecutionPolicy Bypass -File scripts/update-shortcut.ps1",
     "build:mac": "npm run build && electron-builder --mac",
     "test": "vitest run",

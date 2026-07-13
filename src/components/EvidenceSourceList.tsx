@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { HealthContentLocale, HealthEvidenceSourceId } from '../../shared/healthEvidence'
 import { getEvidenceSources } from '../../shared/healthEvidence'
 import { ipc } from '../lib/ipc'
@@ -16,6 +17,8 @@ function getSourceCountry(sourceId: HealthEvidenceSourceId): 'KR' | 'JP' | null 
 }
 
 export function EvidenceSourceList({ sourceIds, locale, compact = false }: EvidenceSourceListProps) {
+  const { i18n } = useTranslation()
+  const t = i18n.getFixedT(locale)
   const [open, setOpen] = useState(false)
   const [error, setError] = useState(false)
   const uniqueIds = useMemo(
@@ -26,21 +29,17 @@ export function EvidenceSourceList({ sourceIds, locale, compact = false }: Evide
 
   if (sources.length === 0) return null
 
-  const copy = locale === 'ja'
-    ? {
-        summary: `公式根拠 ${sources.length}件`,
-        reviewed: '確認日',
-        open: '公式ページを開く',
-        failed: '公式ページを開けませんでした。',
-        countries: { KR: '韓国の公的機関', JP: '日本の公的機関' },
-      }
-    : {
-        summary: `공식 근거 ${sources.length}개`,
-        reviewed: '검토일',
-        open: '공식 페이지 열기',
-        failed: '공식 페이지를 열지 못했어요.',
-        countries: { KR: '한국 공공기관', JP: '일본 공공기관' },
-      }
+  const copy = {
+    summary: t('ageGuidance.officialEvidence', { count: sources.length }),
+    reviewed: t('ageGuidance.reviewedOn'),
+    open: t('ageGuidance.openOfficial'),
+    openLabel: (organization: string, title: string) => t('ageGuidance.openOfficialLabel', { organization, title }),
+    failed: t('ageGuidance.openFailed'),
+    countries: {
+      KR: t('ageGuidance.countryKR'),
+      JP: t('ageGuidance.countryJP'),
+    },
+  }
 
   return (
     <details className={`evidence-source-list${compact ? ' is-compact' : ''}`} open={open}>
@@ -75,6 +74,7 @@ export function EvidenceSourceList({ sourceIds, locale, compact = false }: Evide
                     type="button"
                     className="evidence-source-button"
                     data-source-id={source.id}
+                    aria-label={copy.openLabel(source.organization, source.title)}
                     onClick={async () => {
                       setError(false)
                       try {

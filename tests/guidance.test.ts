@@ -31,7 +31,8 @@ describe('legacy health guidance exposure guard', () => {
     for (const item of GUIDANCE_SOURCES) {
       const official = HEALTH_EVIDENCE_SOURCES.find(sourceItem => sourceItem.id === item.id)
       expect(official).toBeDefined()
-      expect(item.url).toBe(official?.url)
+      expect(item).not.toHaveProperty('url')
+      expect(official).not.toHaveProperty('url')
       expect(item.reviewedOn).toBe(official?.reviewedOn)
     }
   })

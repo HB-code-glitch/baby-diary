@@ -42,7 +42,7 @@
   "ageGuidance": {
     "title": "今必要なこと",
     "evidenceCenter": "年齢別エビデンスセンター",
-    "description": "今の月齢で優先度が高いものから表示します。",
+    "description": "今の年齢で優先度が高いものから表示します。",
     "more": "そのほか{{count}}件を見る",
     "less": "たたむ",
     "missingTitle": "誕生日を設定すると、今必要な案内を表示できます",
@@ -53,8 +53,11 @@
     "officialEvidence": "公式根拠 {{count}}件",
     "reviewedOn": "確認日",
     "openOfficial": "公式ページを開く",
+    "openOfficialLabel": "{{organization}}・{{title}}の公式ページを開く",
     "openFailed": "公式ページを開けませんでした。",
     "actionTitle": "確認すること",
+    "countryKR": "韓国の公的機関",
+    "countryJP": "日本の公的機関",
     "urgency": { "urgent": "緊急", "important": "重要", "routine": "日常" },
     "categories": {
       "urgent-care": "受診・緊急",

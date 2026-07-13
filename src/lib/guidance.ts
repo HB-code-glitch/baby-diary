@@ -52,7 +52,6 @@ export interface GuidanceSource {
   org: string
   title: string
   reviewedOn: string
-  url: string
 }
 
 export function getGuidanceSourceLabel(
@@ -77,7 +76,6 @@ export const GUIDANCE_SOURCES: GuidanceSource[] = HEALTH_EVIDENCE_SOURCES.map(so
   org: source.organization.ko,
   title: source.title.ko,
   reviewedOn: source.reviewedOn,
-  url: source.url,
 }))
 
 /** Fixed-day History/calendar guidance is retired. */

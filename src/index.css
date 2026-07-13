@@ -1511,6 +1511,7 @@ details[open] > summary .evidence-source-chevron {
 
 .evidence-source-list > summary {
   display: flex;
+  min-height: 40px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -1558,8 +1559,13 @@ details[open] > summary .evidence-source-chevron {
 }
 
 .evidence-source-button {
+  display: inline-flex;
   flex: 0 0 auto;
+  min-height: 40px;
+  align-items: center;
+  padding: 7px 9px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
   color: var(--sky-text);
   cursor: pointer;
@@ -1568,6 +1574,14 @@ details[open] > summary .evidence-source-chevron {
   font-weight: 650;
   text-decoration: underline;
   text-underline-offset: 2px;
+  transition: background-color 140ms ease-out, transform 140ms ease-out;
+}
+
+.evidence-source-button:hover { background: var(--sky); }
+.evidence-source-button:active { transform: translateY(1px); }
+.evidence-source-button:focus-visible {
+  outline: 2px solid var(--sky-text);
+  outline-offset: 2px;
 }
 
 .sr-only {
@@ -1592,6 +1606,8 @@ details[open] > summary .evidence-source-chevron {
   .age-guidance-item { animation: none !important; }
   .age-guidance-chevron,
   .evidence-source-chevron { transition: none !important; }
+  .evidence-source-button { transition: none !important; }
+  .evidence-source-button:active { transform: none; }
 }
 
 /* ══════════════════════════════════════════
