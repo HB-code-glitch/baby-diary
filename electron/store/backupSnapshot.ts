@@ -991,6 +991,75 @@ function sameTransactionControls(left: RestoreTransactionFile, right: RestoreTra
     && left.lastWindowsStartupId === right.lastWindowsStartupId
 }
 
+function transactionMatchesVerifiedBackup(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+): boolean {
+  const roots = [path.join(userDataPath, 'backups')]
+  if (options.documentsBackupDir
+    && path.resolve(options.documentsBackupDir) !== path.resolve(roots[0])) {
+    roots.push(options.documentsBackupDir)
+  }
+  const limits = resourceLimits(options.limits)
+  const budget: CandidateBudget = { entriesSeen: 0 }
+  for (const root of roots) {
+    for (const candidate of listSnapshotCandidates(root, limits, budget)) {
+      try {
+        const pair = verifyBackupSnapshot(candidate, options)
+        if (pair.snapshotId === transaction.snapshotId
+          && pair.snapshotTimestamp === transaction.snapshotTimestamp
+          && sameDescriptor(descriptor(pair.settingsBytes), transaction.settings)
+          && sameDescriptor(descriptor(pair.journalBytes), transaction.journal)) {
+          return true
+        }
+      } catch { /* only an independently verified exact identity can match */ }
+    }
+  }
+  return false
+}
+
+function verifyCompletedRestoreLiveState(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: RecoveryOptions,
+): 'exact-restored' | 'valid-advancement' {
+  const platform = options.platform ?? process.platform
+  if (transaction.phase !== 'primary-verified'
+    || transaction.windowsVerifiedStartups !== 0
+    || transaction.forensicManifest === null
+    || (platform === 'win32' && transaction.lastWindowsStartupId.length === 0)
+    || (platform !== 'win32' && transaction.lastWindowsStartupId.length !== 0)
+    || !transactionMatchesVerifiedBackup(userDataPath, transaction, options)) {
+    throw new Error('primary-verified transaction identity does not match an exact verified backup')
+  }
+
+  verifyForensicEvidence(userDataPath, transaction, options)
+  try {
+    verifyPairDirectory(userDataPath, transaction, options)
+    return 'exact-restored'
+  } catch { /* an exact valid descendant is checked below */ }
+
+  let advanced: VerifiedBackupPair
+  try {
+    // Unlike general startup compatibility, completed-restore cleanup requires
+    // both real files plus the full strict settings/journal projection contract.
+    advanced = verifyPairDirectory(userDataPath, undefined, options)
+  } catch (error) {
+    throw new Error(
+      `primary-verified live settings/journal pair is neither exact nor a valid advancement: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (advanced.journalBytes.byteLength < transaction.journal.size) {
+    throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+  }
+  const restoredJournalPrefix = advanced.journalBytes.subarray(0, transaction.journal.size)
+  if (!sameDescriptor(descriptor(restoredJournalPrefix), transaction.journal)) {
+    throw new Error('primary-verified live journal does not retain the restored transaction lineage')
+  }
+  return 'valid-advancement'
+}
+
 function stagingIsExactlyOnePublicationAhead(
   intent: RestoreTransactionFile,
   staging: RestoreTransactionFile,
@@ -1048,12 +1117,7 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
         )
       }
 
-      // The outer intent is durably published only after both live members
-      // verify. If cleanup removed the whole staging directory first, the
-      // immutable descriptors in that intent can still prove the live pair
-      // and its original forensic archive without rewriting either primary.
-      verifyPairDirectory(userDataPath, intentTransaction, { platform })
-      verifyForensicEvidence(userDataPath, intentTransaction, { platform, now: options.now })
+      verifyCompletedRestoreLiveState(userDataPath, intentTransaction, options)
       forensicConfirmed = true
       removeIntentDurably(userDataPath, platform, ops)
       return true
@@ -1184,22 +1248,9 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
       return false
     }
     if (parsed.phase === 'primary-verified') {
-      let exactRestoredLive = false
-      try {
-        verifyPairDirectory(userDataPath, parsed, { platform })
-        exactRestoredLive = true
-      } catch { /* distinguish valid later advancement below */ }
-      if (exactRestoredLive) {
-        verifyForensicEvidence(userDataPath, parsed, { platform, now: options.now })
-        removeStagingDurably(userDataPath, platform, ops)
-        return true
-      }
-      if (fs.existsSync(path.join(userDataPath, SETTINGS_FILE))
-        && livePairIsReadable(userDataPath, options)) {
-        removeStagingDurably(userDataPath, platform, ops)
-        return true
-      }
-      throw new Error('orphan primary-verified staging does not match the live settings/journal pair')
+      verifyCompletedRestoreLiveState(userDataPath, parsed, options)
+      removeStagingDurably(userDataPath, platform, ops)
+      return true
     }
 
     const pair = verifyPairDirectory(stagingPath, parsed, { platform })

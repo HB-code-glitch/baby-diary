@@ -139,6 +139,65 @@ function forensicFootprint(root: string): { archives: number; bytes: number } {
   return { archives: archiveNames.length, bytes }
 }
 
+function reachPrimaryVerifiedWindowsRestore(
+  root: string,
+  index: number,
+  bootPrefix: string,
+): {
+    staleIntent: Buffer
+    forensicArchive: string
+  } {
+  writeSnapshot(root, '2026-07-13_10-20-30', [mutation(index)])
+  writeCorruptLivePair(root)
+  expect(() => recoverSettingsAndJournalPair(root, {
+    platform: 'win32',
+    startupId: `${bootPrefix}-boot-0`,
+  })).toThrow(expect.objectContaining({ restartRequired: true }))
+  expect(() => recoverSettingsAndJournalPair(root, {
+    platform: 'win32',
+    startupId: `${bootPrefix}-boot-1`,
+  })).toThrow(expect.objectContaining({ restartRequired: true }))
+  expect(() => recoverSettingsAndJournalPair(root, {
+    platform: 'win32',
+    startupId: `${bootPrefix}-boot-2`,
+  })).toThrow(expect.objectContaining({ restartRequired: true, restoreApplied: true }))
+
+  const forensicRoot = path.join(root, 'recovery-forensics')
+  return {
+    staleIntent: fs.readFileSync(path.join(root, RESTORE_INTENT_FILE)),
+    forensicArchive: path.join(forensicRoot, fs.readdirSync(forensicRoot)[0]),
+  }
+}
+
+function cleanRestoreAndAdvanceSettings(
+  root: string,
+  index: number,
+  bootPrefix: string,
+): {
+    staleIntent: Buffer
+    forensicArchive: string
+    liveSettings: Buffer
+    liveJournal: Buffer
+  } {
+  const completed = reachPrimaryVerifiedWindowsRestore(root, index, bootPrefix)
+  const opened = new SettingsStore(root, {
+    platform: 'win32',
+    startupId: `${bootPrefix}-boot-3`,
+  })
+  expect(fs.existsSync(path.join(root, RESTORE_INTENT_FILE))).toBe(false)
+  expect(fs.existsSync(path.join(root, RESTORE_STAGING_DIR))).toBe(false)
+
+  const advanced = opened.get()
+  advanced.profile.name = 'Advanced after cleanup'
+  opened.save(advanced)
+  return {
+    staleIntent: completed.staleIntent,
+    forensicArchive: completed.forensicArchive,
+    liveSettings: fs.readFileSync(path.join(root, 'settings.json')),
+    liveJournal: fs.readFileSync(path.join(root, BABY_INFO_JOURNAL_FILE)),
+  }
+}
+
 describe('verified settings/journal pair recovery', () => {
   let tmpDir: string
 
@@ -770,6 +829,109 @@ describe('verified settings/journal pair recovery', () => {
     expect(liveJournal).toEqual(snapshot.journal)
   })
 
+  it('cleans a reappeared exact stale intent after SettingsStore validly advances the restored live pair', () => {
+    const advanced = cleanRestoreAndAdvanceSettings(tmpDir, 134, 'stale-advanced')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    fs.writeFileSync(intentPath, advanced.staleIntent)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+
+    const boot4 = new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'stale-advanced-boot-4',
+    })
+
+    expect(boot4.get().profile.name).toBe('Advanced after cleanup')
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(advanced.liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(advanced.liveJournal)
+  })
+
+  it.each([
+    ['missing settings', 135, (root: string) => fs.unlinkSync(path.join(root, 'settings.json'))],
+    ['missing journal', 136, (root: string) => fs.unlinkSync(path.join(root, BABY_INFO_JOURNAL_FILE))],
+    ['corrupt settings', 137, (root: string) => fs.writeFileSync(path.join(root, 'settings.json'), '{broken live')],
+    ['corrupt journal', 138, (root: string) => fs.writeFileSync(path.join(root, BABY_INFO_JOURNAL_FILE), '{"version":1')],
+  ])('keeps a reappeared stale intent and fails closed on %s after valid advancement', (label, index, damageLive) => {
+    const advanced = cleanRestoreAndAdvanceSettings(
+      tmpDir,
+      index,
+      label.replace(' ', '-'),
+    )
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    fs.writeFileSync(intentPath, advanced.staleIntent)
+    damageLive(tmpDir)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const beforeSettings = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath) : null
+    const beforeJournal = fs.existsSync(journalPath) ? fs.readFileSync(journalPath) : null
+
+    expect(() => new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: `${label.replace(' ', '-')}-boot-4`,
+    })).toThrow(/live|settings|journal|checksum|corrupt|valid advancement/i)
+    expect(fs.existsSync(intentPath)).toBe(true)
+    expect(fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath) : null).toEqual(beforeSettings)
+    expect(fs.existsSync(journalPath) ? fs.readFileSync(journalPath) : null).toEqual(beforeJournal)
+  })
+
+  it('fails closed on changed forensic evidence when an exact stale intent reappears after valid advancement', () => {
+    const advanced = cleanRestoreAndAdvanceSettings(tmpDir, 139, 'stale-forensic')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    fs.writeFileSync(intentPath, advanced.staleIntent)
+    fs.appendFileSync(path.join(advanced.forensicArchive, 'settings.json'), 'tampered')
+
+    expect(() => new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'stale-forensic-boot-4',
+    })).toThrow(/forensic|checksum/i)
+    expect(fs.existsSync(intentPath)).toBe(true)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(advanced.liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(advanced.liveJournal)
+  })
+
+  it('fails closed when a reappeared stale intent no longer has its exact transaction identity', () => {
+    const advanced = cleanRestoreAndAdvanceSettings(tmpDir, 140, 'stale-identity')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const forged = JSON.parse(advanced.staleIntent.toString('utf8'))
+    forged.snapshotId = 'forged-snapshot-identity'
+    fs.writeFileSync(intentPath, JSON.stringify(forged, null, 2))
+
+    expect(() => new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: 'stale-identity-boot-4',
+    })).toThrow(/transaction identity|verified backup|snapshot/i)
+    expect(fs.existsSync(intentPath)).toBe(true)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(advanced.liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(advanced.liveJournal)
+  })
+
+  it('rejects an unrelated readable pair rather than treating it as an advancement of a stale intent', () => {
+    const advanced = cleanRestoreAndAdvanceSettings(tmpDir, 141, 'stale-unrelated')
+    const unrelatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-unrelated-live-'))
+    try {
+      const unrelated = writeSnapshot(unrelatedRoot, '2026-07-13_10-20-30', [mutation(142, 'family-B')])
+      fs.copyFileSync(path.join(unrelated.snapshot, 'settings.json'), path.join(tmpDir, 'settings.json'))
+      fs.copyFileSync(
+        path.join(unrelated.snapshot, BABY_INFO_JOURNAL_FILE),
+        path.join(tmpDir, BABY_INFO_JOURNAL_FILE),
+      )
+      const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+      fs.writeFileSync(intentPath, advanced.staleIntent)
+      const unrelatedSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+      const unrelatedJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+      expect(() => new SettingsStore(tmpDir, {
+        platform: 'win32',
+        startupId: 'stale-unrelated-boot-4',
+      })).toThrow(/advance|lineage|transaction|settings\/journal/i)
+      expect(fs.existsSync(intentPath)).toBe(true)
+      expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(unrelatedSettings)
+      expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(unrelatedJournal)
+    } finally {
+      fs.rmSync(unrelatedRoot, { recursive: true, force: true })
+    }
+  })
+
   it.each([
     ['mismatched', (root: string) => fs.writeFileSync(path.join(root, 'settings.json'), '{mixed live')],
     ['missing', (root: string) => fs.unlinkSync(path.join(root, 'settings.json'))],
@@ -917,6 +1079,26 @@ describe('verified settings/journal pair recovery', () => {
       .toBe('valid advancement after an old restore')
     expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(snapshot.journal)
     expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(false)
+  })
+
+  it('keeps orphan completed staging when valid advancement has mismatched forensic evidence', () => {
+    const advanced = cleanRestoreAndAdvanceSettings(tmpDir, 143, 'orphan-forensic-advance')
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    fs.mkdirSync(stagingPath)
+    fs.writeFileSync(path.join(stagingPath, 'restore-transaction.json'), advanced.staleIntent)
+    fs.appendFileSync(path.join(advanced.forensicArchive, 'settings.json'), 'tampered')
+    const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
+    const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'orphan-forensic-advance-boot-3',
+    })).toThrow(/forensic|checksum/i)
+    expect(fs.existsSync(stagingPath)).toBe(true)
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
   })
 
   it('does not overwrite an unreadable live mismatch from orphan primary-verified staging', () => {
