@@ -124,6 +124,7 @@ describe('EventLog', () => {
       closeSync: fs.closeSync,
       renameSync: fs.renameSync,
       unlinkSync: fs.unlinkSync,
+      fstatSync: fs.fstatSync,
       ftruncateSync: fs.ftruncateSync,
     }
     const shortWriteLog = new EventLog({ dataDir: tmpDir, fileOps } as never)

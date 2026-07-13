@@ -289,13 +289,13 @@ describe('P10: settings deep-merge on load', () => {
     const store = new SettingsStore(tmpDir)
     const s = store.get()
     expect(s.baby).toMatchObject({ name: '', birthdate: '' })
-    expect(store.listUnlinkedBabyInfoArchives()).toEqual([
+    expect(store.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
       expect.objectContaining({ babyName: 'Alice', babyBirthdate: '' }),
     ])
 
     const restarted = new SettingsStore(tmpDir)
     expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
-    expect(restarted.listUnlinkedBabyInfoArchives()).toHaveLength(1)
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
   })
 
   it('JSON with only profile.name preserves default role', () => {

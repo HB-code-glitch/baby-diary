@@ -10,7 +10,8 @@ import type {
   BabyInfoCommitIpcResponse,
   BabyInfoSettingsCommitOperation,
 } from '../shared/types'
-import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
+import { getBabyInfoMutationKey, makeBabyInfoUnlinkedArchive } from '../shared/babyInfoResolver'
+import { makeBabyInfoArchiveCursor } from '../shared/babyInfoArchivePaging'
 import { BabyInfoSettingsCommitError } from '../shared/babyInfoSettingsCommit'
 import { SettingsStore } from '../electron/store/settings'
 import { SettingsPage } from '../src/pages/SettingsPage'
@@ -20,6 +21,16 @@ import i18n from '../src/i18n'
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok
+    reject = fail
+  })
+  return { promise, resolve, reject }
 }
 
 function settings(): AppSettings {
@@ -59,13 +70,14 @@ const getSettings = vi.fn(async () => clone(mainStore.get()))
 const commitBabyInfo = vi.fn(async (
   operation: BabyInfoSettingsCommitOperation,
 ): Promise<BabyInfoCommitIpcResponse> => commitOnMain(operation))
-const listUnlinkedBabyInfoArchives = vi.fn(async () => ([{
-  archiveId: 'legacy-archive-1',
-  babyName: '보관된 아기',
-  babyBirthdate: '2025-12-31',
-  archivedAt: '2026-07-13T00:00:00.000Z',
-  source: 'legacy-unscoped' as const,
-}]))
+const archivedBabyInfo = makeBabyInfoUnlinkedArchive(
+  '보관된 아기',
+  '2025-12-31',
+  '2026-07-13T00:00:00.000Z',
+)!
+const listUnlinkedBabyInfoArchives = vi.fn(async (_request: { limit: number; cursor?: string }) => ({
+  items: [archivedBabyInfo],
+}))
 
 const bridge: Window['babyDiary'] = {
   getFirebaseEmulator: async () => null,
@@ -162,7 +174,9 @@ describe('SettingsPage baby info durable save', () => {
       return clone(mainStore.save(next))
     })
     commitBabyInfo.mockReset().mockImplementation(commitOnMain)
-    listUnlinkedBabyInfoArchives.mockClear()
+    listUnlinkedBabyInfoArchives.mockReset().mockImplementation(async () => ({
+      items: [archivedBabyInfo],
+    }))
     Object.defineProperty(window, 'babyDiary', { configurable: true, value: bridge })
     useAppStore.setState({ settings: clone(mainStore.get()), dataInfo: null, error: null })
     container = document.createElement('div')
@@ -215,6 +229,7 @@ describe('SettingsPage baby info durable save', () => {
   })
 
   it('applies an archived unlinked pair only to dirty fields and creates a mutation only after Save', async () => {
+    expect(listUnlinkedBabyInfoArchives).toHaveBeenCalledWith({ limit: 10 })
     const apply = Array.from(container.querySelectorAll('button')).find(button => (
       button.textContent?.includes('보관된 아기 정보 적용')
     ))
@@ -236,6 +251,82 @@ describe('SettingsPage baby info durable save', () => {
       babyName: '보관된 아기',
       babyBirthdate: '2025-12-31',
     }))
+  })
+
+  it('keeps the initial archive DOM bounded and progressively loads the next page with visible focus', async () => {
+    const archives = Array.from({ length: 11 }, (_, index) => makeBabyInfoUnlinkedArchive(
+      `보관 ${index}`,
+      '2025-12-31',
+      new Date(Date.parse('2026-07-13T00:00:00.000Z') - index).toISOString(),
+    )!)
+    const firstPage = archives.slice(0, 10)
+    const cursor = makeBabyInfoArchiveCursor(firstPage.at(-1)!.archiveId)
+    listUnlinkedBabyInfoArchives.mockImplementation(async request => (
+      request.cursor
+        ? { items: [archives[10]] }
+        : { items: firstPage, nextCursor: cursor }
+    ))
+
+    await act(async () => {
+      useAppStore.setState({
+        settings: { ...clone(mainStore.get()), familyId: 'family-page-reset' },
+      })
+    })
+    await flush()
+
+    expect(container.querySelectorAll('[data-archive-index]')).toHaveLength(10)
+    const loadMore = Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent?.includes(i18n.t('settings.unlinkedArchiveLoadMore'))
+    )) as HTMLButtonElement
+    expect(loadMore).toBeInstanceOf(HTMLButtonElement)
+
+    await act(async () => loadMore.click())
+    await flush()
+
+    expect(listUnlinkedBabyInfoArchives).toHaveBeenLastCalledWith({ limit: 10, cursor })
+    expect(container.querySelectorAll('[data-archive-index]')).toHaveLength(11)
+    const firstNewApply = container.querySelector<HTMLButtonElement>('[data-archive-index="10"] button')
+    expect(document.activeElement).toBe(firstNewApply)
+  })
+
+  it('keeps loaded archives visible while a next page is loading and reports a retryable page error', async () => {
+    const archives = Array.from({ length: 10 }, (_, index) => makeBabyInfoUnlinkedArchive(
+      `보관 오류 ${index}`,
+      '2025-12-31',
+      new Date(Date.parse('2026-07-13T00:00:00.000Z') - index).toISOString(),
+    )!)
+    const cursor = makeBabyInfoArchiveCursor(archives.at(-1)!.archiveId)
+    const nextPage = deferred<{ items: typeof archives }>()
+    listUnlinkedBabyInfoArchives.mockImplementation(request => (
+      request.cursor
+        ? nextPage.promise
+        : Promise.resolve({ items: archives, nextCursor: cursor })
+    ))
+
+    await act(async () => {
+      useAppStore.setState({ settings: { ...clone(mainStore.get()), profile: {
+        ...clone(mainStore.get()).profile,
+        uid: 'archive-error-reset',
+      } } })
+    })
+    await flush()
+
+    const loadMore = Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent?.includes(i18n.t('settings.unlinkedArchiveLoadMore'))
+    )) as HTMLButtonElement
+    await act(async () => { loadMore.click() })
+    expect(loadMore.disabled).toBe(true)
+    expect(loadMore.textContent).toContain(i18n.t('settings.unlinkedArchiveLoading'))
+    expect(container.querySelectorAll('[data-archive-index]')).toHaveLength(10)
+
+    await act(async () => { nextPage.reject(new Error('page unavailable')) })
+    await flush()
+
+    expect(container.querySelectorAll('[data-archive-index]')).toHaveLength(10)
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toContain(i18n.t('settings.unlinkedArchiveLoadError'))
+    expect(loadMore.disabled).toBe(false)
+    expect(loadMore.textContent).toContain(i18n.t('settings.unlinkedArchiveLoadMore'))
   })
 
   it('keeps a newer edit dirty when the prior dedicated save resolves, then commits it', async () => {

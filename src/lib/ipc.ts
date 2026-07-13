@@ -15,6 +15,14 @@ import type {
   FirebaseEmulatorBridge,
   SavePdfResult,
 } from '../../shared/types'
+import {
+  getBabyInfoArchiveIdFromCursor,
+  makeBabyInfoArchiveCursor,
+  parseBabyInfoArchivePage,
+  parseBabyInfoArchivePageRequest,
+  type BabyInfoArchivePage,
+  type BabyInfoArchivePageRequest,
+} from '../../shared/babyInfoArchivePaging'
 import type { HealthEvidenceSourceId } from '../../shared/healthEvidence'
 import { getEvidenceSourceById } from '../../shared/healthEvidence'
 import { getEventStorageKey, resolveLatestEvent } from '../../shared/eventResolver'
@@ -57,7 +65,7 @@ declare global {
       listPendingBabyInfo: (request: BabyInfoPendingPageRequest) => Promise<BabyInfoPendingPage>
       getBabyInfoSummary: (familyId: string) => Promise<BabyInfoJournalSummary>
       getBabyInfoMutation: (familyId: string, key: string) => Promise<BabyInfoMutation | undefined>
-      listUnlinkedBabyInfoArchives: () => Promise<BabyInfoUnlinkedArchive[]>
+      listUnlinkedBabyInfoArchives: (request: BabyInfoArchivePageRequest) => Promise<BabyInfoArchivePage>
       exportData: (format: ExportFormat) => Promise<void>
       openBackupFolder: () => Promise<void>
       getDataInfo: () => Promise<DataInfo>
@@ -455,7 +463,27 @@ const mockBabyDiary: Window['babyDiary'] = {
     const candidate = mockGetJournal().mutations.find(item => getBabyInfoMutationKey(item) === key)
     return candidate?.familyId === validFamilyId ? candidate : undefined
   },
-  listUnlinkedBabyInfoArchives: async () => mockGetJournal().unlinkedArchives.map(item => ({ ...item })),
+  listUnlinkedBabyInfoArchives: async rawRequest => {
+    const request = parseBabyInfoArchivePageRequest(rawRequest)
+    const ordered = mockGetJournal().unlinkedArchives
+      .map(item => ({ ...item }))
+      .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt)
+        || left.archiveId.localeCompare(right.archiveId))
+    let start = 0
+    if (request.cursor) {
+      const cursorId = getBabyInfoArchiveIdFromCursor(request.cursor)
+      const cursorIndex = ordered.findIndex(item => item.archiveId === cursorId)
+      if (cursorIndex < 0) throw new Error('baby info archive page cursor is unknown')
+      start = cursorIndex + 1
+    }
+    const items = ordered.slice(start, start + request.limit)
+    return {
+      items,
+      ...(start + items.length < ordered.length
+        ? { nextCursor: makeBabyInfoArchiveCursor(items[items.length - 1].archiveId) }
+        : {}),
+    }
+  },
   exportData: async () => { throw new Error('ELECTRON_ONLY') },
   openBackupFolder: async () => { throw new Error('ELECTRON_ONLY') },
   getDataInfo: async () => ({
@@ -530,8 +558,12 @@ export const ipc = {
     getApi().getBabyInfoSummary(familyId),
   getBabyInfoMutation: (familyId: string, key: string): Promise<BabyInfoMutation | undefined> =>
     getApi().getBabyInfoMutation(familyId, key),
-  listUnlinkedBabyInfoArchives: (): Promise<BabyInfoUnlinkedArchive[]> =>
-    getApi().listUnlinkedBabyInfoArchives(),
+  listUnlinkedBabyInfoArchives: async (
+    request: BabyInfoArchivePageRequest,
+  ): Promise<BabyInfoArchivePage> => {
+    const parsedRequest = parseBabyInfoArchivePageRequest(request)
+    return parseBabyInfoArchivePage(await getApi().listUnlinkedBabyInfoArchives(parsedRequest))
+  },
   exportData: (format: ExportFormat) => getApi().exportData(format),
   openBackupFolder: (): Promise<void> => getApi().openBackupFolder(),
   getDataInfo: (): Promise<DataInfo> => getApi().getDataInfo(),

@@ -371,7 +371,10 @@
     "babyInfoSavePending": "赤ちゃんの情報はこの端末に保存され、接続すると同期されます。",
     "babyInfoSharedHint": "赤ちゃんの情報は家族全体で共有されます",
     "unlinkedArchiveReview": "家族に紐づいていなかった赤ちゃん情報を保管しています: {{name}} · {{birthdate}}。反映しても保存するまでは共有されません。",
-    "unlinkedArchiveApply": "保管した赤ちゃん情報を反映"
+    "unlinkedArchiveApply": "保管した赤ちゃん情報を反映",
+    "unlinkedArchiveLoadMore": "保管した情報をさらに表示",
+    "unlinkedArchiveLoading": "保管した情報を読み込み中…",
+    "unlinkedArchiveLoadError": "保管した情報を読み込めませんでした。もう一度お試しください。"
   },
   "sync": {
     "noConfigTitle": "Firebase設定",

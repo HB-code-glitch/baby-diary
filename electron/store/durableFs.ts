@@ -16,6 +16,7 @@ export interface DurableFileOps {
   closeSync(fd: number): void
   renameSync(oldPath: nodeFs.PathLike, newPath: nodeFs.PathLike): void
   unlinkSync(target: nodeFs.PathLike): void
+  fstatSync(fd: number): nodeFs.Stats
   ftruncateSync(fd: number, length?: number): void
 }
 
@@ -31,6 +32,30 @@ export interface DurableWriteEvidence {
 
 const DEFAULT_OPS = nodeFs as unknown as DurableFileOps
 let temporarySequence = 0
+
+export class DurableAppendUncertainError extends Error {
+  readonly code = 'DURABLE_APPEND_UNCERTAIN' as const
+
+  constructor(
+    readonly target: string,
+    readonly preAppendLength: number,
+    readonly appendError: unknown,
+    readonly rollbackError: unknown,
+  ) {
+    super(
+      `Durable append failed and rollback could not be confirmed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+    )
+    this.name = 'DurableAppendUncertainError'
+    Object.assign(this, { cause: appendError })
+  }
+}
+
+export function isDurableAppendUncertainError(error: unknown): error is DurableAppendUncertainError {
+  return error instanceof DurableAppendUncertainError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === 'DURABLE_APPEND_UNCERTAIN')
+}
 
 function asBuffer(data: string | Uint8Array): Buffer {
   return typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)
@@ -88,10 +113,30 @@ export function appendDurableFileSync(
   const platform = options.platform ?? process.platform
   ensureParent(target, ops)
   const created = !ops.existsSync(target)
-  const fd = ops.openSync(target, 'a', 0o600)
+  const fd = ops.openSync(target, created ? 'wx+' : 'r+', 0o600)
   try {
-    writeAllSync(fd, asBuffer(data), ops)
-    ops.fsyncSync(fd)
+    const stat = ops.fstatSync(fd)
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      throw new Error('durable append target length is invalid')
+    }
+    const preAppendLength = stat.size
+    try {
+      writeAllSync(fd, asBuffer(data), ops, preAppendLength)
+      ops.fsyncSync(fd)
+    } catch (appendError) {
+      try {
+        ops.ftruncateSync(fd, preAppendLength)
+        ops.fsyncSync(fd)
+      } catch (rollbackError) {
+        throw new DurableAppendUncertainError(
+          target,
+          preAppendLength,
+          appendError,
+          rollbackError,
+        )
+      }
+      throw appendError
+    }
   } finally {
     ops.closeSync(fd)
   }

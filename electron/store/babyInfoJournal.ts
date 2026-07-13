@@ -18,7 +18,15 @@ import {
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
 import {
+  getBabyInfoArchiveIdFromCursor,
+  makeBabyInfoArchiveCursor,
+  parseBabyInfoArchivePageRequest,
+  type BabyInfoArchivePage,
+  type BabyInfoArchivePageRequest,
+} from '../../shared/babyInfoArchivePaging'
+import {
   appendDurableFileSync,
+  isDurableAppendUncertainError,
   truncateDurableFileSync,
   type DurableFileOps,
   type DurableWriteOptions,
@@ -28,6 +36,22 @@ import { OrderedStringSet } from './orderedStringSet'
 export const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
 const MAX_PAGE_SIZE = 500
 const MAX_IMPORT_ID_BYTES = 512
+
+export class BabyInfoStorageUncertainError extends Error {
+  readonly code = 'BABY_INFO_STORAGE_UNCERTAIN' as const
+  readonly readOnly = true as const
+
+  constructor() {
+    super('Baby-info storage durability is uncertain; restart before reading cloud work or writing again.')
+    this.name = 'BabyInfoStorageUncertainError'
+  }
+}
+
+function newestArchiveOrderKey(archive: BabyInfoUnlinkedArchive): string {
+  const canonical = new Date(Date.parse(archive.archivedAt)).toISOString()
+  const reverseTimestamp = canonical.replace(/\d/g, digit => String(9 - Number(digit)))
+  return `${reverseTimestamp}\u0000${archive.archiveId}`
+}
 
 interface MutationRecord {
   version: 1
@@ -91,12 +115,16 @@ export class BabyInfoJournal {
   private readonly acknowledgedKeys = new Set<string>()
   private readonly completedImports = new Set<string>()
   private readonly unlinkedArchivesById = new Map<string, BabyInfoUnlinkedArchive>()
+  private unlinkedArchiveOrder = new OrderedStringSet()
+  private readonly unlinkedArchiveOrderKeyById = new Map<string, string>()
+  private readonly unlinkedArchiveIdByOrderKey = new Map<string, string>()
   private totalPendingCount = 0
   private tornOffset: number | undefined
   private needsSeparator = false
   private readonly strictReplay: boolean
   private readonly readOnlyBuffer: boolean
   private readonly durableOptions: DurableWriteOptions
+  private storageUncertain = false
 
   constructor(
     userDataPath: string,
@@ -127,14 +155,17 @@ export class BabyInfoJournal {
     this.acknowledgedKeys.clear()
     this.completedImports.clear()
     this.unlinkedArchivesById.clear()
+    this.unlinkedArchiveOrder = new OrderedStringSet()
+    this.unlinkedArchiveOrderKeyById.clear()
+    this.unlinkedArchiveIdByOrderKey.clear()
     this.totalPendingCount = 0
     this.tornOffset = undefined
     this.needsSeparator = false
   }
 
-  private reloadDurablePrefix(): void {
-    this.resetIndexes()
-    this.load()
+  private assertStorageWritable(): void {
+    if (this.storageUncertain) throw new BabyInfoStorageUncertainError()
+    if (this.readOnlyBuffer) throw new Error('buffer-backed baby info journal is read-only')
   }
 
   private load(sourceBuffer?: Buffer): void {
@@ -270,6 +301,10 @@ export class BabyInfoJournal {
       return
     }
     this.unlinkedArchivesById.set(record.archive.archiveId, record.archive)
+    const orderKey = newestArchiveOrderKey(record.archive)
+    this.unlinkedArchiveOrder.add(orderKey)
+    this.unlinkedArchiveOrderKeyById.set(record.archive.archiveId, orderKey)
+    this.unlinkedArchiveIdByOrderKey.set(orderKey, record.archive.archiveId)
   }
 
   private repairTornTail(): void {
@@ -285,25 +320,17 @@ export class BabyInfoJournal {
   }
 
   private appendRecords(records: readonly JournalRecord[]): void {
+    this.assertStorageWritable()
     if (records.length === 0) return
-    if (this.readOnlyBuffer) throw new Error('buffer-backed baby info journal is read-only')
-    this.repairTornTail()
     const payload = Buffer.from(records.map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8')
     try {
+      this.repairTornTail()
       appendDurableFileSync(this.journalPath, payload, this.durableOptions)
     } catch (error) {
-      // A short write/fsync failure can still have published complete records.
-      // Rebuild from the exact durable prefix so memory never rolls back bytes
-      // that reached disk, while a partial final record remains repairable.
-      try {
-        this.reloadDurablePrefix()
-      } catch (reloadError) {
-        const prefixError = new Error(
-          `baby info journal append failed and durable prefix reload failed: ${reloadError instanceof Error ? reloadError.message : String(reloadError)}`,
-        )
-        Object.assign(prefixError, { cause: error })
-        throw prefixError
-      }
+      // The durable primitive either restored the exact pre-append prefix or
+      // explicitly reported that it could not confirm rollback. Never ingest
+      // bytes from the failed attempt into this process's memory.
+      if (isDurableAppendUncertainError(error)) this.storageUncertain = true
       throw error
     }
     for (const record of records) this.applyRecord(record)
@@ -314,6 +341,7 @@ export class BabyInfoJournal {
     mutations: readonly BabyInfoMutation[],
     exactAcknowledgedMutationKeys: readonly string[],
   ): BabyInfoJournalSummary {
+    this.assertStorageWritable()
     const familyId = assertFamilyId(familyIdValue)
     const records: JournalRecord[] = []
     const appendedMutations = new Map<string, BabyInfoMutation>()
@@ -350,6 +378,7 @@ export class BabyInfoJournal {
   }
 
   importLegacyState(sourceId: string, rawState: unknown): void {
+    this.assertStorageWritable()
     if (!validImportId(sourceId)) throw new Error('legacy import id is invalid')
     if (this.completedImports.has(sourceId)) return
     const state: BabyInfoSyncState = normalizeBabyInfoSyncState(rawState)
@@ -378,6 +407,7 @@ export class BabyInfoJournal {
     babyBirthdate: string,
     archivedAt = new Date().toISOString(),
   ): BabyInfoUnlinkedArchive | undefined {
+    this.assertStorageWritable()
     const archive = makeBabyInfoUnlinkedArchive(babyName, babyBirthdate, archivedAt)
     if (!archive) return undefined
     const existing = this.unlinkedArchivesById.get(archive.archiveId)
@@ -386,10 +416,27 @@ export class BabyInfoJournal {
     return archive
   }
 
-  listUnlinkedArchives(): BabyInfoUnlinkedArchive[] {
-    return Array.from(this.unlinkedArchivesById.values(), archive => ({ ...archive }))
-      .sort((left, right) => left.archivedAt.localeCompare(right.archivedAt)
-        || left.archiveId.localeCompare(right.archiveId))
+  listUnlinkedArchivePage(rawRequest: BabyInfoArchivePageRequest | unknown): BabyInfoArchivePage {
+    const request = parseBabyInfoArchivePageRequest(rawRequest)
+    let afterKey: string | undefined
+    if (request.cursor) {
+      const archiveId = getBabyInfoArchiveIdFromCursor(request.cursor)
+      afterKey = this.unlinkedArchiveOrderKeyById.get(archiveId)
+      if (!afterKey) throw new Error('baby info archive page cursor is unknown')
+    }
+    const selectedWithLookahead = this.unlinkedArchiveOrder.valuesAfter(afterKey, request.limit + 1)
+    const selected = selectedWithLookahead.slice(0, request.limit)
+    const items = selected.map(orderKey => {
+      const archiveId = this.unlinkedArchiveIdByOrderKey.get(orderKey)!
+      return { ...this.unlinkedArchivesById.get(archiveId)! }
+    })
+    const hasMore = selectedWithLookahead.length > request.limit
+    return {
+      items,
+      ...(hasMore
+        ? { nextCursor: makeBabyInfoArchiveCursor(items[items.length - 1].archiveId) }
+        : {}),
+    }
   }
 
   /** True for any durable mutation, acknowledgement, or completed import marker. */
@@ -416,6 +463,7 @@ export class BabyInfoJournal {
     familyIdValue: string,
     options: { limit: number; afterKey?: string },
   ): BabyInfoPendingPage {
+    if (this.storageUncertain) throw new BabyInfoStorageUncertainError()
     const familyId = assertFamilyId(familyIdValue)
     if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > MAX_PAGE_SIZE) {
       throw new Error(`baby info pending page limit must be between 1 and ${MAX_PAGE_SIZE}`)

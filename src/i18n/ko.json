@@ -371,7 +371,10 @@
     "babyInfoSavePending": "아기 정보가 이 기기에 저장되었으며 연결되면 동기화됩니다.",
     "babyInfoSharedHint": "아기 정보는 가족 전체에 공유돼요",
     "unlinkedArchiveReview": "가족에 연결되지 않았던 아기 정보가 보관되어 있어요: {{name}} · {{birthdate}}. 적용해도 저장 전에는 공유되지 않아요.",
-    "unlinkedArchiveApply": "보관된 아기 정보 적용"
+    "unlinkedArchiveApply": "보관된 아기 정보 적용",
+    "unlinkedArchiveLoadMore": "보관된 정보 더 보기",
+    "unlinkedArchiveLoading": "보관된 정보를 불러오는 중…",
+    "unlinkedArchiveLoadError": "보관된 정보를 불러오지 못했어요. 다시 시도해 주세요."
   },
   "sync": {
     "noConfigTitle": "Firebase 설정",

@@ -7,7 +7,6 @@ import type {
   BabyInfoMutation,
   BabyInfoPendingPage,
   BabyInfoPendingPageRequest,
-  BabyInfoUnlinkedArchive,
   DataInfo,
   DiaryEvent,
   ExportFormat,
@@ -15,11 +14,75 @@ import type {
   SavePdfResult,
 } from '../shared/types'
 import type { HealthEvidenceSourceId } from '../shared/healthEvidence'
+import type {
+  BabyInfoArchivePage,
+  BabyInfoArchivePageRequest,
+} from '../shared/babyInfoArchivePaging'
 
 // Sandboxed preload scripts cannot require local runtime modules. Keep this
 // channel literal in sync with electron/evidenceExternalLink.ts; the contract
 // test drives the exposed API through the registered main handler.
 const EVIDENCE_SOURCE_OPEN_CHANNEL = 'evidence:openSource' as const
+const ARCHIVE_PAGE_MAX = 50
+const ARCHIVE_CURSOR_PATTERN = /^baby-info-archive-page-v1\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const ARCHIVE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function parseArchivePageRequest(value: unknown): BabyInfoArchivePageRequest {
+  if (!isPlainRecord(value)
+    || Object.keys(value).some(key => key !== 'limit' && key !== 'cursor')
+    || !Number.isInteger(value.limit)
+    || (value.limit as number) < 1
+    || (value.limit as number) > ARCHIVE_PAGE_MAX
+    || (value.cursor !== undefined
+      && (typeof value.cursor !== 'string' || !ARCHIVE_CURSOR_PATTERN.test(value.cursor)))) {
+    throw new Error('baby info archive page request is invalid')
+  }
+  return {
+    limit: value.limit as number,
+    ...(value.cursor === undefined ? {} : { cursor: value.cursor as string }),
+  }
+}
+
+function parseArchivePageResponse(value: unknown): BabyInfoArchivePage {
+  if (!isPlainRecord(value)
+    || Object.keys(value).some(key => key !== 'items' && key !== 'nextCursor')
+    || !Array.isArray(value.items)
+    || value.items.length > ARCHIVE_PAGE_MAX
+    || (value.nextCursor !== undefined
+      && (typeof value.nextCursor !== 'string' || !ARCHIVE_CURSOR_PATTERN.test(value.nextCursor)))) {
+    throw new Error('baby info archive page response is invalid')
+  }
+  const items = value.items.map(item => {
+    if (!isPlainRecord(item)
+      || Object.keys(item).sort().join(',') !== 'archiveId,archivedAt,babyBirthdate,babyName,source'
+      || typeof item.archiveId !== 'string'
+      || !ARCHIVE_ID_PATTERN.test(item.archiveId)
+      || typeof item.babyName !== 'string'
+      || typeof item.babyBirthdate !== 'string'
+      || typeof item.archivedAt !== 'string'
+      || !Number.isFinite(Date.parse(item.archivedAt))
+      || item.source !== 'legacy-unscoped') {
+      throw new Error('baby info archive page response is invalid')
+    }
+    return {
+      archiveId: item.archiveId,
+      babyName: item.babyName,
+      babyBirthdate: item.babyBirthdate,
+      archivedAt: item.archivedAt,
+      source: 'legacy-unscoped' as const,
+    }
+  })
+  return {
+    items,
+    ...(value.nextCursor === undefined ? {} : { nextCursor: value.nextCursor as string }),
+  }
+}
 
 const babyDiaryAPI = {
   getFirebaseEmulator: (): Promise<FirebaseEmulatorBridge | null> =>
@@ -58,8 +121,13 @@ const babyDiaryAPI = {
   getBabyInfoMutation: (familyId: string, key: string): Promise<BabyInfoMutation | undefined> =>
     ipcRenderer.invoke('babyInfo:getMutation', familyId, key),
 
-  listUnlinkedBabyInfoArchives: (): Promise<BabyInfoUnlinkedArchive[]> =>
-    ipcRenderer.invoke('babyInfo:listUnlinkedArchives'),
+  listUnlinkedBabyInfoArchives: async (
+    request: BabyInfoArchivePageRequest,
+  ): Promise<BabyInfoArchivePage> => {
+    const parsedRequest = parseArchivePageRequest(request)
+    const response: unknown = await ipcRenderer.invoke('babyInfo:listUnlinkedArchives', parsedRequest)
+    return parseArchivePageResponse(response)
+  },
 
   exportData: (format: ExportFormat): Promise<void> =>
     ipcRenderer.invoke('data:export', format),

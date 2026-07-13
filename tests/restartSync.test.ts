@@ -28,6 +28,7 @@ const harness = vi.hoisted(() => ({
   getDoc: vi.fn(),
   authListeners: new Set<(user: unknown) => void>(),
   authCallbacks: [] as Array<(user: unknown) => void>,
+  emitCurrentUserOnSubscribe: false,
   snapshots: new Set<{ path: string; next: (value: unknown) => void; error: (error: Error) => void }>(),
   settings: {
     baby: { name: '', birthdate: '' },
@@ -85,9 +86,12 @@ vi.mock('firebase/auth', async () => {
   const actual = await vi.importActual<typeof import('firebase/auth')>('firebase/auth')
   return {
     ...actual,
-    onAuthStateChanged: vi.fn((_auth: unknown, callback: (user: unknown) => void) => {
+    onAuthStateChanged: vi.fn((auth: unknown, callback: (user: unknown) => void) => {
       harness.authListeners.add(callback)
       harness.authCallbacks.push(callback)
+      if (harness.emitCurrentUserOnSubscribe) {
+        callback((auth as { currentUser?: unknown }).currentUser ?? null)
+      }
       return () => harness.authListeners.delete(callback)
     }),
   }
@@ -145,6 +149,7 @@ describe('serialized sync lifecycle', () => {
     localStorage.clear()
     harness.authListeners.clear()
     harness.authCallbacks.length = 0
+    harness.emitCurrentUserOnSubscribe = false
     harness.snapshots.clear()
     harness.settings = {
       baby: { name: '', birthdate: '' },
@@ -281,6 +286,109 @@ describe('serialized sync lifecycle', () => {
     signOut.resolve()
     await signingOut
     expect(engine.getStatus().status).toBe('signed-out')
+  })
+
+  it('holds sign-out for pending Firebase initialization, signs out once, then installs one listener', async () => {
+    const pendingInit = deferred<{ db: object; auth: { currentUser: unknown } }>()
+    harness.initFirebase.mockReturnValueOnce(pendingInit.promise)
+    harness.emitCurrentUserOnSubscribe = true
+    harness.fbSignOut.mockImplementationOnce(async (auth: { currentUser: unknown }) => {
+      auth.currentUser = null
+    })
+    const engine = await import('../src/sync/syncEngine')
+    const restarting = engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(1))
+
+    let settled = false
+    const signingOut = engine.signOutSync().then(() => { settled = true })
+    await flushMicrotasks()
+    expect(settled).toBe(false)
+    expect(engine.getStatus().status).toBe('signing-out')
+    expect(harness.fbSignOut).not.toHaveBeenCalled()
+
+    const auth = { currentUser: { uid: 'persisted-user', email: 'persisted@example.test' } }
+    pendingInit.resolve({ db: { projectId: 'project-A' }, auth })
+    await Promise.all([restarting, signingOut])
+
+    expect(harness.fbSignOut).toHaveBeenCalledTimes(1)
+    expect(harness.fbSignOut).toHaveBeenCalledWith(auth)
+    expect(auth.currentUser).toBeNull()
+    expect(engine.getStatus().status).toBe('signed-out')
+    await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
+    expect(harness.getDoc).not.toHaveBeenCalled()
+  })
+
+  it('maps pending Firebase initialization rejection to structured sign-out failure', async () => {
+    const pendingInit = deferred<{ db: object; auth: object }>()
+    harness.initFirebase.mockReturnValueOnce(pendingInit.promise)
+    const engine = await import('../src/sync/syncEngine')
+    const restarting = engine.restartSync(config('project-A'), 'family-A')
+    const restartFailure = restarting.catch(error => error)
+    await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(1))
+
+    const signingOut = engine.signOutSync()
+    expect(engine.getStatus().status).toBe('signing-out')
+    pendingInit.reject(new Error('held initialization rejected'))
+
+    await expect(signingOut).rejects.toMatchObject({ code: 'SIGN_OUT_FAILED' })
+    expect(await restartFailure).toBeInstanceOf(Error)
+    expect(engine.getStatus()).toMatchObject({
+      status: 'error',
+      detail: engine.DETAIL_SIGN_OUT_FAILED,
+    })
+    expect(harness.fbSignOut).not.toHaveBeenCalled()
+  })
+
+  it('times out instead of claiming success while Firebase initialization never settles', async () => {
+    harness.initFirebase.mockReturnValueOnce(deferred<{ db: object; auth: object }>().promise)
+    const engine = await import('../src/sync/syncEngine')
+    void engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(1))
+    vi.useFakeTimers()
+
+    const signingOut = engine.signOutSync()
+    const rejected = expect(signingOut).rejects.toMatchObject({ code: 'SIGN_OUT_TIMEOUT' })
+    await flushMicrotasks()
+    expect(engine.getStatus().status).toBe('signing-out')
+    expect(harness.fbSignOut).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(engine.SIGN_OUT_TIMEOUT_MS)
+
+    await rejected
+    expect(engine.getStatus()).toMatchObject({
+      status: 'error',
+      detail: engine.DETAIL_SIGN_OUT_TIMEOUT,
+    })
+  })
+
+  it('treats only genuinely unconfigured sign-out as an immediate remote no-op', async () => {
+    const engine = await import('../src/sync/syncEngine')
+
+    await expect(engine.signOutSync()).resolves.toBeUndefined()
+
+    expect(harness.initFirebase).not.toHaveBeenCalled()
+    expect(harness.fbSignOut).not.toHaveBeenCalled()
+    expect(engine.getStatus().status).toBe('no-config')
+  })
+
+  it('supersedes a pending-init sign-out without signing out the newer restart lease', async () => {
+    const firstInit = deferred<{ db: object; auth: object }>()
+    harness.initFirebase.mockReturnValueOnce(firstInit.promise)
+    const engine = await import('../src/sync/syncEngine')
+    const firstRestart = engine.restartSync(config('project-A'), 'family-A')
+    await vi.waitFor(() => expect(harness.initFirebase).toHaveBeenCalledTimes(1))
+    const signingOut = engine.signOutSync()
+
+    const newestRestart = engine.restartSync(config('project-B'), 'family-B')
+    await expect(signingOut).rejects.toMatchObject({ code: 'SIGN_OUT_SUPERSEDED' })
+    await newestRestart
+    await vi.waitFor(() => expect(harness.authListeners.size).toBe(1))
+
+    firstInit.resolve({ db: { projectId: 'project-A' }, auth: { projectId: 'project-A' } })
+    await firstRestart
+    await flushMicrotasks()
+    expect(harness.fbSignOut).not.toHaveBeenCalled()
+    expect(harness.authListeners.size).toBe(1)
+    expect(harness.initFirebase.mock.calls.at(-1)?.[0]).toMatchObject({ projectId: 'project-B' })
   })
 
   it('duplicate start calls are awaitable and leave one auth listener', async () => {

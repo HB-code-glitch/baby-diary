@@ -276,12 +276,33 @@ let _state: SyncState = { status: 'no-config', detail: '', pendingCount: 0 }
  * in-flight then() from overwriting a newer auth listener. */
 let _generation = 0
 
+interface InitializedFirebaseRuntime {
+  config: FirebaseConfig
+  familyId: string
+  db: Firestore
+  auth: Auth
+}
+
+interface PendingFirebaseInitialization {
+  generation: number
+  signOutClaimGeneration: number | null
+  startAfterInitialization: boolean
+  promise: Promise<InitializedFirebaseRuntime | null>
+}
+
+let _pendingFirebaseInitialization: PendingFirebaseInitialization | null = null
+
 interface ActiveSignOut {
   generation: number
   supersede: () => void
 }
 
 let _activeSignOut: ActiveSignOut | null = null
+
+function initializationLeaseIsCurrent(lease: PendingFirebaseInitialization): boolean {
+  return lease.generation === _generation
+    || lease.signOutClaimGeneration === _generation
+}
 
 interface SyncContext {
   generation: number
@@ -540,7 +561,8 @@ async function configureInternal(
   cfg: FirebaseConfig | null,
   familyIdValue: string,
   generation: number,
-): Promise<void> {
+  lease: PendingFirebaseInitialization,
+): Promise<InitializedFirebaseRuntime | null> {
   const familyId = familyIdValue === '' ? '' : assertFamilyId(familyIdValue)
   // Defensive fallback: a null config must never leave the engine at 'no-config'.
   // Dynamically import DEFAULT_FIREBASE_CONFIG to avoid a circular-module issue
@@ -549,7 +571,7 @@ async function configureInternal(
   if (!effectiveCfg) {
     try {
       const { DEFAULT_FIREBASE_CONFIG } = await import('./defaultFirebaseConfig')
-      if (generation !== _generation) return
+      if (!initializationLeaseIsCurrent(lease)) return null
       effectiveCfg = DEFAULT_FIREBASE_CONFIG
       console.warn('[syncEngine] configure: null config — falling back to DEFAULT_FIREBASE_CONFIG')
     } catch {
@@ -560,7 +582,7 @@ async function configureInternal(
   try {
     if (familyId && typeof ipc.getBabyInfoSummary === 'function') {
       const summary = await ipc.getBabyInfoSummary(familyId)
-      if (generation !== _generation) return
+      if (!initializationLeaseIsCurrent(lease)) return null
       _babyInfoPendingCount = summary.totalPendingCount
       _babyInfoNeedsRetry = summary.pendingCount > 0
     } else {
@@ -568,37 +590,78 @@ async function configureInternal(
       _babyInfoNeedsRetry = false
     }
   } catch (err) {
-    if (generation !== _generation) return
+    if (!initializationLeaseIsCurrent(lease)) return null
     _babyInfoPendingCount = 0
     _babyInfoNeedsRetry = false
-    setState({
-      status: 'error',
-      detail: `baby info settings error: ${err instanceof Error ? err.message : String(err)}`,
-      pendingCount: totalPendingCount(),
-    })
+    if (generation === _generation) {
+      setState({
+        status: 'error',
+        detail: `baby info settings error: ${err instanceof Error ? err.message : String(err)}`,
+        pendingCount: totalPendingCount(),
+      })
+    }
     throw err
   }
 
   if (!effectiveCfg) {
-    if (generation !== _generation) return
-    _config = null
-    _familyId = familyId
-    setState({ status: 'no-config', detail: 'no firebase config', pendingCount: totalPendingCount() })
-    return
+    if (!initializationLeaseIsCurrent(lease)) return null
+    if (generation === _generation) {
+      _config = null
+      _familyId = familyId
+      setState({ status: 'no-config', detail: 'no firebase config', pendingCount: totalPendingCount() })
+    }
+    return null
   }
 
   const result = await initFirebase(effectiveCfg, `sync-${generation}`)
-  if (generation !== _generation) return
+  if (!initializationLeaseIsCurrent(lease)) return null
   if (!result) {
-    setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: totalPendingCount() })
-    return
+    if (generation === _generation) {
+      setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: totalPendingCount() })
+    }
+    return null
   }
 
-  _config = effectiveCfg
-  _familyId = familyId
-  _db = result.db
-  _auth = result.auth
-  setState({ status: 'signed-out', detail: 'not signed in', pendingCount: totalPendingCount() })
+  const runtime: InitializedFirebaseRuntime = {
+    config: effectiveCfg,
+    familyId,
+    db: result.db,
+    auth: result.auth,
+  }
+  if (generation === _generation) {
+    publishInitializedFirebaseRuntime(runtime)
+    setState({ status: 'signed-out', detail: 'not signed in', pendingCount: totalPendingCount() })
+  }
+  return runtime
+}
+
+function publishInitializedFirebaseRuntime(runtime: InitializedFirebaseRuntime): void {
+  _config = runtime.config
+  _familyId = runtime.familyId
+  _db = runtime.db
+  _auth = runtime.auth
+}
+
+function beginFirebaseInitialization(
+  cfg: FirebaseConfig | null,
+  familyId: string,
+  generation: number,
+  startAfterInitialization: boolean,
+): Promise<void> {
+  const lease: PendingFirebaseInitialization = {
+    generation,
+    signOutClaimGeneration: null,
+    startAfterInitialization,
+    promise: Promise.resolve(null),
+  }
+  _pendingFirebaseInitialization = lease
+  const operation = configureInternal(cfg, familyId, generation, lease)
+  lease.promise = operation
+  const clearLease = () => {
+    if (_pendingFirebaseInitialization === lease) _pendingFirebaseInitialization = null
+  }
+  void operation.then(clearLease, clearLease)
+  return operation.then(() => undefined)
 }
 
 /** Configure without allowing network initialization to block a newer lease. */
@@ -608,7 +671,7 @@ export function configure(cfg: FirebaseConfig | null, familyId: string): Promise
   invalidateConfiguredRuntime(false)
   setState({ status: 'detached', detail: 'reconfiguring sync', pendingCount: totalPendingCount() })
   void stopRuntime(generation, false)
-  return configureInternal(cfg, familyId, generation)
+  return beginFirebaseInitialization(cfg, familyId, generation, false)
 }
 
 /** 회원가입 (신규 사용자) */
@@ -628,9 +691,22 @@ export async function signIn(email: string, password: string, keepLoggedIn = tru
 /** 로그아웃. Local detach is immediate; success is published only after Auth confirms it. */
 export function signOutSync(): Promise<void> {
   supersedeActiveSignOut()
-  const generation = ++_generation
   const auth = _auth
+  const pendingInitialization = !auth
+    && _pendingFirebaseInitialization
+    && initializationLeaseIsCurrent(_pendingFirebaseInitialization)
+    ? _pendingFirebaseInitialization
+    : null
+  if (!auth && !pendingInitialization) {
+    suspendRuntimeWork()
+    _currentUser = null
+    return Promise.resolve()
+  }
+
+  const generation = ++_generation
+  if (pendingInitialization) pendingInitialization.signOutClaimGeneration = generation
   const shouldRemainStarted = _started
+    || pendingInitialization?.startAfterInitialization === true
   // Invalidate captured callbacks synchronously, before the Firebase promise.
   suspendRuntimeWork()
   _currentUser = null
@@ -638,7 +714,23 @@ export function signOutSync(): Promise<void> {
 
   const remoteOperation = auth
     ? Promise.resolve().then(() => fbSignOut(auth))
-    : Promise.resolve()
+    : pendingInitialization!.promise.then(runtime => {
+      if (!runtime) return
+      // A newer lifecycle lease owns Firebase now. Never sign out a service it
+      // may have reactivated under the same stable persistence identity.
+      if (generation !== _generation) {
+        throw new SyncLifecycleError(
+          'SIGN_OUT_SUPERSEDED',
+          'Firebase sign-out was superseded before initialization completed',
+        )
+      }
+      // Publish only while this sign-out is still active. After a timeout the
+      // late remote logout may finish, but it must not resurrect local state.
+      if (_activeSignOut?.generation === generation) {
+        publishInitializedFirebaseRuntime(runtime)
+      }
+      return fbSignOut(runtime.auth)
+    })
   return new Promise<void>((resolve, reject) => {
     let settled = false
     const finish = () => {
@@ -1024,7 +1116,7 @@ export function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void
   void stopRuntime(generation, false)
   return (async () => {
     if (generation !== _generation) return
-    await configureInternal(cfg, familyId, generation)
+    await beginFirebaseInitialization(cfg, familyId, generation, true)
     if (generation !== _generation) return
     await startInternal(generation)
   })()

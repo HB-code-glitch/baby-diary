@@ -5,6 +5,8 @@ import { deleteApp, initializeApp } from 'firebase/app'
 import { getAuth } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
 
+const FIREBASE_REGISTRY = Symbol.for('baby-diary.firebase.service-registry.v1')
+
 const config = {
   apiKey: 'stable-key',
   authDomain: 'stable.example.test',
@@ -22,6 +24,7 @@ afterEach(async () => {
     .filter(app => createdNames.includes(app.name))
     .map(app => deleteApp(app)))
   createdNames.length = 0
+  delete (globalThis as unknown as Record<PropertyKey, unknown>)[FIREBASE_REGISTRY]
 })
 
 describe('stable Firebase SDK persistence identity', () => {
@@ -50,5 +53,26 @@ describe('stable Firebase SDK persistence identity', () => {
 
     expect(a1).toEqual(a2)
     expect(b.appName).not.toBe(a1.appName)
+  })
+
+  it('reuses one real installed-SDK app across module reset and deletes it on release', async () => {
+    const { getApps } = await import('firebase/app')
+    let firebaseModule = await import('../src/sync/firebase')
+    const identity = firebaseModule.getFirebasePersistenceIdentity(config)
+    createdNames.push(identity.appName)
+
+    const first = await firebaseModule.initFirebase(config, 'real-sdk-a')
+    expect(first).not.toBeNull()
+    expect(getApps().filter(app => app.name === identity.appName)).toHaveLength(1)
+
+    vi.resetModules()
+    firebaseModule = await import('../src/sync/firebase')
+    const second = await firebaseModule.initFirebase({ ...config }, 'real-sdk-b')
+    expect(second?.db).toBe(first?.db)
+    expect(second?.auth).toBe(first?.auth)
+    expect(getApps().filter(app => app.name === identity.appName)).toHaveLength(1)
+
+    await firebaseModule.teardownFirebase()
+    expect(getApps().filter(app => app.name === identity.appName)).toHaveLength(0)
   })
 })

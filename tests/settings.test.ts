@@ -3,8 +3,34 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { SettingsStore } from '../electron/store/settings'
+import type { DurableFileOps } from '../electron/store/durableFs'
 import { AppSettings, BabyInfoMutation, BabyInfoSettingsCommitResult } from '../shared/types'
 import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
+
+function simulatedPosixOps(): DurableFileOps {
+  const realOpen = fs.openSync.bind(fs)
+  const directoryFds = new Set<number>()
+  let nextDirectoryFd = -1000
+  return {
+    ...fs,
+    openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+      if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+        const fd = nextDirectoryFd--
+        directoryFds.add(fd)
+        return fd
+      }
+      return realOpen(target, flags, mode)
+    },
+    fsyncSync(fd) {
+      if (directoryFds.has(fd)) return
+      fs.fsyncSync(fd)
+    },
+    closeSync(fd) {
+      if (directoryFds.delete(fd)) return
+      fs.closeSync(fd)
+    },
+  }
+}
 
 describe('SettingsStore', () => {
   let tmpDir: string
@@ -106,7 +132,10 @@ describe('SettingsStore', () => {
     const json = '﻿' + JSON.stringify(settings, null, 2)
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), json, 'utf-8')
 
-    const loaded = new SettingsStore(tmpDir).get()
+    const loaded = new SettingsStore(tmpDir, {
+      platform: 'linux',
+      durableFs: simulatedPosixOps(),
+    }).get()
     expect(loaded.baby.name).toBe('BOM아기')
     expect(loaded.profile.uid).toBe('bom-uid')
     expect(loaded.familyId).toBe('bom-family')
@@ -148,7 +177,10 @@ describe('SettingsStore', () => {
     // Write corrupt primary settings.json
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), '}} totally broken {{', 'utf-8')
 
-    const loaded = new SettingsStore(tmpDir).get()
+    const loaded = new SettingsStore(tmpDir, {
+      platform: 'linux',
+      durableFs: simulatedPosixOps(),
+    }).get()
     expect(loaded.baby.name).toBe('복구아기')
     expect(loaded.familyId).toBe('restored-family')
     expect(loaded.profile.uid).toBe('restore-uid')
@@ -181,7 +213,10 @@ describe('SettingsStore', () => {
     // Corrupt primary
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), 'not json', 'utf-8')
 
-    const loaded = new SettingsStore(tmpDir).get()
+    const loaded = new SettingsStore(tmpDir, {
+      platform: 'linux',
+      durableFs: simulatedPosixOps(),
+    }).get()
     expect(loaded.baby.name).toBe('최신아기')
     expect(loaded.familyId).toBe('new-family')
   })

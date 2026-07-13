@@ -29,6 +29,8 @@ import { AgeGuidancePanel } from '../components/AgeGuidancePanel'
 export type { FormSnapshot }
 export { mergeSettingsSafely }
 
+const ARCHIVE_INITIAL_PAGE_SIZE = 10
+
 interface SettingsPageProps {
   onStartTour?: () => void
 }
@@ -78,6 +80,10 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [deletingAll, setDeletingAll] = useState(false)
   const [pdfSaving, setPdfSaving] = useState(false)
   const [unlinkedArchives, setUnlinkedArchives] = useState<BabyInfoUnlinkedArchive[]>([])
+  const [unlinkedArchiveCursor, setUnlinkedArchiveCursor] = useState<string | undefined>()
+  const [unlinkedArchiveLoading, setUnlinkedArchiveLoading] = useState(false)
+  const [unlinkedArchiveError, setUnlinkedArchiveError] = useState(false)
+  const archiveFocusIndexRef = useRef<number | null>(null)
 
   // Hydrate form from a settings object
   const hydrateForm = useCallback((s: AppSettings, forceBabyInfo = false) => {
@@ -119,13 +125,53 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 
   useEffect(() => {
     let cancelled = false
-    ipc.listUnlinkedBabyInfoArchives().then(archives => {
-      if (!cancelled) setUnlinkedArchives(archives)
+    setUnlinkedArchives([])
+    setUnlinkedArchiveCursor(undefined)
+    setUnlinkedArchiveError(false)
+    archiveFocusIndexRef.current = null
+    if (!settings?.familyId) return () => { cancelled = true }
+    setUnlinkedArchiveLoading(true)
+    ipc.listUnlinkedBabyInfoArchives({ limit: ARCHIVE_INITIAL_PAGE_SIZE }).then(page => {
+      if (cancelled) return
+      setUnlinkedArchives(page.items)
+      setUnlinkedArchiveCursor(page.nextCursor)
     }).catch(() => {
-      if (!cancelled) setUnlinkedArchives([])
+      if (!cancelled) setUnlinkedArchiveError(true)
+    }).finally(() => {
+      if (!cancelled) setUnlinkedArchiveLoading(false)
     })
     return () => { cancelled = true }
-  }, [])
+  }, [settings?.familyId, settings?.profile?.uid])
+
+  useEffect(() => {
+    const index = archiveFocusIndexRef.current
+    if (index === null || unlinkedArchiveLoading) return
+    const button = document.querySelector<HTMLButtonElement>(`[data-archive-index="${index}"] button`)
+    button?.focus()
+    archiveFocusIndexRef.current = null
+  }, [unlinkedArchives.length, unlinkedArchiveLoading])
+
+  const loadMoreUnlinkedArchives = async () => {
+    if (!unlinkedArchiveCursor || unlinkedArchiveLoading) return
+    const firstNewIndex = unlinkedArchives.length
+    setUnlinkedArchiveLoading(true)
+    setUnlinkedArchiveError(false)
+    try {
+      const page = await ipc.listUnlinkedBabyInfoArchives({
+        limit: ARCHIVE_INITIAL_PAGE_SIZE,
+        cursor: unlinkedArchiveCursor,
+      })
+      const known = new Set(unlinkedArchives.map(item => item.archiveId))
+      const additions = page.items.filter(item => !known.has(item.archiveId))
+      archiveFocusIndexRef.current = additions.length > 0 ? firstNewIndex : null
+      setUnlinkedArchives(current => [...current, ...additions])
+      setUnlinkedArchiveCursor(page.nextCursor)
+    } catch {
+      setUnlinkedArchiveError(true)
+    } finally {
+      setUnlinkedArchiveLoading(false)
+    }
+  }
 
   const applyUnlinkedArchive = (archive: BabyInfoUnlinkedArchive) => {
     babyNameDirtyRef.current = true
@@ -417,11 +463,14 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   {t('settings.babyInfoSharedHint')}
                 </div>
               )}
-              {settings?.familyId && unlinkedArchives.length > 0 && (
+              {settings?.familyId
+                && (unlinkedArchives.length > 0 || unlinkedArchiveLoading || unlinkedArchiveError)
+                && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {[...unlinkedArchives].reverse().map(archive => (
+                  {unlinkedArchives.map((archive, index) => (
                     <div
                       key={archive.archiveId}
+                      data-archive-index={index}
                       style={{ padding: 10, border: '1px solid var(--stone-200)', borderRadius: 8 }}
                     >
                       <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 8 }}>
@@ -439,8 +488,30 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                       </button>
                     </div>
                   ))}
+                  {unlinkedArchiveError && (
+                    <div role="alert" style={{ fontSize: 12, color: 'var(--danger)' }}>
+                      {t('settings.unlinkedArchiveLoadError')}
+                    </div>
+                  )}
+                  {unlinkedArchiveCursor && (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={unlinkedArchiveLoading}
+                      onClick={loadMoreUnlinkedArchives}
+                    >
+                      {unlinkedArchiveLoading
+                        ? t('settings.unlinkedArchiveLoading')
+                        : t('settings.unlinkedArchiveLoadMore')}
+                    </button>
+                  )}
+                  {unlinkedArchiveLoading && !unlinkedArchiveCursor && unlinkedArchives.length === 0 && (
+                    <div aria-live="polite" style={{ fontSize: 12 }}>
+                      {t('settings.unlinkedArchiveLoading')}
+                    </div>
+                  )}
                 </div>
-              )}
+                )}
               <div>
                 <div className="label">{t('settings.babyName')}</div>
                 <input

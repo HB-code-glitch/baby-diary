@@ -11,6 +11,7 @@ import {
 } from './babyInfoJournal'
 import {
   atomicReplaceFileSync,
+  writeAllSync,
   type DurableFileOps,
 } from './durableFs'
 
@@ -31,6 +32,19 @@ const MAX_JOURNAL_BYTES = 128 * 1024 * 1024
 const MAX_DATA_BYTES = 512 * 1024 * 1024
 const MAX_TRANSACTION_BYTES = 1024 * 1024
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
+const STREAM_CHUNK_BYTES = 64 * 1024
+
+export const DEFAULT_BACKUP_RESOURCE_LIMITS = Object.freeze({
+  maxSnapshotFiles: 4_096,
+  maxCandidates: 1_024,
+  maxTotalSnapshotBytes: 768 * 1024 * 1024,
+})
+
+export interface BackupResourceLimits {
+  maxSnapshotFiles: number
+  maxCandidates: number
+  maxTotalSnapshotBytes: number
+}
 
 export interface BackupManifestEntry {
   path: string
@@ -67,7 +81,7 @@ interface LegacyRestoreIntentFile {
   journal: DigestDescriptor
 }
 
-interface RestoreTransactionFile {
+interface LegacyRestoreTransactionFile {
   version: 2
   snapshotId: string
   snapshotTimestamp: string
@@ -78,19 +92,60 @@ interface RestoreTransactionFile {
   forensicArchiveId: string
 }
 
-type ParsedRestoreIntent = LegacyRestoreIntentFile | RestoreTransactionFile
+interface RestoreTransactionFile {
+  version: 3
+  snapshotId: string
+  snapshotTimestamp: string
+  settings: DigestDescriptor
+  journal: DigestDescriptor
+  phase: 'allocated' | 'prepared' | 'awaiting-windows-confirmation' | 'primary-verified'
+  windowsVerifiedStartups: number
+  lastWindowsStartupId: string
+  forensicArchiveId: string
+  forensicManifest: DigestDescriptor | null
+}
+
+type ParsedRestoreIntent = LegacyRestoreIntentFile | LegacyRestoreTransactionFile | RestoreTransactionFile
 
 export interface BackupReadOptions {
   platform?: NodeJS.Platform
   now?: Date
+  /** Tests may lower, but never raise, the production hard bounds. */
+  limits?: Partial<BackupResourceLimits>
 }
 
 export interface RecoveryOptions extends BackupReadOptions {
   documentsBackupDir?: string
   durableFs?: DurableFileOps
+  /** Stable for one SettingsStore construction; a new process/startup must use a new value. */
+  startupId?: string
 }
 
 const DEFAULT_DURABLE_OPS = fs as unknown as DurableFileOps
+
+function resourceLimits(overrides: Partial<BackupResourceLimits> | undefined): BackupResourceLimits {
+  const result = { ...DEFAULT_BACKUP_RESOURCE_LIMITS, ...overrides }
+  for (const key of Object.keys(DEFAULT_BACKUP_RESOURCE_LIMITS) as Array<keyof BackupResourceLimits>) {
+    const value = result[key]
+    if (!Number.isSafeInteger(value)
+      || value < 1
+      || value > DEFAULT_BACKUP_RESOURCE_LIMITS[key]) {
+      throw new Error(`backup resource limit is invalid: ${key}`)
+    }
+  }
+  return result
+}
+
+function addSnapshotBytes(total: number, size: number, maximum: number): number {
+  if (!Number.isSafeInteger(total)
+    || !Number.isSafeInteger(size)
+    || size < 0
+    || total > maximum
+    || size > maximum - total) {
+    throw new Error('total snapshot bytes exceed the aggregate bound')
+  }
+  return total + size
+}
 
 export class SettingsRecoveryError extends Error {
   readonly code = 'SETTINGS_RECOVERY_REQUIRED' as const
@@ -100,6 +155,8 @@ export class SettingsRecoveryError extends Error {
     message: string,
     readonly rejectedSnapshots: string[] = [],
     readonly originalsPreserved = false,
+    readonly restartRequired = false,
+    readonly primaryUntouched = false,
   ) {
     super(message)
     this.name = 'SettingsRecoveryError'
@@ -209,7 +266,7 @@ function parseLegacySnapshotTimestamp(name: string, now: Date): string {
   return timestamp.toISOString()
 }
 
-function parseManifest(raw: Buffer, now: Date): BackupManifest {
+function parseManifest(raw: Buffer, now: Date, limits: BackupResourceLimits): BackupManifest {
   let value: unknown
   try {
     value = JSON.parse(raw.toString('utf8'))
@@ -225,8 +282,12 @@ function parseManifest(raw: Buffer, now: Date): BackupManifest {
     throw new Error('backup manifest shape is invalid')
   }
   strictTimestamp(value.snapshotTimestamp, now)
+  if (value.files.length > limits.maxSnapshotFiles) {
+    throw new Error('backup snapshot file-count bound exceeded')
+  }
 
   const files: BackupManifestEntry[] = []
+  let aggregateBytes = addSnapshotBytes(0, raw.byteLength, limits.maxTotalSnapshotBytes)
   for (const item of value.files) {
     if (!isRecord(item)
       || !exactKeys(item, ['path', 'size', 'sha256'])
@@ -237,6 +298,11 @@ function parseManifest(raw: Buffer, now: Date): BackupManifest {
       || !SHA256_PATTERN.test(item.sha256)) {
       throw new Error('backup manifest entry is invalid')
     }
+    aggregateBytes = addSnapshotBytes(
+      aggregateBytes,
+      item.size as number,
+      limits.maxTotalSnapshotBytes,
+    )
     files.push({ path: item.path, size: item.size as number, sha256: item.sha256 })
   }
   if (files.length < 2
@@ -281,15 +347,19 @@ function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
     && left.mode === right.mode
 }
 
-/**
- * Opens one allowlisted regular file without following links where supported,
- * validates path/handle identity, and returns the only Buffer used downstream.
- */
-function readRegularFileOnce(
+interface OpenRegularFile {
+  fd: number
+  absolute: string
+  beforeReal: string
+  opened: fs.Stats
+  relativePath: string
+}
+
+function openRegularFileOnce(
   root: string,
   relativePath: string,
-  options: BackupReadOptions = {},
-): Buffer {
+  options: BackupReadOptions,
+): OpenRegularFile {
   const normalized = relativePath.replace(/\\/g, '/')
   if (normalized !== relativePath
     || normalized.startsWith('/')
@@ -320,24 +390,114 @@ function readRegularFileOnce(
     if (opened.size > maximumFor(normalized)) {
       throw new Error(`backup file exceeds its size bound: ${relativePath}`)
     }
-    const buffer = Buffer.alloc(opened.size)
+    return { fd, absolute, beforeReal, opened, relativePath }
+  } catch (error) {
+    fs.closeSync(fd)
+    throw error
+  }
+}
+
+function assertOpenFileUnchanged(source: OpenRegularFile): void {
+  const after = fs.fstatSync(source.fd)
+  if (!sameFileIdentity(source.opened, after)) {
+    throw new Error(`backup file changed during read: ${source.relativePath}`)
+  }
+  const afterReal = fs.realpathSync.native(source.absolute)
+  if (afterReal !== source.beforeReal) {
+    throw new Error(`backup path changed during read: ${source.relativePath}`)
+  }
+}
+
+/**
+ * Opens one allowlisted regular file without following links where supported,
+ * validates path/handle identity, and returns the only Buffer used downstream.
+ */
+function readRegularFileOnce(
+  root: string,
+  relativePath: string,
+  options: BackupReadOptions = {},
+): Buffer {
+  const source = openRegularFileOnce(root, relativePath, options)
+  try {
+    const buffer = Buffer.alloc(source.opened.size)
     let offset = 0
     while (offset < buffer.byteLength) {
-      const count = fs.readSync(fd, buffer, offset, buffer.byteLength - offset, offset)
+      const count = fs.readSync(source.fd, buffer, offset, buffer.byteLength - offset, offset)
       if (!Number.isInteger(count) || count <= 0) {
         throw new Error(`backup file changed during read: ${relativePath}`)
       }
       offset += count
     }
-    const after = fs.fstatSync(fd)
-    if (!sameFileIdentity(opened, after)) {
-      throw new Error(`backup file changed during read: ${relativePath}`)
-    }
-    const afterReal = fs.realpathSync.native(absolute)
-    if (afterReal !== beforeReal) throw new Error(`backup path changed during read: ${relativePath}`)
+    assertOpenFileUnchanged(source)
     return buffer
   } finally {
-    fs.closeSync(fd)
+    fs.closeSync(source.fd)
+  }
+}
+
+function hashRegularFileOnce(
+  root: string,
+  relativePath: string,
+  options: BackupReadOptions,
+): DigestDescriptor {
+  const source = openRegularFileOnce(root, relativePath, options)
+  const hash = createHash('sha256')
+  const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+  try {
+    let offset = 0
+    while (offset < source.opened.size) {
+      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
+      const count = fs.readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error(`backup file changed during read: ${relativePath}`)
+      }
+      hash.update(chunk.subarray(0, count))
+      offset += count
+    }
+    assertOpenFileUnchanged(source)
+    return { size: source.opened.size, sha256: hash.digest('hex') }
+  } finally {
+    fs.closeSync(source.fd)
+  }
+}
+
+function streamRegularFileToStaging(
+  sourceRoot: string,
+  relativePath: string,
+  destination: string,
+  options: BackupReadOptions,
+): DigestDescriptor {
+  const source = openRegularFileOnce(sourceRoot, relativePath, options)
+  const hash = createHash('sha256')
+  const chunk = Buffer.alloc(Math.min(STREAM_CHUNK_BYTES, Math.max(1, source.opened.size)))
+  let destinationFd: number | undefined
+  let destinationCreated = false
+  let completed = false
+  try {
+    destinationFd = fs.openSync(destination, 'wx', 0o600)
+    destinationCreated = true
+    let offset = 0
+    while (offset < source.opened.size) {
+      const requested = Math.min(chunk.byteLength, source.opened.size - offset)
+      const count = fs.readSync(source.fd, chunk, 0, requested, offset)
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error(`backup file changed during read: ${relativePath}`)
+      }
+      const bytes = chunk.subarray(0, count)
+      hash.update(bytes)
+      writeAllSync(destinationFd, bytes, fs as unknown as DurableFileOps)
+      offset += count
+    }
+    fs.fsyncSync(destinationFd)
+    assertOpenFileUnchanged(source)
+    completed = true
+    return { size: source.opened.size, sha256: hash.digest('hex') }
+  } finally {
+    if (destinationFd !== undefined) fs.closeSync(destinationFd)
+    fs.closeSync(source.fd)
+    if (destinationCreated && !completed) {
+      try { fs.unlinkSync(destination) } catch { /* preserve the original failure */ }
+    }
   }
 }
 
@@ -348,9 +508,25 @@ function assertSnapshotDirectory(snapshotDir: string): void {
   }
 }
 
-function actualSnapshotPaths(snapshotDir: string): string[] {
+function boundedDirectoryEntries(directory: string, maximum: number, label: string): fs.Dirent[] {
+  const handle = fs.opendirSync(directory)
+  const entries: fs.Dirent[] = []
+  try {
+    for (;;) {
+      const entry = handle.readSync()
+      if (!entry) break
+      if (entries.length >= maximum) throw new Error(`${label} count exceeds its configured bound`)
+      entries.push(entry)
+    }
+    return entries
+  } finally {
+    handle.closeSync()
+  }
+}
+
+function actualSnapshotPaths(snapshotDir: string, limits: BackupResourceLimits): string[] {
   assertSnapshotDirectory(snapshotDir)
-  const top = fs.readdirSync(snapshotDir, { withFileTypes: true })
+  const top = boundedDirectoryEntries(snapshotDir, 4, 'backup top-level entry')
   const allowedTop = new Set([SETTINGS_FILE, BABY_INFO_JOURNAL_FILE, BACKUP_MANIFEST_FILE, 'data'])
   for (const entry of top) {
     if (!allowedTop.has(entry.name) || entry.isSymbolicLink()) {
@@ -367,7 +543,11 @@ function actualSnapshotPaths(snapshotDir: string): string[] {
     if (dataStat.isSymbolicLink() || !dataStat.isDirectory()) {
       throw new Error('backup data path is not a regular directory')
     }
-    for (const entry of fs.readdirSync(dataDir, { withFileTypes: true })) {
+    for (const entry of boundedDirectoryEntries(
+      dataDir,
+      Math.max(1, limits.maxSnapshotFiles - 2),
+      'backup snapshot file',
+    )) {
       const relativePath = `data/${entry.name}`
       if (!entry.isFile() || entry.isSymbolicLink() || !DATA_PATH_PATTERN.test(relativePath)) {
         throw new Error(`backup data path is invalid: ${relativePath}`)
@@ -375,6 +555,9 @@ function actualSnapshotPaths(snapshotDir: string): string[] {
       result.push(relativePath)
     }
     result.splice(2, result.length - 2, ...result.slice(2).sort())
+  }
+  if (result.length > limits.maxSnapshotFiles) {
+    throw new Error('backup snapshot file-count bound exceeded')
   }
   return result
 }
@@ -428,6 +611,7 @@ export function verifyBackupSnapshot(
   options: BackupReadOptions = {},
 ): VerifiedBackupPair {
   const now = options.now ?? new Date()
+  const limits = resourceLimits(options.limits)
   assertSnapshotDirectory(snapshotDir)
   const manifestPath = path.join(snapshotDir, BACKUP_MANIFEST_FILE)
   if (!fs.existsSync(manifestPath)) {
@@ -454,27 +638,36 @@ export function verifyBackupSnapshot(
   }
 
   const manifestBytes = readRegularFileOnce(snapshotDir, BACKUP_MANIFEST_FILE, options)
-  const manifest = parseManifest(manifestBytes, now)
-  const actualPaths = actualSnapshotPaths(snapshotDir)
+  const manifest = parseManifest(manifestBytes, now, limits)
+  const actualPaths = actualSnapshotPaths(snapshotDir, limits)
   if (actualPaths.length !== manifest.files.length
     || actualPaths.some((relativePath, index) => relativePath !== manifest.files[index].path)) {
     throw new Error('backup manifest does not enumerate the complete staged set')
   }
 
-  const verifiedBuffers = new Map<string, Buffer>()
+  let settingsBytes: Buffer | undefined
+  let journalBytes: Buffer | undefined
   for (const entry of manifest.files) {
+    if (DATA_PATH_PATTERN.test(entry.path)) {
+      const actual = hashRegularFileOnce(snapshotDir, entry.path, options)
+      if (!sameDescriptor(actual, entry)) {
+        throw new Error(`backup checksum mismatch: ${entry.path}`)
+      }
+      continue
+    }
     const bytes = readRegularFileOnce(snapshotDir, entry.path, options)
     if (bytes.byteLength !== entry.size || sha256(bytes) !== entry.sha256) {
       throw new Error(`backup checksum mismatch: ${entry.path}`)
     }
-    verifiedBuffers.set(entry.path, bytes)
+    if (entry.path === SETTINGS_FILE) settingsBytes = bytes
+    else if (entry.path === BABY_INFO_JOURNAL_FILE) journalBytes = bytes
   }
   return pairFromBuffers(
     path.basename(snapshotDir),
     manifest.snapshotTimestamp,
     snapshotDir,
-    verifiedBuffers.get(SETTINGS_FILE)!,
-    verifiedBuffers.get(BABY_INFO_JOURNAL_FILE)!,
+    settingsBytes!,
+    journalBytes!,
   )
 }
 
@@ -507,69 +700,98 @@ export function stageVerifiedBackupSnapshot(
   stagingPath: string,
   timestamp: string,
   platform: NodeJS.Platform = process.platform,
+  options: BackupReadOptions = {},
 ): void {
   const now = new Date()
   strictTimestamp(timestamp, now)
-  const buffers = new Map<string, Buffer>()
-  buffers.set(SETTINGS_FILE, readRegularFileOnce(userDataPath, SETTINGS_FILE, { platform }))
+  const limits = resourceLimits(options.limits)
+  const readOptions: BackupReadOptions = { ...options, platform }
+  const settingsBytes = readRegularFileOnce(userDataPath, SETTINGS_FILE, readOptions)
 
   const journalPath = path.join(userDataPath, BABY_INFO_JOURNAL_FILE)
-  if (fs.existsSync(journalPath)) {
-    buffers.set(BABY_INFO_JOURNAL_FILE, readRegularFileOnce(userDataPath, BABY_INFO_JOURNAL_FILE, { platform }))
-  } else {
-    buffers.set(BABY_INFO_JOURNAL_FILE, Buffer.alloc(0))
-  }
+  const journalBytes = fs.existsSync(journalPath)
+    ? readRegularFileOnce(userDataPath, BABY_INFO_JOURNAL_FILE, readOptions)
+    : Buffer.alloc(0)
+
+  let aggregateBytes = addSnapshotBytes(0, settingsBytes.byteLength, limits.maxTotalSnapshotBytes)
+  aggregateBytes = addSnapshotBytes(
+    aggregateBytes,
+    journalBytes.byteLength,
+    limits.maxTotalSnapshotBytes,
+  )
 
   const dataSource = path.join(userDataPath, 'data')
+  const dataSources: Array<{ relativePath: string; size: number }> = []
   if (fs.existsSync(dataSource)) {
     const dataStat = fs.lstatSync(dataSource)
     if (dataStat.isSymbolicLink() || !dataStat.isDirectory()) {
       throw new Error('event data source is not a regular directory')
     }
-    for (const entry of fs.readdirSync(dataSource, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const entry of boundedDirectoryEntries(
+      dataSource,
+      Math.max(1, limits.maxSnapshotFiles - 2),
+      'event data source entry',
+    ).sort((left, right) => left.name.localeCompare(right.name))) {
       if (!entry.name.endsWith('.jsonl')) continue
       const relativePath = `data/${entry.name}`
       if (!entry.isFile() || entry.isSymbolicLink() || !DATA_PATH_PATTERN.test(relativePath)) {
         throw new Error(`event data source path is invalid: ${entry.name}`)
       }
-      buffers.set(relativePath, readRegularFileOnce(userDataPath, relativePath, { platform }))
+      const stat = fs.lstatSync(path.join(dataSource, entry.name))
+      if (stat.size > maximumFor(relativePath)) {
+        throw new Error(`backup file exceeds its size bound: ${relativePath}`)
+      }
+      aggregateBytes = addSnapshotBytes(
+        aggregateBytes,
+        stat.size,
+        limits.maxTotalSnapshotBytes,
+      )
+      dataSources.push({ relativePath, size: stat.size })
     }
   }
+  if (dataSources.length + 2 > limits.maxSnapshotFiles) {
+    throw new Error('backup snapshot file-count bound exceeded')
+  }
 
-  writeDurably(path.join(stagingPath, SETTINGS_FILE), buffers.get(SETTINGS_FILE)!, platform)
-  writeDurably(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), buffers.get(BABY_INFO_JOURNAL_FILE)!, platform)
-  const dataPaths = Array.from(buffers.keys()).filter(key => key.startsWith('data/')).sort()
-  if (dataPaths.length > 0) {
+  writeDurably(path.join(stagingPath, SETTINGS_FILE), settingsBytes, platform)
+  writeDurably(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), journalBytes, platform)
+  const dataDescriptors = new Map<string, DigestDescriptor>()
+  if (dataSources.length > 0) {
     const dataDestination = path.join(stagingPath, 'data')
     fs.mkdirSync(dataDestination)
-    for (const relativePath of dataPaths) {
-      writeDurably(
-        path.join(stagingPath, ...relativePath.split('/')),
-        buffers.get(relativePath)!,
-        platform,
+    for (const source of dataSources) {
+      const streamed = streamRegularFileToStaging(
+        userDataPath,
+        source.relativePath,
+        path.join(stagingPath, ...source.relativePath.split('/')),
+        readOptions,
       )
+      if (streamed.size !== source.size) throw new Error(`event data source changed: ${source.relativePath}`)
+      dataDescriptors.set(source.relativePath, streamed)
     }
     syncDirectory(dataDestination, platform)
   }
 
-  const relativePaths = [SETTINGS_FILE, BABY_INFO_JOURNAL_FILE, ...dataPaths]
+  const dataPaths = dataSources.map(source => source.relativePath)
   const manifest: BackupManifest = {
     version: 1,
     source: 'baby-diary',
     snapshotTimestamp: timestamp,
-    files: relativePaths.map(relativePath => ({
-      path: relativePath,
-      ...descriptor(buffers.get(relativePath)!),
-    })),
+    files: [
+      { path: SETTINGS_FILE, ...descriptor(settingsBytes) },
+      { path: BABY_INFO_JOURNAL_FILE, ...descriptor(journalBytes) },
+      ...dataPaths.map(relativePath => ({ path: relativePath, ...dataDescriptors.get(relativePath)! })),
+    ],
   }
+  const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf8')
+  addSnapshotBytes(aggregateBytes, manifestBytes.byteLength, limits.maxTotalSnapshotBytes)
   writeDurably(
     path.join(stagingPath, BACKUP_MANIFEST_FILE),
-    Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'),
+    manifestBytes,
     platform,
   )
   syncDirectory(stagingPath, platform)
-  verifyBackupSnapshot(stagingPath, { platform, now })
+  verifyBackupSnapshot(stagingPath, { ...readOptions, now })
 }
 
 function validDigestDescriptor(value: unknown): value is DigestDescriptor {
@@ -604,29 +826,63 @@ function parseRestoreIntent(bytes: Buffer): ParsedRestoreIntent {
       journal: value.journal,
     }
   }
-  if (value.version !== 2
-    || !exactKeys(value, [
+  if (value.version === 2
+    && exactKeys(value, [
       'version', 'snapshotId', 'snapshotTimestamp', 'settings', 'journal',
       'phase', 'windowsVerifiedStartups', 'forensicArchiveId',
     ])
+    && typeof value.snapshotTimestamp === 'string'
+    && (value.phase === 'prepared' || value.phase === 'primary-verified')
+    && Number.isInteger(value.windowsVerifiedStartups)
+    && (value.windowsVerifiedStartups as number) >= 0
+    && (value.windowsVerifiedStartups as number) <= 2
+    && typeof value.forensicArchiveId === 'string') {
+    strictTimestamp(value.snapshotTimestamp, new Date())
+    return {
+      version: 2,
+      snapshotId: value.snapshotId,
+      snapshotTimestamp: value.snapshotTimestamp,
+      settings: value.settings,
+      journal: value.journal,
+      phase: value.phase,
+      windowsVerifiedStartups: value.windowsVerifiedStartups as number,
+      forensicArchiveId: value.forensicArchiveId,
+    }
+  }
+
+  if (value.version !== 3
+    || !exactKeys(value, [
+      'version', 'snapshotId', 'snapshotTimestamp', 'settings', 'journal',
+      'phase', 'windowsVerifiedStartups', 'lastWindowsStartupId',
+      'forensicArchiveId', 'forensicManifest',
+    ])
     || typeof value.snapshotTimestamp !== 'string'
-    || (value.phase !== 'prepared' && value.phase !== 'primary-verified')
+    || (value.phase !== 'allocated'
+      && value.phase !== 'prepared'
+      && value.phase !== 'awaiting-windows-confirmation'
+      && value.phase !== 'primary-verified')
     || !Number.isInteger(value.windowsVerifiedStartups)
     || (value.windowsVerifiedStartups as number) < 0
     || (value.windowsVerifiedStartups as number) > 2
-    || typeof value.forensicArchiveId !== 'string') {
+    || typeof value.lastWindowsStartupId !== 'string'
+    || value.lastWindowsStartupId.length > 128
+    || /[\u0000-\u001f\u007f]/.test(value.lastWindowsStartupId)
+    || typeof value.forensicArchiveId !== 'string'
+    || (value.forensicManifest !== null && !validDigestDescriptor(value.forensicManifest))) {
     throw new Error('restore intent shape is invalid')
   }
   strictTimestamp(value.snapshotTimestamp, new Date())
   return {
-    version: 2,
+    version: 3,
     snapshotId: value.snapshotId,
     snapshotTimestamp: value.snapshotTimestamp,
     settings: value.settings,
     journal: value.journal,
     phase: value.phase,
     windowsVerifiedStartups: value.windowsVerifiedStartups as number,
+    lastWindowsStartupId: value.lastWindowsStartupId,
     forensicArchiveId: value.forensicArchiveId,
+    forensicManifest: value.forensicManifest,
   }
 }
 
@@ -636,16 +892,19 @@ function assertDescriptor(bytes: Buffer, expected: DigestDescriptor, label: stri
   }
 }
 
-function transactionFromLegacy(intent: LegacyRestoreIntentFile): RestoreTransactionFile {
+function normalizeTransaction(intent: ParsedRestoreIntent): RestoreTransactionFile {
+  if (intent.version === 3) return intent
   return {
-    version: 2,
+    version: 3,
     snapshotId: intent.snapshotId,
-    snapshotTimestamp: new Date(0).toISOString(),
+    snapshotTimestamp: intent.version === 1 ? new Date(0).toISOString() : intent.snapshotTimestamp,
     settings: intent.settings,
     journal: intent.journal,
-    phase: 'prepared',
-    windowsVerifiedStartups: 0,
-    forensicArchiveId: '',
+    phase: intent.version === 1 ? 'prepared' : intent.phase,
+    windowsVerifiedStartups: intent.version === 1 ? 0 : intent.windowsVerifiedStartups,
+    lastWindowsStartupId: '',
+    forensicArchiveId: intent.version === 1 ? '' : intent.forensicArchiveId,
+    forensicManifest: null,
   }
 }
 
@@ -692,6 +951,26 @@ function livePairMatches(
   }
 }
 
+function sameDescriptor(left: DigestDescriptor, right: DigestDescriptor): boolean {
+  return left.size === right.size && left.sha256 === right.sha256
+}
+
+function sameTransactionIdentity(left: RestoreTransactionFile, right: RestoreTransactionFile): boolean {
+  return left.snapshotId === right.snapshotId
+    && left.snapshotTimestamp === right.snapshotTimestamp
+    && sameDescriptor(left.settings, right.settings)
+    && sameDescriptor(left.journal, right.journal)
+    && left.forensicArchiveId === right.forensicArchiveId
+    && (left.forensicManifest === null
+      ? right.forensicManifest === null
+      : right.forensicManifest !== null
+        && sameDescriptor(left.forensicManifest, right.forensicManifest))
+}
+
+function windowsRestartError(message: string): SettingsRecoveryError {
+  return new SettingsRecoveryError(message, [], false, true, true)
+}
+
 function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): boolean {
   const platform = options.platform ?? process.platform
   const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
@@ -703,28 +982,74 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
       'Restore intent survived but its verified staging directory is missing.',
       [],
       false,
+      false,
+      true,
     )
   }
+  let primaryWriteStarted = false
+  let forensicConfirmed = platform !== 'win32'
   try {
     const parsedIntent = readTransactionFile(userDataPath, RESTORE_INTENT_FILE, { platform })
-    let transaction = parsedIntent.version === 1 ? transactionFromLegacy(parsedIntent) : parsedIntent
-    const pair = verifyPairDirectory(stagingPath, transaction, { platform })
+    const intentTransaction = normalizeTransaction(parsedIntent)
+    let transaction = intentTransaction
+    let pair = verifyPairDirectory(stagingPath, intentTransaction, { platform })
 
     const metadataPath = path.join(stagingPath, RESTORE_STAGE_METADATA_FILE)
     if (fs.existsSync(metadataPath)) {
-      const stageMetadata = readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform })
-      if (stageMetadata.version !== 2
-        || stageMetadata.snapshotId !== transaction.snapshotId
-        || stageMetadata.settings.sha256 !== transaction.settings.sha256
-        || stageMetadata.journal.sha256 !== transaction.journal.sha256) {
+      const stageMetadata = normalizeTransaction(
+        readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform }),
+      )
+      if (!sameTransactionIdentity(stageMetadata, intentTransaction)) {
         throw new Error('restore intent and staging metadata differ')
       }
       transaction = stageMetadata
+      pair = verifyPairDirectory(stagingPath, transaction, { platform })
     } else {
+      // A surviving exact outer intent is the only authority allowed to
+      // reconstruct missing stage metadata.
       writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
     }
 
+    if (transaction.phase === 'allocated') {
+      transaction = {
+        ...transaction,
+        phase: platform === 'win32' ? 'awaiting-windows-confirmation' : 'prepared',
+      }
+      writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+      writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+    }
+
+    if (platform === 'win32' && transaction.phase !== 'primary-verified') {
+      verifyForensicEvidence(userDataPath, transaction, { platform, now: options.now })
+      const startupId = options.startupId ?? ''
+      if (startupId
+        && startupId !== transaction.lastWindowsStartupId
+        && transaction.windowsVerifiedStartups < 2) {
+        transaction = {
+          ...transaction,
+          windowsVerifiedStartups: transaction.windowsVerifiedStartups + 1,
+          lastWindowsStartupId: startupId,
+        }
+        writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+        writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+      }
+      forensicConfirmed = transaction.windowsVerifiedStartups >= 2
+      if (!forensicConfirmed) {
+        throw windowsRestartError(
+          'Windows recovery evidence is verified but requires another independent application restart before primary overwrite.',
+        )
+      }
+      transaction = { ...transaction, phase: 'prepared' }
+      writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+      writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+    } else if (platform !== 'win32' && transaction.phase === 'awaiting-windows-confirmation') {
+      transaction = { ...transaction, phase: 'prepared' }
+      writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+      writeDurably(intentPath, transactionBytes(transaction), platform, ops)
+    }
+
     // Every retry rewrites both members from the same already-verified buffers.
+    primaryWriteStarted = true
     writeDurably(path.join(userDataPath, SETTINGS_FILE), pair.settingsBytes, platform, ops)
     writeDurably(path.join(userDataPath, BABY_INFO_JOURNAL_FILE), pair.journalBytes, platform, ops)
     verifyPairDirectory(userDataPath, transaction, { platform })
@@ -735,7 +1060,8 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     removeIntentDurably(userDataPath, platform, ops)
 
     // POSIX can commit the directory-entry removal with parent fsync. Windows
-    // keeps the verified recovery copy for two later verified startups.
+    // retains completed staging until a later independent startup verifies the
+    // primary pair and garbage-collects it.
     if (platform !== 'win32') removeStagingDurably(userDataPath, platform, ops)
     return true
   } catch (error) {
@@ -743,7 +1069,9 @@ function resumeRestoreIntent(userDataPath: string, options: RecoveryOptions): bo
     throw new SettingsRecoveryError(
       `Unable to resume the settings/journal restore transaction: ${error instanceof Error ? error.message : String(error)}`,
       [],
-      false,
+      forensicConfirmed,
+      platform === 'win32' && !primaryWriteStarted,
+      !primaryWriteStarted,
     )
   }
 }
@@ -755,36 +1083,31 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
   if (!fs.existsSync(stagingPath)) return false
   const metadataPath = path.join(stagingPath, RESTORE_STAGE_METADATA_FILE)
   if (!fs.existsSync(metadataPath)) {
-    throw new SettingsRecoveryError(
-      'Restore staging survived without either an intent or transaction metadata.',
-      [],
-      false,
-    )
+    // A directory created before its allocation marker is not a source of
+    // truth. Removing it makes the next decision from the readable live pair
+    // or from a separately verified backup and cannot create a startup loop.
+    removeStagingDurably(userDataPath, platform, ops)
+    return false
   }
   try {
-    const parsed = readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform })
-    if (parsed.version !== 2) throw new Error('orphan staging metadata is obsolete')
+    const parsed = normalizeTransaction(
+      readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform }),
+    )
+    if (parsed.phase === 'allocated') {
+      removeStagingDurably(userDataPath, platform, ops)
+      return false
+    }
     const pair = verifyPairDirectory(stagingPath, parsed, { platform })
 
     if (parsed.phase === 'primary-verified'
       && livePairMatches(userDataPath, parsed, pair, { platform })) {
-      if (platform === 'win32' && parsed.windowsVerifiedStartups < 1) {
-        writeDurably(
-          metadataPath,
-          transactionBytes({ ...parsed, windowsVerifiedStartups: parsed.windowsVerifiedStartups + 1 }),
-          platform,
-          ops,
-        )
-      } else {
-        removeStagingDurably(userDataPath, platform, ops)
-      }
+      if (platform === 'win32') verifyForensicEvidence(userDataPath, parsed, { platform, now: options.now })
+      removeStagingDurably(userDataPath, platform, ops)
       return true
     }
 
     const prepared: RestoreTransactionFile = {
       ...parsed,
-      phase: 'prepared',
-      windowsVerifiedStartups: 0,
       settings: descriptor(pair.settingsBytes),
       journal: descriptor(pair.journalBytes),
     }
@@ -801,6 +1124,8 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
     throw new SettingsRecoveryError(
       `Unable to recover orphan restore staging: ${error instanceof Error ? error.message : String(error)}`,
       [],
+      false,
+      platform === 'win32',
       false,
     )
   }
@@ -835,10 +1160,17 @@ interface ForensicManifest {
   files: BackupManifestEntry[]
 }
 
+interface ForensicEvidence {
+  archiveId: string
+  manifest: DigestDescriptor
+  /** True only when the archive directory entry was confirmed across the platform boundary. */
+  preserved: boolean
+}
+
 function preserveOriginals(
   userDataPath: string,
   options: RecoveryOptions,
-): { archiveId: string; preserved: true } {
+): ForensicEvidence {
   const platform = options.platform ?? process.platform
   const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
   const now = options.now ?? new Date()
@@ -909,14 +1241,100 @@ function preserveOriginals(
     || verifiedManifest.files.length !== entries.length) {
     throw new Error('forensic preservation manifest verification failed')
   }
-  return { archiveId, preserved: true }
+  return {
+    archiveId,
+    manifest: descriptor(forensicManifestBytes),
+    preserved: platform !== 'win32',
+  }
 }
 
-function listSnapshotCandidates(root: string): string[] {
+function verifyForensicEvidence(
+  userDataPath: string,
+  transaction: RestoreTransactionFile,
+  options: BackupReadOptions,
+): void {
+  if (!transaction.forensicArchiveId
+    || transaction.forensicArchiveId.length > 255
+    || transaction.forensicArchiveId === '.'
+    || transaction.forensicArchiveId === '..'
+    || /[\\/\u0000-\u001f\u007f]/.test(transaction.forensicArchiveId)) {
+    throw new Error('forensic preservation identity is missing or invalid')
+  }
+  const forensicRoot = path.join(userDataPath, RECOVERY_FORENSICS_DIR)
+  const rootStat = fs.lstatSync(forensicRoot)
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error('forensic preservation root is not a regular directory')
+  }
+  const archiveDir = path.join(forensicRoot, transaction.forensicArchiveId)
+  const archiveStat = fs.lstatSync(archiveDir)
+  if (archiveStat.isSymbolicLink() || !archiveStat.isDirectory()) {
+    throw new Error('forensic preservation archive is not a regular directory')
+  }
+
+  const manifestBytes = readRegularFileOnce(archiveDir, BACKUP_MANIFEST_FILE, options)
+  if (transaction.forensicManifest) {
+    assertDescriptor(manifestBytes, transaction.forensicManifest, 'forensic manifest')
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(manifestBytes.toString('utf8'))
+  } catch {
+    throw new Error('forensic preservation manifest JSON is invalid')
+  }
+  if (!isRecord(raw)
+    || !exactKeys(raw, ['version', 'source', 'archivedAt', 'files'])
+    || raw.version !== 1
+    || raw.source !== 'baby-diary-recovery'
+    || typeof raw.archivedAt !== 'string'
+    || !Array.isArray(raw.files)
+    || raw.files.length < 1
+    || raw.files.length > 2) {
+    throw new Error('forensic preservation manifest shape is invalid')
+  }
+  strictTimestamp(raw.archivedAt, options.now ?? new Date())
+
+  const expectedNames = new Set([SETTINGS_FILE, BABY_INFO_JOURNAL_FILE])
+  const seen = new Set<string>()
+  for (const entry of raw.files) {
+    if (!isRecord(entry)
+      || !exactKeys(entry, ['path', 'size', 'sha256'])
+      || typeof entry.path !== 'string'
+      || !expectedNames.has(entry.path)
+      || seen.has(entry.path)
+      || !validDigestDescriptor({ size: entry.size, sha256: entry.sha256 })) {
+      throw new Error('forensic preservation manifest entry is invalid')
+    }
+    seen.add(entry.path)
+    assertDescriptor(
+      readRegularFileOnce(archiveDir, entry.path, options),
+      { size: entry.size as number, sha256: entry.sha256 as string },
+      `forensic ${entry.path}`,
+    )
+  }
+  const actualNames = fs.readdirSync(archiveDir).sort()
+  const manifestNames = [BACKUP_MANIFEST_FILE, ...Array.from(seen)].sort()
+  if (actualNames.length !== manifestNames.length
+    || actualNames.some((name, index) => name !== manifestNames[index])) {
+    throw new Error('forensic preservation archive contains an unexpected entry')
+  }
+}
+
+interface CandidateBudget {
+  entriesSeen: number
+}
+
+function listSnapshotCandidates(
+  root: string,
+  limits: BackupResourceLimits,
+  budget: CandidateBudget,
+): string[] {
   if (!fs.existsSync(root)) return []
   const rootStat = fs.lstatSync(root)
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return []
-  return fs.readdirSync(root, { withFileTypes: true })
+  const remaining = limits.maxCandidates - budget.entriesSeen
+  const entries = boundedDirectoryEntries(root, Math.max(0, remaining), 'backup candidate')
+  budget.entriesSeen += entries.length
+  return entries
     .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.includes('.tmp-'))
     .map(entry => path.join(root, entry.name))
 }
@@ -931,62 +1349,72 @@ function newestVerifiedBackup(
     roots.push(options.documentsBackupDir)
   }
   const rejected: string[] = []
-  const verified: Array<{ pair: VerifiedBackupPair; destinationRank: number }> = []
+  const limits = resourceLimits(options.limits)
+  const budget: CandidateBudget = { entriesSeen: 0 }
+  let best: { pair: VerifiedBackupPair; destinationRank: number } | undefined
   roots.forEach((root, destinationRank) => {
-    for (const candidate of listSnapshotCandidates(root)) {
+    for (const candidate of listSnapshotCandidates(root, limits, budget)) {
       try {
-        verified.push({
-          pair: verifyBackupSnapshot(candidate, options),
-          destinationRank,
-        })
+        const current = { pair: verifyBackupSnapshot(candidate, options), destinationRank }
+        if (!best) {
+          best = current
+          continue
+        }
+        const byTimestamp = Date.parse(current.pair.snapshotTimestamp) - Date.parse(best.pair.snapshotTimestamp)
+        const currentWins = byTimestamp > 0
+          || (byTimestamp === 0 && current.destinationRank < best.destinationRank)
+          || (byTimestamp === 0
+            && current.destinationRank === best.destinationRank
+            && path.resolve(current.pair.snapshotPath).localeCompare(path.resolve(best.pair.snapshotPath)) < 0)
+        if (currentWins) best = current
       } catch {
         rejected.push(candidate)
       }
     }
   })
-  verified.sort((left, right) => {
-    const byTimestamp = Date.parse(right.pair.snapshotTimestamp) - Date.parse(left.pair.snapshotTimestamp)
-    if (byTimestamp !== 0) return byTimestamp
-    if (left.destinationRank !== right.destinationRank) return left.destinationRank - right.destinationRank
-    return path.resolve(left.pair.snapshotPath).localeCompare(path.resolve(right.pair.snapshotPath))
-  })
-  return { pair: verified[0]?.pair, rejected }
+  return { pair: best?.pair, rejected }
 }
 
 function prepareRestoreIntent(
   userDataPath: string,
   pair: VerifiedBackupPair,
-  forensicArchiveId: string,
+  forensic: ForensicEvidence,
   options: RecoveryOptions,
-): void {
+): RestoreTransactionFile {
   const platform = options.platform ?? process.platform
   const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
   const stagingPath = path.join(userDataPath, RESTORE_STAGING_DIR)
   if (fs.existsSync(stagingPath)) {
     throw new Error('restore staging already exists and was not garbage-collected')
   }
-  fs.mkdirSync(stagingPath)
+  ops.mkdirSync(stagingPath, { recursive: true })
   syncDirectory(userDataPath, platform, ops)
-  writeDurably(path.join(stagingPath, SETTINGS_FILE), pair.settingsBytes, platform, ops)
-  writeDurably(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), pair.journalBytes, platform, ops)
-  verifyPairDirectory(stagingPath, undefined, { platform })
 
-  const transaction: RestoreTransactionFile = {
-    version: 2,
+  let transaction: RestoreTransactionFile = {
+    version: 3,
     snapshotId: pair.snapshotId,
     snapshotTimestamp: pair.snapshotTimestamp,
     settings: descriptor(pair.settingsBytes),
     journal: descriptor(pair.journalBytes),
-    phase: 'prepared',
+    phase: 'allocated',
     windowsVerifiedStartups: 0,
-    forensicArchiveId,
+    lastWindowsStartupId: options.startupId ?? '',
+    forensicArchiveId: forensic.archiveId,
+    forensicManifest: forensic.manifest,
   }
-  writeDurably(
-    path.join(stagingPath, RESTORE_STAGE_METADATA_FILE),
-    transactionBytes(transaction),
-    platform,
-    ops,
-  )
+  const metadataPath = path.join(stagingPath, RESTORE_STAGE_METADATA_FILE)
+  // The allocation marker is the first published child. Any crash before it
+  // leaves a metadata-free directory that startup can safely discard.
+  writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
+  writeDurably(path.join(stagingPath, SETTINGS_FILE), pair.settingsBytes, platform, ops)
+  writeDurably(path.join(stagingPath, BABY_INFO_JOURNAL_FILE), pair.journalBytes, platform, ops)
+  verifyPairDirectory(stagingPath, transaction, { platform })
+
+  transaction = {
+    ...transaction,
+    phase: platform === 'win32' ? 'awaiting-windows-confirmation' : 'prepared',
+  }
+  writeDurably(metadataPath, transactionBytes(transaction), platform, ops)
   syncDirectory(stagingPath, platform, ops)
   writeDurably(
     path.join(userDataPath, RESTORE_INTENT_FILE),
@@ -994,6 +1422,7 @@ function prepareRestoreIntent(
     platform,
     ops,
   )
+  return transaction
 }
 
 /** Runs before SettingsStore exposes either member of the persisted pair. */
@@ -1005,14 +1434,16 @@ export function recoverSettingsAndJournalPair(
   if (handleOrphanStaging(userDataPath, options)) return
   if (livePairIsReadable(userDataPath, options)) return
 
-  let forensicArchiveId = ''
+  let forensic: ForensicEvidence
   try {
-    forensicArchiveId = preserveOriginals(userDataPath, options).archiveId
+    forensic = preserveOriginals(userDataPath, options)
   } catch (error) {
     throw new SettingsRecoveryError(
       `Recovery stopped before overwrite because forensic preservation failed: ${error instanceof Error ? error.message : String(error)}`,
       [],
       false,
+      false,
+      true,
     )
   }
 
@@ -1021,19 +1452,34 @@ export function recoverSettingsAndJournalPair(
     throw new SettingsRecoveryError(
       'Settings and baby-info history are damaged, and no fully verified backup pair is available.',
       selected.rejected,
+      forensic.preserved,
+      false,
       true,
     )
   }
   try {
-    prepareRestoreIntent(userDataPath, selected.pair, forensicArchiveId, options)
+    prepareRestoreIntent(userDataPath, selected.pair, forensic, options)
+    if ((options.platform ?? process.platform) === 'win32') {
+      throw windowsRestartError(
+        'Windows recovery evidence was prepared without modifying the primary files. Restart the application twice so independent startups can confirm it before restore.',
+      )
+    }
     resumeRestoreIntent(userDataPath, options)
   } catch (error) {
     if (error instanceof SettingsRecoveryError) {
-      throw new SettingsRecoveryError(error.message, selected.rejected, true)
+      throw new SettingsRecoveryError(
+        error.message,
+        selected.rejected,
+        error.originalsPreserved,
+        error.restartRequired,
+        error.primaryUntouched,
+      )
     }
     throw new SettingsRecoveryError(
       `Unable to restore the verified settings/journal pair: ${error instanceof Error ? error.message : String(error)}`,
       selected.rejected,
+      forensic.preserved,
+      false,
       true,
     )
   }
@@ -1045,16 +1491,23 @@ export function recoverSettingsAndJournalPair(
  * monthly keep slot.
  */
 export function selectVerifiedBackupsToPrune(root: string, now: Date): string[] {
-  const verified: VerifiedBackupPair[] = []
-  for (const candidate of listSnapshotCandidates(root)) {
+  interface RetentionDescriptor { snapshotTimestamp: string; snapshotPath: string }
+  const verified: RetentionDescriptor[] = []
+  const limits = resourceLimits(undefined)
+  const budget: CandidateBudget = { entriesSeen: 0 }
+  for (const candidate of listSnapshotCandidates(root, limits, budget)) {
     try {
-      verified.push(verifyBackupSnapshot(candidate, { now }))
+      const pair = verifyBackupSnapshot(candidate, { now })
+      verified.push({
+        snapshotTimestamp: pair.snapshotTimestamp,
+        snapshotPath: pair.snapshotPath,
+      })
     } catch {
       // Invalid folders are never silently deleted by retention.
     }
   }
   const cutoff = now.getTime() - 90 * 24 * 60 * 60 * 1000
-  const monthly = new Map<string, VerifiedBackupPair[]>()
+  const monthly = new Map<string, RetentionDescriptor[]>()
   for (const pair of verified) {
     const timestamp = Date.parse(pair.snapshotTimestamp)
     if (timestamp >= cutoff) continue
@@ -1066,9 +1519,9 @@ export function selectVerifiedBackupsToPrune(root: string, now: Date): string[] 
   }
   const result: string[] = []
   for (const items of Array.from(monthly.values())) {
-    items.sort((left: VerifiedBackupPair, right: VerifiedBackupPair) => Date.parse(right.snapshotTimestamp) - Date.parse(left.snapshotTimestamp)
+    items.sort((left: RetentionDescriptor, right: RetentionDescriptor) => Date.parse(right.snapshotTimestamp) - Date.parse(left.snapshotTimestamp)
       || path.resolve(left.snapshotPath).localeCompare(path.resolve(right.snapshotPath)))
-    result.push(...items.slice(1).map((pair: VerifiedBackupPair) => path.basename(pair.snapshotPath)))
+    result.push(...items.slice(1).map((pair: RetentionDescriptor) => path.basename(pair.snapshotPath)))
   }
   return result.sort()
 }

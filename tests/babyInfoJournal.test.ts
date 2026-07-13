@@ -8,7 +8,12 @@ import type {
   BabyInfoPendingPage,
   BabyInfoSyncState,
 } from '../shared/types'
-import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
+import { getBabyInfoMutationKey, makeBabyInfoUnlinkedArchive } from '../shared/babyInfoResolver'
+import {
+  makeBabyInfoArchiveCursor,
+  type BabyInfoArchivePage,
+  type BabyInfoArchivePageRequest,
+} from '../shared/babyInfoArchivePaging'
 import {
   BABY_INFO_JOURNAL_FILE,
   BabyInfoJournal,
@@ -293,7 +298,56 @@ describe('main-process baby-info append-only journal', () => {
     expect(mutationMapVisits).toBeLessThan(total * 2)
   }, 20_000)
 
-  it('reloads and applies the exact complete durable prefix after a partial append failure', () => {
+  it('pages 10,025 archives newest-first without gaps, duplicates, full sorting, or cloud pending work', () => {
+    const total = 10_025
+    const base = Date.parse('2026-01-01T00:00:00.000Z')
+    const archives = Array.from({ length: total }, (_, index) => makeBabyInfoUnlinkedArchive(
+      `legacy-${index}`,
+      '2025-01-02',
+      new Date(base + index).toISOString(),
+    )!)
+    fs.writeFileSync(
+      path.join(tmpDir, BABY_INFO_JOURNAL_FILE),
+      `${archives.map(archive => JSON.stringify({
+        version: 1,
+        type: 'unlinked-archive',
+        archive,
+      })).join('\n')}\n`,
+    )
+    const journal = new BabyInfoJournal(tmpDir) as BabyInfoJournal & {
+      listUnlinkedArchivePage: (request: BabyInfoArchivePageRequest) => BabyInfoArchivePage
+    }
+
+    const seen: string[] = []
+    let cursor: string | undefined
+    for (;;) {
+      const page = journal.listUnlinkedArchivePage({ limit: 50, ...(cursor ? { cursor } : {}) })
+      seen.push(...page.items.map(item => item.archiveId))
+      if (!page.nextCursor) break
+      cursor = page.nextCursor
+    }
+
+    expect(seen).toHaveLength(total)
+    expect(new Set(seen).size).toBe(total)
+    expect(seen[0]).toBe(archives.at(-1)!.archiveId)
+    expect(seen.at(-1)).toBe(archives[0].archiveId)
+    expect(journal.getTotalPendingCount()).toBe(0)
+    expect(() => journal.listUnlinkedArchivePage({
+      limit: 10,
+      cursor: makeBabyInfoArchiveCursor('00000000-0000-4000-8000-000000000001'),
+    })).toThrow(/cursor|unknown/i)
+
+    const replayed = new BabyInfoJournal('', {
+      sourceBuffer: fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE)),
+    }) as BabyInfoJournal & {
+      listUnlinkedArchivePage: (request: BabyInfoArchivePageRequest) => BabyInfoArchivePage
+    }
+    expect(replayed.listUnlinkedArchivePage({ limit: 3 }).items.map(item => item.archiveId))
+      .toEqual(archives.slice(-3).reverse().map(item => item.archiveId))
+    expect(replayed.getTotalPendingCount()).toBe(0)
+  }, 20_000)
+
+  it('rolls a partial append back and keeps memory on the last confirmed prefix', () => {
     const targets = new Map<number, string>()
     const realOpen = fs.openSync.bind(fs)
     let injectFailure = false
@@ -333,15 +387,76 @@ describe('main-process baby-info append-only journal', () => {
     injectFailure = false
 
     expect(journal.getSummary('family-prefix')).toMatchObject({
-      mutationCount: 1,
-      pendingCount: 1,
-      winner: first,
+      mutationCount: 0,
+      pendingCount: 0,
+      winner: undefined,
     })
     journal.ingest('family-prefix', [first, second], [])
     expect(new BabyInfoJournal(tmpDir).getSummary('family-prefix')).toMatchObject({
       mutationCount: 2,
       pendingCount: 2,
       winner: second,
+    })
+  })
+
+  it('becomes storage-uncertain and blocks mutation/cloud pages without ingesting a complete failed suffix', () => {
+    const realOpen = fs.openSync.bind(fs)
+    const targets = new Map<number, string>()
+    let injectFailure = false
+    let appendFsyncFailed = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) {
+        const fd = realOpen(target, flags, mode)
+        targets.set(fd, String(target))
+        return fd
+      },
+      fsyncSync(fd) {
+        if (injectFailure
+          && targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)
+          && !appendFsyncFailed) {
+          appendFsyncFailed = true
+          throw new Error('injected complete append fsync failure')
+        }
+        fs.fsyncSync(fd)
+      },
+      ftruncateSync(fd, length) {
+        if (injectFailure && targets.get(fd)?.endsWith(BABY_INFO_JOURNAL_FILE)) {
+          throw new Error('injected rollback failure')
+        }
+        fs.ftruncateSync(fd, length)
+      },
+      closeSync(fd) {
+        targets.delete(fd)
+        fs.closeSync(fd)
+      },
+    }
+    const journal = new (BabyInfoJournal as unknown as new (
+      root: string,
+      options: { durableFs: DurableFileOps },
+    ) => BabyInfoJournal)(tmpDir, { durableFs })
+    const item = mutation(70_003, 'family-uncertain')
+
+    injectFailure = true
+    let caught: unknown
+    try { journal.ingest('family-uncertain', [item], []) } catch (error) { caught = error }
+
+    expect(caught).toMatchObject({ code: 'DURABLE_APPEND_UNCERTAIN' })
+    expect(journal.getSummary('family-uncertain')).toMatchObject({
+      mutationCount: 0,
+      pendingCount: 0,
+    })
+    expect(() => journal.listPending('family-uncertain', { limit: 10 }))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+    expect(() => journal.ingest('family-uncertain', [item], []))
+      .toThrow(expect.objectContaining({ code: 'BABY_INFO_STORAGE_UNCERTAIN' }))
+
+    // A fresh process may validate the complete physical suffix; only the
+    // failed process is forbidden from treating it as confirmed.
+    expect(new BabyInfoJournal(tmpDir).getSummary('family-uncertain')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: item,
     })
   })
 })

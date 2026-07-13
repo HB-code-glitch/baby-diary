@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { createHash } from 'crypto'
 import { v4 as uuidv4 } from 'uuid'
+import type { BabyInfoArchivePage } from '../../shared/babyInfoArchivePaging'
 import type {
   AppSettings,
   BabyInfoJournalMetadata,
@@ -10,7 +11,6 @@ import type {
   BabyInfoPendingPage,
   BabyInfoPendingPageRequest,
   BabyInfoSettingsCommitResult,
-  BabyInfoUnlinkedArchive,
 } from '../../shared/types'
 import {
   applyManagedSettingsMerge,
@@ -36,7 +36,7 @@ import {
   SettingsRecoveryError,
   type RecoveryOptions,
 } from './backupSnapshot'
-import { atomicReplaceFileSync } from './durableFs'
+import { atomicReplaceFileSync, type DurableWriteOptions } from './durableFs'
 
 const DEFAULT_SETTINGS: AppSettings = {
   baby: {
@@ -51,6 +51,18 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   familyId: '',
   firebase: null,
+}
+
+export class SettingsLocalMutationRecoveryError extends SettingsRecoveryError {
+  readonly localDataModified = true as const
+  readonly archiveEvidence: { archiveId: string; durable: true }
+
+  constructor(archiveId: string, cause: unknown) {
+    super('A baby-info archive became durable before its settings projection failed.')
+    this.name = 'SettingsLocalMutationRecoveryError'
+    this.archiveEvidence = { archiveId, durable: true }
+    Object.assign(this, { cause })
+  }
 }
 
 function stripBom(value: string): string {
@@ -95,12 +107,20 @@ function parsePendingPageRequest(value: unknown): BabyInfoPendingPageRequest {
 
 export class SettingsStore {
   private readonly settingsPath: string
+  private readonly durableWriteOptions: DurableWriteOptions
   private settings: AppSettings = { ...DEFAULT_SETTINGS }
   private readonly journal: BabyInfoJournal
 
   constructor(userDataPath: string, options: RecoveryOptions = {}) {
     this.settingsPath = path.join(userDataPath, 'settings.json')
-    recoverSettingsAndJournalPair(userDataPath, options)
+    this.durableWriteOptions = {
+      ...(options.durableFs ? { fs: options.durableFs } : {}),
+      ...(options.platform ? { platform: options.platform } : {}),
+    }
+    recoverSettingsAndJournalPair(userDataPath, {
+      ...options,
+      startupId: options.startupId ?? uuidv4(),
+    })
     this.load()
     this.journal = new BabyInfoJournal(userDataPath)
     this.recoverJournalProjection()
@@ -151,7 +171,7 @@ export class SettingsStore {
   private write(settings: AppSettings): void {
     const content = Buffer.from(JSON.stringify(settings, null, 2), 'utf8')
     try {
-      atomicReplaceFileSync(this.settingsPath, content)
+      atomicReplaceFileSync(this.settingsPath, content, this.durableWriteOptions)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const structured = new Error(`[Settings] save failed: ${message}`)
@@ -200,6 +220,7 @@ export class SettingsStore {
     const current = parseAppSettings(this.settings)
     const journalWasEmpty = !this.journal.hasAnyRecords()
     let sourceRemoved = false
+    let unlinkedArchiveId: string | undefined
 
     if (current.babyInfoSync !== undefined) {
       const sourceId = legacyImportId(current.babyInfoSync)
@@ -208,7 +229,9 @@ export class SettingsStore {
     }
 
     if (!current.familyId && (current.baby.name !== '' || current.baby.birthdate !== '')) {
-      this.journal.archiveUnlinkedPair(current.baby.name, current.baby.birthdate)
+      unlinkedArchiveId = this.journal
+        .archiveUnlinkedPair(current.baby.name, current.baby.birthdate)
+        ?.archiveId
     }
 
     let winner: BabyInfoMutation | undefined
@@ -244,7 +267,14 @@ export class SettingsStore {
       babyInfoJournal: metadata,
       babyInfoRevision: incrementBabyInfoRevision(current),
     }
-    this.write(next)
+    try {
+      this.write(next)
+    } catch (error) {
+      if (unlinkedArchiveId) {
+        throw new SettingsLocalMutationRecoveryError(unlinkedArchiveId, error)
+      }
+      throw error
+    }
   }
 
   save(settings: AppSettings): AppSettings {
@@ -283,8 +313,8 @@ export class SettingsStore {
     return this.journal.getMutation(assertFamilyId(familyId), key)
   }
 
-  listUnlinkedBabyInfoArchives(): BabyInfoUnlinkedArchive[] {
-    return this.journal.listUnlinkedArchives()
+  listUnlinkedBabyInfoArchives(rawRequest: unknown): BabyInfoArchivePage {
+    return this.journal.listUnlinkedArchivePage(rawRequest)
   }
 
   commitBabyInfo(rawOperation: unknown): BabyInfoSettingsCommitResult {

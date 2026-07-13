@@ -61,6 +61,61 @@ let settingsStore: SettingsStore
 let backupManager: BackupManager
 let settingsChangeSequence = 0
 
+type StartupRecoveryEvidence = {
+  originalsPreserved?: unknown
+  restartRequired?: unknown
+  primaryUntouched?: unknown
+  localDataModified?: unknown
+  archiveEvidence?: { archiveId?: unknown; durable?: unknown }
+}
+
+function startupFailureMessage(error: unknown, recoveryRequired: boolean): string {
+  const evidence = error && typeof error === 'object'
+    ? error as StartupRecoveryEvidence
+    : {}
+  const originalsPreserved = recoveryRequired && evidence.originalsPreserved === true
+  const restartRequired = recoveryRequired && evidence.restartRequired === true
+  const primaryUntouched = recoveryRequired && evidence.primaryUntouched === true
+  const durableLocalArchive = recoveryRequired
+    && evidence.localDataModified === true
+    && evidence.archiveEvidence?.durable === true
+    && typeof evidence.archiveEvidence.archiveId === 'string'
+
+  if (durableLocalArchive) {
+    return [
+      'A local baby-info archive was durably added before settings projection failed. No cloud data was changed. Restart Baby Diary so the saved archive can be reconciled.',
+      '설정 반영에 실패하기 전에 로컬 아기 정보 보관본이 안전하게 저장되었습니다. 클라우드 데이터는 변경되지 않았습니다. 저장된 보관본을 정리하려면 아기 일기를 다시 시작해 주세요.',
+      '設定への反映に失敗する前に、ローカルの赤ちゃん情報アーカイブが安全に保存されました。クラウドデータは変更されていません。保存済みアーカイブを整合するため、ベビーダイアリーを再起動してください。',
+    ].join('\n\n')
+  }
+  if (originalsPreserved) {
+    return [
+      'Settings and baby journal could not be verified or restored from a verified backup. A durable forensic archive of the originals was confirmed for support recovery.',
+      '설정과 아기 기록을 검증하거나 검증된 백업에서 복원하지 못했습니다. 지원 복구용 원본 보관본이 안전하게 보존된 것은 확인되었습니다.',
+      '設定と赤ちゃん記録を検証できず、検証済みバックアップからも復元できませんでした。サポート復旧用の原本アーカイブが安全に保存されたことは確認済みです。',
+    ].join('\n\n')
+  }
+  if (restartRequired && primaryUntouched) {
+    return [
+      'Recovery evidence was staged, and the primary settings and journal files remain untouched. Restart Baby Diary for independent verification. Durable preservation of the originals is not yet confirmed.',
+      '복구 증거를 준비했으며 기본 설정 및 기록 파일은 변경하지 않았습니다. 독립 검증을 위해 아기 일기를 다시 시작해 주세요. 원본의 안전한 보존은 아직 확인되지 않았습니다.',
+      '復旧証拠を準備し、主要な設定ファイルと記録ファイルには変更を加えていません。独立検証のためベビーダイアリーを再起動してください。原本の安全な保存はまだ確認されていません。',
+    ].join('\n\n')
+  }
+  if (recoveryRequired) {
+    return [
+      'Settings and baby journal could not be verified or restored from a verified backup. Recovery stopped before overwrite, but durable preservation of the originals could not be confirmed.',
+      '설정과 아기 기록을 검증하거나 검증된 백업에서 복원하지 못했습니다. 덮어쓰기 전에 복구를 중단했지만 원본의 안전한 보존은 확인되지 않았습니다.',
+      '設定と赤ちゃん記録を検証できず、検証済みバックアップからも復元できませんでした。上書き前に復旧を停止しましたが、原本の安全な保存は確認できていません。',
+    ].join('\n\n')
+  }
+  return [
+    'Baby Diary could not start. No local data was modified after the startup failure.',
+    '아기 일기를 시작할 수 없습니다. 시작 실패 이후 로컬 데이터는 변경되지 않았습니다.',
+    'ベビーダイアリーを起動できませんでした。起動失敗後にローカルデータは変更されていません。',
+  ].join('\n\n')
+}
+
 function publishAuthoritativeSettings(settings: AppSettings): void {
   if (!mainWindow) return
   settingsChangeSequence += 1
@@ -160,8 +215,8 @@ function setupIPC(): void {
     return settingsStore.getBabyInfoMutation(familyId, key)
   })
 
-  ipcMain.handle('babyInfo:listUnlinkedArchives', async () => {
-    return settingsStore.listUnlinkedBabyInfoArchives()
+  ipcMain.handle('babyInfo:listUnlinkedArchives', async (_, request: unknown) => {
+    return settingsStore.listUnlinkedBabyInfoArchives(request)
   })
 
   ipcMain.handle('settings:commitBabyInfo', async (
@@ -388,15 +443,9 @@ app.whenReady().then(() => {
   const recoveryRequired = error instanceof SettingsRecoveryError
     || (error && typeof error === 'object'
       && (error as { code?: unknown }).code === 'SETTINGS_RECOVERY_REQUIRED')
-  const originalsPreserved = recoveryRequired
-    && Boolean((error as { originalsPreserved?: unknown } | undefined)?.originalsPreserved)
   dialog.showErrorBox(
     recoveryRequired ? 'Baby Diary recovery required' : 'Baby Diary startup failed',
-    recoveryRequired
-      ? originalsPreserved
-        ? 'Settings and baby journal could not be verified or restored from a verified backup. A durable forensic archive of the originals was confirmed for support recovery.'
-        : 'Settings and baby journal could not be verified or restored from a verified backup. Recovery stopped before overwrite, but durable preservation of the originals could not be confirmed.'
-      : 'Baby Diary could not start. No local data was modified after the startup failure.',
+    startupFailureMessage(error, Boolean(recoveryRequired)),
   )
   app.exit(1)
 })

@@ -4,6 +4,7 @@ import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SettingsStore } from '../electron/store/settings'
 import { BabyInfoJournal } from '../electron/store/babyInfoJournal'
+import type { DurableFileOps } from '../electron/store/durableFs'
 import type {
   AppSettings,
   BabyInfoMutation,
@@ -302,14 +303,14 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     const createStore = new SettingsStore(tmpDir)
 
     expect(createStore.get().baby).toMatchObject({ name: '', birthdate: '' })
-    expect(createStore.listUnlinkedBabyInfoArchives()).toEqual([
+    expect(createStore.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
       expect.objectContaining({
         babyName: 'Local draft',
         babyBirthdate: '2026-05-05',
         source: 'legacy-unscoped',
       }),
     ])
-    expect(new SettingsStore(tmpDir).listUnlinkedBabyInfoArchives()).toHaveLength(1)
+    expect(new SettingsStore(tmpDir).listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
 
     const created = commit(createStore, {
       kind: 'family-transition',
@@ -321,7 +322,7 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     expect(created.activePendingCount).toBe(0)
     expect(created.mutation).toBeUndefined()
     expect(createStore.getBabyInfoSummary('family-created').mutationCount).toBe(0)
-    expect(createStore.listUnlinkedBabyInfoArchives()).toHaveLength(1)
+    expect(createStore.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
 
     const joinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-settings-join-'))
     try {
@@ -331,7 +332,7 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
       }))
       const joinStore = new SettingsStore(joinDir)
       expect(joinStore.get().baby).toMatchObject({ name: '', birthdate: '' })
-      expect(joinStore.listUnlinkedBabyInfoArchives()).toHaveLength(1)
+      expect(joinStore.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
       const joined = commit(joinStore, {
         kind: 'family-transition',
         familyId: 'family-existing',
@@ -341,10 +342,51 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
       expect(joined.settings.baby).toMatchObject({ name: '', birthdate: '' })
       expect(joined.activePendingCount).toBe(0)
       expect(joinStore.getBabyInfoSummary('family-existing').mutationCount).toBe(0)
-      expect(joinStore.listUnlinkedBabyInfoArchives()).toHaveLength(1)
+      expect(joinStore.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
     } finally {
       fs.rmSync(joinDir, { recursive: true, force: true })
     }
+  })
+
+  it('reports durable archive evidence when projection replacement fails after the archive append', () => {
+    writeSettings(tmpDir, baseSettings({
+      familyId: '',
+      baby: { name: 'Archive before failure', birthdate: '2026-05-06', gender: 'girl' },
+    }))
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const durableFs = Object.create(fs) as DurableFileOps
+    durableFs.renameSync = (oldPath, newPath) => {
+      if (path.resolve(String(newPath)) === path.resolve(settingsPath)) {
+        throw Object.assign(new Error('injected projection replacement failure'), { code: 'EIO' })
+      }
+      fs.renameSync(oldPath, newPath)
+    }
+
+    let failure: unknown
+    try {
+      new SettingsStore(tmpDir, { durableFs })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toMatchObject({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      archiveEvidence: {
+        archiveId: expect.any(String),
+        durable: true,
+      },
+    })
+    expect(new BabyInfoJournal(tmpDir).listUnlinkedArchivePage({ limit: 10 }).items).toEqual([
+      expect.objectContaining({
+        babyName: 'Archive before failure',
+        babyBirthdate: '2026-05-06',
+      }),
+    ])
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
   })
 
   it('does not create an archive or cloud pending record for a blank unscoped pair', () => {
@@ -354,7 +396,7 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     }))
 
     const store = new SettingsStore(tmpDir)
-    expect(store.listUnlinkedBabyInfoArchives()).toEqual([])
+    expect(store.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([])
 
     const created = commit(store, {
       kind: 'family-transition',
@@ -380,7 +422,7 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
 
     const upgraded = new SettingsStore(tmpDir)
     expect(upgraded.get().baby).toMatchObject({ name: '', birthdate: '' })
-    expect(upgraded.listUnlinkedBabyInfoArchives()).toEqual([
+    expect(upgraded.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
       expect.objectContaining({ babyName: 'Former A', babyBirthdate: '2026-01-01' }),
     ])
 
@@ -418,7 +460,7 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     const recovered = restarted.merge({ familyId: 'family-created' })
     expect(recovered.baby).toMatchObject({ name: '', birthdate: '' })
     expect(restarted.getBabyInfoSummary('family-created').mutationCount).toBe(0)
-    expect(restarted.listUnlinkedBabyInfoArchives()).toEqual([
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
       expect.objectContaining({
         babyName: 'Crash-safe local',
         babyBirthdate: '2026-06-06',

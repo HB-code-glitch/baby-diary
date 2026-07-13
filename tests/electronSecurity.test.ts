@@ -313,6 +313,64 @@ describe('Electron BrowserWindow security boundary', () => {
     )
   })
 
+  it('asks for a Windows restart without claiming unconfirmed forensic preservation', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        restartRequired: true,
+        primaryUntouched: true,
+        originalsPreserved: false,
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/restart Baby Diary/i),
+    )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/primary.+untouched/i),
+    )
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/not yet confirmed/i),
+    )
+  })
+
+  it('admits a durable local archive-only mutation in startup copy', async () => {
+    settingsStoreMocks.construct.mockImplementationOnce(() => {
+      throw Object.assign(new Error('redacted'), {
+        code: 'SETTINGS_RECOVERY_REQUIRED',
+        recoverable: true,
+        localDataModified: true,
+        archiveEvidence: {
+          archiveId: '11111111-1111-4111-8111-111111111111',
+          durable: true,
+        },
+      })
+    })
+    const electron = await import('electron')
+    electron.dialog.showErrorBox.mockClear()
+
+    await import('../electron/main')
+    await vi.waitFor(() => expect(electron.dialog.showErrorBox).toHaveBeenCalledTimes(1))
+
+    expect(electron.dialog.showErrorBox).toHaveBeenCalledWith(
+      'Baby Diary recovery required',
+      expect.stringMatching(/local baby-info archive was durably added/i),
+    )
+    expect(electron.dialog.showErrorBox).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/no local data was modified/i),
+    )
+  })
+
   it('exposes bounded baby-info delta handlers and broadcasts authoritative settings after successful writes', async () => {
     const mainWindow = await loadMainWindow()
     const save = ipcHandlers.get('settings:save')

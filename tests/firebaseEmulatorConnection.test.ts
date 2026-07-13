@@ -3,6 +3,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FirebaseEmulatorBridge } from '../shared/types'
 
+const FIREBASE_REGISTRY = Symbol.for('baby-diary.firebase.service-registry.v1')
+
 const firebase = vi.hoisted(() => {
   const app = { name: 'baby-diary' }
   const auth = { name: 'auth' }
@@ -19,6 +21,7 @@ const firebase = vi.hoisted(() => {
     deleteApp: vi.fn(async () => undefined),
     initializeFirestore: vi.fn(() => db),
     getFirestore: vi.fn(() => db),
+    terminate: vi.fn(async () => undefined),
     persistentLocalCache: vi.fn((options: unknown) => options),
     persistentMultipleTabManager: vi.fn(() => ({ type: 'multi-tab' })),
     connectFirestoreEmulator: vi.fn(),
@@ -37,6 +40,7 @@ vi.mock('firebase/app', () => ({
 vi.mock('firebase/firestore', () => ({
   getFirestore: firebase.getFirestore,
   initializeFirestore: firebase.initializeFirestore,
+  terminate: firebase.terminate,
   persistentLocalCache: firebase.persistentLocalCache,
   persistentMultipleTabManager: firebase.persistentMultipleTabManager,
   connectFirestoreEmulator: firebase.connectFirestoreEmulator,
@@ -80,8 +84,15 @@ function exposeBridge(value: FirebaseEmulatorBridge | null) {
 describe('Firebase emulator connection', () => {
   beforeEach(() => {
     vi.resetModules()
+    delete (globalThis as unknown as Record<PropertyKey, unknown>)[FIREBASE_REGISTRY]
     vi.clearAllMocks()
     firebase.getApps.mockReturnValue([])
+    firebase.deleteApp.mockImplementation(async app => {
+      for (const symbol of Object.getOwnPropertySymbols(app)) {
+        delete (app as Record<symbol, unknown>)[symbol]
+      }
+    })
+    firebase.terminate.mockResolvedValue(undefined)
     firebase.connectFirestoreEmulator.mockImplementation(() => undefined)
     firebase.connectAuthEmulator.mockImplementation(() => undefined)
     firebase.setPersistence.mockResolvedValue(undefined)
@@ -143,6 +154,7 @@ describe('Firebase emulator connection', () => {
     })
 
     await expect(initFirebase(demoConfig)).rejects.toThrow('firestore emulator unavailable')
+    expect(firebase.terminate).toHaveBeenCalledWith(firebase.db)
     expect(firebase.deleteApp).toHaveBeenCalledWith(firebase.app)
     expect(firebase.setPersistence).not.toHaveBeenCalled()
 
@@ -152,7 +164,7 @@ describe('Firebase emulator connection', () => {
     expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
-  it('connects each emulator once per stable app identity across runtime teardown', async () => {
+  it('connects once per stable service and reconnects only after completed cleanup', async () => {
     const { initFirebase, teardownFirebase } = await import('../src/sync/firebase')
 
     await initFirebase(demoConfig)
@@ -162,7 +174,7 @@ describe('Firebase emulator connection', () => {
 
     await teardownFirebase()
     await initFirebase(demoConfig)
-    expect(firebase.connectAuthEmulator).toHaveBeenCalledOnce()
-    expect(firebase.connectFirestoreEmulator).toHaveBeenCalledOnce()
+    expect(firebase.connectAuthEmulator).toHaveBeenCalledTimes(2)
+    expect(firebase.connectFirestoreEmulator).toHaveBeenCalledTimes(2)
   })
 })

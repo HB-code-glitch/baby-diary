@@ -54,6 +54,53 @@ describe('durable synchronous file writes', () => {
     expect(fs.readFileSync(file, 'utf8')).toBe('first\n둘 번째\n')
   })
 
+  it('rolls a failed append back to the pre-append length on the same handle', () => {
+    const file = path.join(tmpDir, 'journal.jsonl')
+    fs.writeFileSync(file, 'confirmed\n')
+    let fsyncCalls = 0
+    const ops: DurableFileOps = {
+      ...fs,
+      fsyncSync(fd) {
+        fsyncCalls += 1
+        if (fsyncCalls === 1) throw new Error('injected append fsync failure')
+        fs.fsyncSync(fd)
+      },
+    }
+
+    expect(() => appendDurableFileSync(
+      file,
+      Buffer.from('unconfirmed\n'),
+      { fs: ops },
+    )).toThrow(/injected append fsync failure/)
+
+    expect(fsyncCalls).toBe(2)
+    expect(fs.readFileSync(file, 'utf8')).toBe('confirmed\n')
+  })
+
+  it('reports a structured uncertain state when append rollback cannot be confirmed', () => {
+    const file = path.join(tmpDir, 'journal.jsonl')
+    fs.writeFileSync(file, 'confirmed\n')
+    let fsyncCalls = 0
+    const ops: DurableFileOps = {
+      ...fs,
+      fsyncSync() {
+        fsyncCalls += 1
+        throw new Error(fsyncCalls === 1 ? 'append fsync failed' : 'rollback fsync failed')
+      },
+    }
+
+    let caught: unknown
+    try {
+      appendDurableFileSync(file, Buffer.from('unconfirmed\n'), { fs: ops })
+    } catch (error) { caught = error }
+
+    expect(caught).toMatchObject({
+      code: 'DURABLE_APPEND_UNCERTAIN',
+      preAppendLength: Buffer.byteLength('confirmed\n'),
+    })
+    expect(String(caught)).toMatch(/rollback fsync failed/i)
+  })
+
   it('atomically replaces a file only after full write and fsync', () => {
     const file = path.join(tmpDir, 'settings.json')
     fs.writeFileSync(file, 'old')

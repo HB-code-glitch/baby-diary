@@ -141,7 +141,7 @@ describe('BackupManager verified snapshot set', () => {
       fs.readFileSync(path.join(snapshot, 'baby-info-journal-v1.jsonl')),
     )
 
-    expect(replayed.listUnlinkedArchives()).toEqual([
+    expect(replayed.listUnlinkedArchivePage({ limit: 10 }).items).toEqual([
       expect.objectContaining({
         babyName: 'Former family baby',
         babyBirthdate: '2025-04-03',

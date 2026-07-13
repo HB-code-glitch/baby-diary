@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
 const firebase = vi.hoisted(() => ({
   auth: { name: 'auth' },
   db: { name: 'db' },
@@ -68,5 +78,26 @@ describe('sync auth persistence forwarding', () => {
       'secret1',
       keepLoggedIn,
     )
+  })
+
+  it('does not let a persisted user reappear when sign-out claims held initialization', async () => {
+    const held = deferred<{ auth: { currentUser: unknown }; db: object }>()
+    firebase.initFirebase.mockReturnValueOnce(held.promise)
+    firebase.fbSignOut.mockImplementationOnce(async (auth: { currentUser: unknown }) => {
+      auth.currentUser = null
+    })
+    const engine = await import('../src/sync/syncEngine')
+    const configuring = engine.configure(config, '')
+    await vi.waitFor(() => expect(firebase.initFirebase).toHaveBeenCalledTimes(1))
+    const signingOut = engine.signOutSync()
+    const auth = { currentUser: { uid: 'persisted-user' } }
+
+    held.resolve({ auth, db: firebase.db })
+    await Promise.all([configuring, signingOut])
+
+    expect(firebase.fbSignOut).toHaveBeenCalledTimes(1)
+    expect(firebase.fbSignOut).toHaveBeenCalledWith(auth)
+    expect(auth.currentUser).toBeNull()
+    expect(engine.getStatus().status).toBe('signed-out')
   })
 })
