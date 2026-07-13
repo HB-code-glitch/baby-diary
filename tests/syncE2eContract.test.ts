@@ -7,6 +7,13 @@ function source(path: string): string {
 }
 
 describe('packaged sync E2E selector contract', () => {
+  it('exposes the lossless physical mutation list through the sandboxed bridge', () => {
+    expect(source('electron/main.ts')).toContain("ipcMain.handle('events:listMutations'")
+    expect(source('electron/preload.ts')).toContain("ipcRenderer.invoke('events:listMutations')")
+    expect(source('src/lib/ipc.ts')).toContain('listEventMutations')
+    expect(source('scripts/sync-e2e.mjs')).toContain('window.babyDiary.listEventMutations()')
+  })
+
   it('exposes stable auth and sync-state selectors', () => {
     const sync = source('src/components/SyncSettingsSlot.tsx')
     for (const selector of [

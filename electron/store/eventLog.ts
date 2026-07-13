@@ -1,23 +1,11 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { DiaryEvent, EventType } from '../../shared/types'
+import { DiaryEvent } from '../../shared/types'
+import { compareEventMutations, getEventStorageKey, validateDiaryEvent } from '../../shared/eventResolver'
 
-const VALID_TYPES: EventType[] = ['pee', 'poop', 'temp', 'breast', 'formula', 'diary', 'message', 'sleep', 'growth']
-
-/** F4: Validate a DiaryEvent before writing to disk. Returns null if valid, error string if invalid. */
+/** Validate a DiaryEvent before crossing the append-only storage boundary. */
 export function validateEvent(event: unknown): string | null {
-  if (!event || typeof event !== 'object') return 'event must be an object'
-  const e = event as Record<string, unknown>
-
-  if (typeof e.id !== 'string' || e.id.trim() === '') return 'id must be a non-empty string'
-  if (typeof e.rev !== 'number' || !Number.isInteger(e.rev) || e.rev < 1) return 'rev must be a positive integer'
-  if (typeof e.at !== 'string' || isNaN(Date.parse(e.at))) return 'at must be a valid ISO date string'
-  if (typeof e.type !== 'string' || !(VALID_TYPES as string[]).includes(e.type)) return `type must be one of: ${VALID_TYPES.join(', ')}`
-  if (typeof e.deleted !== 'boolean') return 'deleted must be a boolean'
-  if (typeof e.createdAt !== 'string' || isNaN(Date.parse(e.createdAt))) return 'createdAt must be a valid ISO date string'
-  if (typeof e.updatedAt !== 'string' || isNaN(Date.parse(e.updatedAt))) return 'updatedAt must be a valid ISO date string'
-
-  return null
+  return validateDiaryEvent(event)
 }
 
 export interface EventLogOptions {
@@ -27,9 +15,8 @@ export interface EventLogOptions {
 export class EventLog {
   private dataDir: string
   private index: Map<string, DiaryEvent> = new Map()
-  /** MF-07: tracks every id_rev pair physically present on disk to prevent re-appending
-   * older remote revisions on every reconnect (unbounded bloat + Firestore quota burn). */
-  private seenIdRevs: Set<string> = new Set()
+  /** One entry per immutable mutation physically present in the append-only log. */
+  private mutations: Map<string, DiaryEvent> = new Map()
   private loaded = false
 
   constructor(options: EventLogOptions) {
@@ -38,25 +25,31 @@ export class EventLog {
 
   private getMonthFile(isoDate: string): string {
     const d = new Date(isoDate)
-    const yyyy = d.getFullYear()
-    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const yyyy = String(d.getUTCFullYear()).padStart(4, '0')
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
     return path.join(this.dataDir, `events-${yyyy}-${mm}.jsonl`)
   }
 
   private ensureDataDir(): void {
-    if (!fs.existsSync(this.dataDir)) {
-      fs.mkdirSync(this.dataDir, { recursive: true })
+    if (!fs.existsSync(this.dataDir)) fs.mkdirSync(this.dataDir, { recursive: true })
+  }
+
+  private updateResolvedIndex(event: DiaryEvent): void {
+    const existing = this.index.get(event.id)
+    if (!existing || compareEventMutations(event, existing) > 0) {
+      this.index.set(event.id, event)
     }
   }
 
   loadAll(): DiaryEvent[] {
     this.ensureDataDir()
     this.index.clear()
-    this.seenIdRevs.clear()
+    this.mutations.clear()
 
     let files: string[] = []
     try {
-      files = fs.readdirSync(this.dataDir).filter(f => f.match(/^events-\d{4}-\d{2}\.jsonl$/))
+      // Accept old non-padded early-year filenames while all new writes use four digits.
+      files = fs.readdirSync(this.dataDir).filter(file => /^events-\d{1,4}-\d{2}\.jsonl$/.test(file))
     } catch {
       return []
     }
@@ -75,7 +68,6 @@ export class EventLog {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim()
         if (!line) continue
-
         const isFinalLine = i === lines.length - 1
 
         let event: DiaryEvent
@@ -90,25 +82,18 @@ export class EventLog {
           continue
         }
 
-        // MF-07: track every id_rev physically on disk
-        this.seenIdRevs.add(`${event.id}_${event.rev}`)
-
-        const existing = this.index.get(event.id)
-        if (!existing) {
-          this.index.set(event.id, event)
-        } else if (event.rev > existing.rev) {
-          this.index.set(event.id, event)
-        } else if (event.rev === existing.rev) {
-          // P3 defense-in-depth (loadAll): at equal rev, tombstone wins over non-deleted
-          if (event.deleted && !existing.deleted) {
-            this.index.set(event.id, event)
-          } else if (!event.deleted || existing.deleted) {
-            // neither is a new tombstone — fall back to updatedAt tie-break
-            if (new Date(event.updatedAt) > new Date(existing.updatedAt)) {
-              this.index.set(event.id, event)
-            }
-          }
+        const validationError = validateEvent(event)
+        if (validationError) {
+          console.error(`[EventLog] Skipping invalid event in ${file} (line ${i + 1}): ${validationError}`)
+          continue
         }
+
+        const mutationKey = getEventStorageKey(event)
+        const existingMutation = this.mutations.get(mutationKey)
+        if (!existingMutation || compareEventMutations(event, existingMutation) > 0) {
+          this.mutations.set(mutationKey, event)
+        }
+        this.updateResolvedIndex(event)
       }
     }
 
@@ -117,7 +102,6 @@ export class EventLog {
   }
 
   append(event: DiaryEvent): 'ok' | 'duplicate' | 'error' {
-    // F4: validate before touching the filesystem
     const validationError = validateEvent(event)
     if (validationError) {
       console.error(`[EventLog] Rejected invalid event: ${validationError}`, event)
@@ -125,56 +109,36 @@ export class EventLog {
     }
 
     this.ensureDataDir()
+    if (!this.loaded) this.loadAll()
 
-    if (!this.loaded) {
-      this.loadAll()
-    }
-
-    // MF-07: short-circuit if this exact id_rev is already on disk (prevents
-    // reconcile from re-appending old remote revisions on every reconnect).
-    const idRev = `${event.id}_${event.rev}`
-    const existing = this.index.get(event.id)
-    if (this.seenIdRevs.has(idRev)) {
-      // P3: allow a tombstone to propagate even at the same rev as a non-deleted copy
-      if (!(event.deleted && existing && !existing.deleted)) return 'duplicate'
-    } else if (existing && existing.rev === event.rev) {
-      // identical rev not yet in seenIdRevs (edge: index loaded without disk)
-      if (!(event.deleted && !existing.deleted)) return 'duplicate'
-    }
+    const mutationKey = getEventStorageKey(event)
+    if (this.mutations.has(mutationKey)) return 'duplicate'
 
     const filePath = this.getMonthFile(event.at)
     const line = JSON.stringify(event) + '\n'
 
-    // F1: ensure the file ends with a newline before appending so a torn final
-    // line (written without a trailing newline due to a crash) cannot fuse with
-    // our new data and cause silent data loss on the next reload.
-    // We must check with a separate stat/read before opening in append mode,
-    // because 'a'-mode file descriptors are write-only on some platforms.
+    // A torn final write without a newline must not fuse with the next record.
     try {
       const stat = fs.statSync(filePath)
       if (stat.size > 0) {
         const lastByte = Buffer.alloc(1)
-        const rfd = fs.openSync(filePath, 'r')
+        const readFd = fs.openSync(filePath, 'r')
         try {
-          fs.readSync(rfd, lastByte, 0, 1, stat.size - 1)
+          fs.readSync(readFd, lastByte, 0, 1, stat.size - 1)
         } finally {
-          fs.closeSync(rfd)
+          fs.closeSync(readFd)
         }
-        if (lastByte[0] !== 0x0a /* '\n' */) {
-          // Append the missing newline first, then the event
-          const afd = fs.openSync(filePath, 'a')
+        if (lastByte[0] !== 0x0a) {
+          const appendFd = fs.openSync(filePath, 'a')
           try {
-            fs.writeSync(afd, '\n')
-            fs.fsyncSync(afd)
+            fs.writeSync(appendFd, '\n')
+            fs.fsyncSync(appendFd)
           } finally {
-            fs.closeSync(afd)
+            fs.closeSync(appendFd)
           }
         }
       }
     } catch (err: unknown) {
-      // P1: only swallow ENOENT (file doesn't exist yet — will be created by the
-      // 'a' open below). Any other error (EACCES, EIO, lock, …) must propagate so
-      // callers know the write cannot proceed safely.
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
 
@@ -191,31 +155,28 @@ export class EventLog {
       return 'error'
     }
 
-    // MF-07: record this id_rev as seen after successful disk write
-    this.seenIdRevs.add(idRev)
-
-    if (!existing || event.rev > existing.rev) {
-      this.index.set(event.id, event)
-    } else if (event.rev === existing.rev) {
-      if (new Date(event.updatedAt) > new Date(existing.updatedAt)) {
-        this.index.set(event.id, event)
-      }
-    }
-
+    this.mutations.set(mutationKey, event)
+    this.updateResolvedIndex(event)
     return 'ok'
   }
 
+  /** Resolved visible view: exactly one deterministic winner per event id. */
   getAll(): DiaryEvent[] {
-    if (!this.loaded) {
-      this.loadAll()
-    }
+    if (!this.loaded) this.loadAll()
     return Array.from(this.index.values())
   }
 
+  /** Every immutable record, used by sync reconciliation to avoid data loss. */
+  getAllMutations(): DiaryEvent[] {
+    if (!this.loaded) this.loadAll()
+    return Array.from(this.mutations.values()).sort((left, right) => {
+      if (left.id !== right.id) return left.id < right.id ? -1 : 1
+      return compareEventMutations(left, right)
+    })
+  }
+
   getCount(): number {
-    if (!this.loaded) {
-      this.loadAll()
-    }
-    return Array.from(this.index.values()).filter(e => !e.deleted).length
+    if (!this.loaded) this.loadAll()
+    return Array.from(this.index.values()).filter(event => !event.deleted).length
   }
 }

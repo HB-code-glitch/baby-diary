@@ -4,7 +4,7 @@
  *
  * Firestore 구조:
  *   families/{familyId}  — 가족 문서
- *   families/{familyId}/events/{id}_{rev}  — 이벤트 revision (불변 doc)
+ *   families/{familyId}/events/{mutationDocId}  — 이벤트 mutation (불변 doc)
  *
  * 설계 원칙:
  * - 로컬 JSONL append-only 로그와 동일한 append-only 방식
@@ -21,6 +21,14 @@ import type {
 } from 'firebase/firestore'
 import type { Auth, User } from 'firebase/auth'
 import { DiaryEvent } from '../../shared/types'
+import {
+  canonicalEventJson,
+  ensureEventMutationIdentity,
+  getEventContentId,
+  isValidEventId,
+  isValidMutationId,
+  validateDiaryEvent,
+} from '../../shared/eventResolver'
 import { ipc } from '../lib/ipc'
 import {
   initFirebase,
@@ -228,15 +236,27 @@ function loadPending(): PendingItem[] {
       return []
     }
     const valid: PendingItem[] = []
+    const seen = new Set<string>()
     for (const item of parsed) {
       if (
         item &&
         typeof item === 'object' &&
         item.event &&
-        typeof item.attempts === 'number' &&
-        typeof item.nextRetry === 'number'
+        Number.isInteger(item.attempts) &&
+        item.attempts >= 0 &&
+        typeof item.nextRetry === 'number' &&
+        Number.isFinite(item.nextRetry) &&
+        validateDiaryEvent(item.event) === null
       ) {
-        valid.push(item as PendingItem)
+        const pendingItem = {
+          ...(item as PendingItem),
+          event: ensureEventMutationIdentity((item as PendingItem).event),
+        }
+        const key = makeDocId(pendingItem.event)
+        if (!seen.has(key)) {
+          seen.add(key)
+          valid.push(pendingItem)
+        }
       } else {
         console.warn('[syncEngine] loadPending: dropping malformed item', item)
       }
@@ -253,7 +273,7 @@ function savePending(items: PendingItem[]): void {
     localStorage.setItem(PENDING_KEY, JSON.stringify(items))
   } catch (err) {
     // P8: log quota/serialization failures so operators can observe and diagnose.
-    // In-memory _pending is still intact; reconcile rescues on restart via ipc.listEvents().
+    // In-memory _pending is still intact; reconcile rescues on restart via the physical mutation log.
     console.error('[syncEngine] savePending failed — pending may be lost on restart:', err)
   }
 }
@@ -265,19 +285,64 @@ function syncPendingCount(): void {
 }
 
 // ────────────────────────────────────────────────────────────
-// doc ID 변환: "${id}_${rev}"
+// Immutable cloud document identity. Legacy records retain "${id}_${rev}".
 // ────────────────────────────────────────────────────────────
 
 export function makeDocId(event: DiaryEvent): string {
+  const validationError = validateDiaryEvent(event)
+  if (validationError) throw new Error(`invalid event identity: ${validationError}`)
+  if (isValidMutationId(event.mutationId)) {
+    return `m3|${encodeURIComponent(event.id)}|${event.rev}|${event.mutationId}|${getEventContentId(event)}`
+  }
   return `${event.id}_${event.rev}`
 }
 
-export function parseDocId(docId: string): { id: string; rev: number } | null {
+export function parseDocId(docId: string): { id: string; rev: number; mutationId?: string; contentId?: string } | null {
+  if (typeof docId !== 'string' || docId.length === 0 || docId.length > 1500 || docId.includes('/')) return null
+
+  if (docId.startsWith('m3|')) {
+    const parts = docId.split('|')
+    if (
+      parts.length === 5
+      && parts[0] === 'm3'
+      && /^[1-9]\d*$/.test(parts[2])
+      && isValidMutationId(parts[3])
+      && isValidMutationId(parts[4])
+    ) {
+      try {
+        const id = decodeURIComponent(parts[1])
+        const rev = Number(parts[2])
+        if (isValidEventId(id) && encodeURIComponent(id) === parts[1] && Number.isSafeInteger(rev)) {
+          return { id, rev, mutationId: parts[3], contentId: parts[4] }
+        }
+      } catch {
+        // It may still be a legacy id beginning with the reserved-looking prefix.
+      }
+    }
+  }
+
+  if (docId.startsWith('m2|')) {
+    const parts = docId.split('|')
+    if (parts.length === 4 && parts[0] === 'm2' && /^[1-9]\d*$/.test(parts[2]) && isValidMutationId(parts[3])) {
+      try {
+        const id = decodeURIComponent(parts[1])
+        const rev = Number(parts[2])
+        if (isValidEventId(id) && encodeURIComponent(id) === parts[1] && Number.isSafeInteger(rev)) {
+          return { id, rev, mutationId: parts[3] }
+        }
+      } catch {
+        // It may still be a legacy id beginning with the reserved-looking prefix.
+      }
+    }
+  }
+
   const lastUnderscore = docId.lastIndexOf('_')
   if (lastUnderscore < 0) return null
   const id = docId.substring(0, lastUnderscore)
-  const rev = parseInt(docId.substring(lastUnderscore + 1), 10)
-  if (!id || isNaN(rev)) return null
+  const rawRev = docId.substring(lastUnderscore + 1)
+  if (!isValidEventId(id) || !/^[1-9]\d*$/.test(rawRev)) return null
+  const rev = Number(rawRev)
+  if (!Number.isSafeInteger(rev)) return null
   return { id, rev }
 }
 
@@ -556,15 +621,21 @@ export async function updateMemberEntry(name: string, role: 'dad' | 'mom'): Prom
  * 원격에서 수신한 이벤트는 tag된 docId로 필터링 → 재업로드 없음.
  */
 export function enqueue(event: DiaryEvent): void {
-  const docId = makeDocId(event)
+  const validationError = validateDiaryEvent(event)
+  if (validationError) {
+    console.error(`[syncEngine] enqueue rejected invalid event: ${validationError}`)
+    return
+  }
+  const mutation = ensureEventMutationIdentity(event)
+  const docId = makeDocId(mutation)
 
   // 원격에서 받은 이벤트는 재업로드 하지 않음
   if (_seenFromRemote.has(docId)) return
 
-  // 이미 대기 중인 동일 id+rev는 추가하지 않음
+  // 이미 대기 중인 동일 immutable mutation은 추가하지 않음
   if (_pending.some(p => makeDocId(p.event) === docId)) return
 
-  _pending.push({ event, attempts: 0, nextRetry: 0 })
+  _pending.push({ event: mutation, attempts: 0, nextRetry: 0 })
   savePending(_pending)
   syncPendingCount()
 
@@ -856,8 +927,8 @@ async function _handleFamilyGone(user: import('firebase/auth').User): Promise<vo
 /**
  * 초기 연결 시 로컬↔원격 diff 후 양방향 동기화.
  *
- * 로컬: listEvents() → 최고 rev만 반환하므로, 각 이벤트의 최신 rev를 기준으로 비교.
- * 원격: families/{familyId}/events 전체 doc (각 doc = id_rev 불변 revision).
+ * 로컬: listEventMutations() → 모든 물리 mutation을 손실 없이 반환.
+ * 원격: families/{familyId}/events 전체 doc (각 doc = immutable mutation).
  *
  * 1. 원격에 없는 로컬 revision → batched write로 업로드
  * 2. 로컬에 없는 원격 revision → ipc.appendEvent로 로컬 append (dedup은 JSONL 레이어가 처리)
@@ -878,10 +949,18 @@ async function reconcile(user: User): Promise<void> {
     throw new Error('not a member of this family')
   }
 
-  // 로컬 이벤트 목록 (최신 rev per id)
-  const localEvents = await ipc.listEvents()
-
-  // 로컬 id_rev 셋 구성 (최신 rev만)
+  // Lossless local mutation list (all physical revisions and same-rev variants).
+  const localMutationMap = new Map<string, DiaryEvent>()
+  for (const localEvent of await ipc.listEventMutations()) {
+    const validationError = validateDiaryEvent(localEvent)
+    if (validationError) {
+      console.error(`[syncEngine] reconcile ignored invalid local event: ${validationError}`)
+      continue
+    }
+    const mutation = ensureEventMutationIdentity(localEvent)
+    localMutationMap.set(makeDocId(mutation), mutation)
+  }
+  const localEvents = Array.from(localMutationMap.values())
   const localDocIds = new Set<string>(localEvents.map(makeDocId))
 
   // 원격 이벤트 docs 전체 조회
@@ -889,11 +968,16 @@ async function reconcile(user: User): Promise<void> {
   const remoteSnap = await getDocs(eventsRef)
 
   const remoteDocIds = new Set<string>()
-  const remoteEvents: DiaryEvent[] = []
+  const remoteDocuments: Array<{ docId: string; event: DiaryEvent }> = []
 
   remoteSnap.docs.forEach(d => {
+    const event = parseCloudEventDocument(d.id, d.data())
+    if (!event) {
+      console.error(`[syncEngine] reconcile ignored invalid cloud event document: ${d.id}`)
+      return
+    }
     remoteDocIds.add(d.id)
-    remoteEvents.push(docToEvent(d.id, d.data()))
+    remoteDocuments.push({ docId: d.id, event })
   })
 
   // 1. 원격에 없는 로컬 이벤트 → 업로드
@@ -901,14 +985,22 @@ async function reconcile(user: User): Promise<void> {
   await batchUpload(toUpload)
 
   // 2. 로컬에 없는 원격 이벤트 → 로컬 append
-  const toDownload = remoteEvents.filter(e => !localDocIds.has(makeDocId(e)))
-  for (const e of toDownload) {
-    _seenFromRemote.add(makeDocId(e))
-    await ipc.appendEvent(e)
+  const locallyConfirmedDocIds = new Set(localDocIds)
+  const toDownload = remoteDocuments.filter(({ docId }) => !localDocIds.has(docId))
+  for (const { docId, event } of toDownload) {
+    _seenFromRemote.add(docId)
+    const appendResult = await ipc.appendEvent(event)
+    if (appendResult !== 'error') locallyConfirmedDocIds.add(docId)
   }
 
-  // pending 큐에서 이미 원격에 있는 항목 제거
-  _pending = _pending.filter(p => !remoteDocIds.has(makeDocId(p.event)))
+  // Acknowledge only the exact cloud identity and exact canonical payload.
+  const remoteByDocId = new Map(remoteDocuments.map(document => [document.docId, document.event]))
+  _pending = _pending.filter(pending => {
+    const pendingDocId = makeDocId(pending.event)
+    const remoteEvent = remoteByDocId.get(pendingDocId)
+    if (!remoteEvent || !locallyConfirmedDocIds.has(pendingDocId)) return true
+    return canonicalEventJson(pending.event) !== canonicalEventJson(remoteEvent)
+  })
   savePending(_pending)
   syncPendingCount()
 }
@@ -927,15 +1019,24 @@ async function attachSnapshot(): Promise<void> {
     snapshot => {
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added' || change.type === 'modified') {
-          const event = docToEvent(change.doc.id, change.doc.data())
-          const docId = makeDocId(event)
-          _seenFromRemote.add(docId)
-          // 로컬 append (JSONL 레이어가 id+rev 중복 제거)
-          ipc.appendEvent(event).catch(() => { /* 무시 */ })
-          // 큐에서 제거
-          _pending = _pending.filter(p => makeDocId(p.event) !== docId)
-          savePending(_pending)
-          syncPendingCount()
+          const event = parseCloudEventDocument(change.doc.id, change.doc.data())
+          if (!event) {
+            console.error(`[syncEngine] snapshot ignored invalid cloud event document: ${change.doc.id}`)
+            return
+          }
+          const sourceDocId = change.doc.id
+          _seenFromRemote.add(sourceDocId)
+          // 로컬 append (JSONL 레이어가 immutable mutation identity로 중복 제거)
+          void ipc.appendEvent(event).then(appendResult => {
+            if (appendResult === 'error') return
+            const remoteCanonical = canonicalEventJson(event)
+            _pending = _pending.filter(pending => (
+              makeDocId(pending.event) !== sourceDocId
+              || canonicalEventJson(pending.event) !== remoteCanonical
+            ))
+            savePending(_pending)
+            syncPendingCount()
+          }).catch(() => { /* keep pending for retry */ })
         }
       })
     },
@@ -946,20 +1047,39 @@ async function attachSnapshot(): Promise<void> {
   )
 }
 
-/** Firestore doc 데이터 → DiaryEvent 변환 */
-function docToEvent(docId: string, data: DocumentData): DiaryEvent {
-  // doc에 event 필드가 있으면 그것을 사용, 없으면 data 자체가 event
-  return (data.event ?? data) as DiaryEvent
+/** Strict Firestore document decoder; doc identity must match immutable payload identity. */
+export function parseCloudEventDocument(docId: string, data: DocumentData): DiaryEvent | null {
+  const identity = parseDocId(docId)
+  if (!identity || !data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const candidate = (record.event ?? record) as unknown
+  if (validateDiaryEvent(candidate) !== null) return null
+  const event = candidate as DiaryEvent
+  if (event.id !== identity.id || event.rev !== identity.rev) return null
+  if ((event.mutationId ?? undefined) !== (identity.mutationId ?? undefined)) return null
+  try {
+    if (identity.contentId) {
+      if (getEventContentId(event) !== identity.contentId || makeDocId(event) !== docId) return null
+    } else if (identity.mutationId) {
+      const legacyImmutableDocId = `m2|${encodeURIComponent(event.id)}|${event.rev}|${event.mutationId}`
+      if (legacyImmutableDocId !== docId) return null
+    } else if (`${event.id}_${event.rev}` !== docId) {
+      return null
+    }
+  } catch {
+    return null
+  }
+  return event
 }
 
 /**
  * Upload a single event to Firestore. Returns 'ok', 'already-exists', or 'error'.
- * F6: when a doc with the same id_rev already exists remotely (create-conflict),
+ * F6: when the same immutable mutation doc already exists remotely (create-conflict),
  *     we treat remote as winner and fetch it to apply locally via ipc.appendEvent.
  */
 async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | 'error'> {
   if (!_db || !_familyId) return 'error'
-  const { doc, writeBatch } = await _firestoreOps()
+  const { doc, writeBatch, getDoc } = await _firestoreOps()
   const docId = makeDocId(event)
   const ref = doc(_db, 'families', _familyId, 'events', docId)
   try {
@@ -972,6 +1092,16 @@ async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | '
     const code = (err as { code?: number | string }).code
     if (code === 6 || String(code) === 'already-exists') {
       return 'already-exists'
+    }
+    if (code === ERR_PERMISSION_DENIED || String(code) === ERR_PERMISSION_DENIED) {
+      try {
+        const snapshot = await getDoc(ref)
+        if (snapshot.exists() && parseCloudEventDocument(snapshot.id, snapshot.data())) {
+          return 'already-exists'
+        }
+      } catch {
+        // Keep as an upload error; pending must survive for retry.
+      }
     }
     return 'error'
   }
@@ -1016,19 +1146,23 @@ async function batchUpload(events: DiaryEvent[]): Promise<Set<string>> {
           uploaded.add(docId)
         } else if (result === 'already-exists') {
           // F6: remote won — fetch it and apply locally, then converge
+          let converged = false
           try {
             const ref = doc(_db, 'families', _familyId, 'events', docId)
             const remoteSnap = await getDoc(ref)
             if (remoteSnap.exists()) {
-              const remoteEvent = docToEvent(remoteSnap.id, remoteSnap.data())
-              _seenFromRemote.add(docId)
-              await ipc.appendEvent(remoteEvent)
+              const remoteEvent = parseCloudEventDocument(remoteSnap.id, remoteSnap.data())
+              if (remoteEvent) {
+                _seenFromRemote.add(docId)
+                const appendResult = await ipc.appendEvent(remoteEvent)
+                converged = appendResult !== 'error'
+                  && canonicalEventJson(remoteEvent) === canonicalEventJson(event)
+              }
             }
           } catch {
-            // best-effort; local already has our version, remote won will propagate via snapshot
+            // Do not clear pending until the immutable remote doc is confirmed locally.
           }
-          // Converged — treat as uploaded so drain removes it from pending
-          uploaded.add(docId)
+          if (converged) uploaded.add(docId)
         }
         // 'error' docs: NOT added to uploaded → drain keeps them in pending for retry
       }

@@ -17,6 +17,9 @@ const babyDiaryAPI = {
   listEvents: (): Promise<DiaryEvent[]> =>
     ipcRenderer.invoke('events:list'),
 
+  listEventMutations: (): Promise<DiaryEvent[]> =>
+    ipcRenderer.invoke('events:listMutations'),
+
   appendEvent: (event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> =>
     ipcRenderer.invoke('events:append', event),
 

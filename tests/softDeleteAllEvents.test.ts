@@ -180,4 +180,46 @@ describe('softDeleteAllEvents', () => {
     expect(enqueued.rev).toBe(6)
     expect(enqueued.deleted).toBe(true)
   })
+
+  it('creates one immutable mutation identity and enqueues the exact persisted tombstone', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const event = makeEvent({
+      id: 'mutation-check',
+      mutationId: '11111111-1111-4111-8111-111111111111',
+    })
+    useAppStore.setState({ events: [event] })
+
+    await useAppStore.getState().softDeleteAllEvents()
+
+    const persisted = mockAppendEvent.mock.calls[0][0] as DiaryEvent
+    const enqueued = mockEnqueue.mock.calls[0][0] as DiaryEvent
+    expect(persisted.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(persisted.mutationId).not.toBe(event.mutationId)
+    expect(enqueued).toBe(persisted)
+  })
+
+  it('assigns a mutation identity to every newly added event path', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const legacyShapedNewEvent = makeEvent({ mutationId: undefined })
+
+    const added = await useAppStore.getState().addEvent(legacyShapedNewEvent)
+
+    expect(added.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(mockAppendEvent.mock.calls[0][0]).toBe(added)
+    expect(mockEnqueue.mock.calls[0][0]).toBe(added)
+  })
+
+  it('gives every edit a fresh mutation identity', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const original = makeEvent({ mutationId: '11111111-1111-4111-8111-111111111111' })
+    useAppStore.setState({ events: [original] })
+
+    const edited = await useAppStore.getState().editEvent(original, { at: '2026-07-13T09:00:00.000Z' })
+
+    expect(edited.rev).toBe(original.rev + 1)
+    expect(edited.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(edited.mutationId).not.toBe(original.mutationId)
+    expect(mockAppendEvent.mock.calls[0][0]).toBe(edited)
+    expect(mockEnqueue.mock.calls[0][0]).toBe(edited)
+  })
 })

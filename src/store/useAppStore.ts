@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { format, isToday, parseISO, startOfDay, isSameDay } from 'date-fns'
 import i18n from '../i18n'
 import { isEventAtOrBefore, sortEventsNewestFirst } from '../lib/eventTime'
+import { mergeResolvedEvent } from '../../shared/eventResolver'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,6 +18,7 @@ function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): Diary
   const t = now()
   return {
     id: uuidv4(),
+    mutationId: uuidv4(),
     type,
     at: t,
     data: {} as DiaryEvent['data'],
@@ -204,7 +206,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   addEvent: async (event: DiaryEvent) => {
-    const result = await ipc.appendEvent(event)
+    const mutation = event.mutationId ? event : { ...event, mutationId: uuidv4() }
+    const result = await ipc.appendEvent(mutation)
     if (result === 'error') {
       throw new Error('append_failed')
     }
@@ -212,11 +215,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     // via _seenFromRemote — no re-upload loop.
     // 'duplicate' means the event is already on disk; still merge into UI state
     // and enqueue so a previous sync gap can be filled.
-    enqueue(event)
+    enqueue(mutation)
     set(state => ({
-      events: mergeEventIntoList(state.events, event),
+      events: mergeEventIntoList(state.events, mutation),
     }))
-    return event
+    return mutation
   },
 
   editEvent: async (original: DiaryEvent, patch) => {
@@ -231,6 +234,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       ...patch,
       updatedAt: t,
       rev: safeRev,
+      mutationId: uuidv4(),
     }
     const result = await ipc.appendEvent(updated)
     if (result === 'error') {
@@ -253,22 +257,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     let count = 0
     let partial = false
     for (const event of targets) {
-      const result = await ipc.appendEvent({
+      const tombstone: DiaryEvent = {
         ...event,
         deleted: true,
         updatedAt: now(),
         rev: event.rev + 1,
-      })
+        mutationId: uuidv4(),
+      }
+      const result = await ipc.appendEvent(tombstone)
       if (result === 'error') {
         // P12(a): abort on first error; record partial state flag
         partial = true
         break
-      }
-      const tombstone: DiaryEvent = {
-        ...event,
-        deleted: true,
-        updatedAt: new Date().toISOString(),
-        rev: event.rev + 1,
       }
       enqueue(tombstone)
       set(state => ({
@@ -367,26 +367,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 }))
 
 // ---------------------------------------------------------------------------
-// Merge helper (id+rev conflict resolution: higher rev wins)
+// Merge helper (shared deterministic mutation conflict resolution)
 // ---------------------------------------------------------------------------
 function mergeEventIntoList(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
-  const idx = list.findIndex(e => e.id === incoming.id)
-  if (idx === -1) {
-    return [...list, incoming]
-  }
-  const existing = list[idx]
-  if (incoming.rev > existing.rev) {
-    const next = [...list]
-    next[idx] = incoming
-    return next
-  }
-  // P3 defense-in-depth: at equal rev, prefer deleted:true (tombstone wins)
-  if (incoming.rev === existing.rev && incoming.deleted && !existing.deleted) {
-    const next = [...list]
-    next[idx] = incoming
-    return next
-  }
-  return list
+  return mergeResolvedEvent(list, incoming)
 }
 
 // ---------------------------------------------------------------------------

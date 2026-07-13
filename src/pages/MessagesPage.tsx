@@ -130,6 +130,7 @@ export function MessagesPage() {
       } else {
         const event: DiaryEvent = {
           id: uuidv4(),
+          mutationId: uuidv4(),
           type: 'message',
           at: time,
           data: { text } as MessageData,

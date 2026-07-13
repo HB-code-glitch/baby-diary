@@ -23,6 +23,8 @@ export type EventData =
 
 export interface DiaryEvent {
   id: string
+  /** Globally unique identity for this immutable mutation. Missing only on legacy records. */
+  mutationId?: string
   type: EventType
   at: string
   data: EventData

@@ -102,6 +102,120 @@ describe('EventLog', () => {
     expect(events).toHaveLength(1)
   })
 
+  it('preserves distinct mutations at the same id+rev and deduplicates only the same mutation', () => {
+    const id = uuidv4()
+    const first = makeEvent({
+      id,
+      mutationId: '11111111-1111-4111-8111-111111111111',
+      rev: 2,
+      at: '2026-07-13T07:00:00.000Z',
+      updatedAt: '2026-07-13T08:00:00.000Z',
+    })
+    const second = makeEvent({
+      id,
+      mutationId: '22222222-2222-4222-8222-222222222222',
+      rev: 2,
+      at: '2026-07-13T09:00:00.000Z',
+      updatedAt: '2026-07-13T08:00:00.000Z',
+    })
+
+    expect(log.append(first)).toBe('ok')
+    expect(log.append(second)).toBe('ok')
+    expect(log.append(first)).toBe('duplicate')
+    expect(log.getAllMutations()).toEqual(expect.arrayContaining([first, second]))
+    expect(log.getAllMutations()).toHaveLength(2)
+    expect(log.getAll().find(event => event.id === id)).toEqual(second)
+
+    const filePath = path.join(tmpDir, fs.readdirSync(tmpDir)[0])
+    const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(2)
+  })
+
+  it('physically preserves payload collisions that reuse the same mutation identity', () => {
+    const id = uuidv4()
+    const first = makeEvent({
+      id,
+      mutationId: '11111111-1111-4111-8111-111111111111',
+      rev: 2,
+      data: { note: 'first payload' },
+    })
+    const second = makeEvent({
+      ...first,
+      data: { note: 'second payload' },
+    })
+
+    expect(log.append(first)).toBe('ok')
+    expect(log.append(second)).toBe('ok')
+    expect(log.append({ ...first, data: { note: 'first payload' } })).toBe('duplicate')
+    expect(log.getAllMutations()).toHaveLength(2)
+  })
+
+  it('resolves same-revision mutations identically after reverse append order and reload', () => {
+    const id = uuidv4()
+    const live = makeEvent({
+      id,
+      mutationId: 'ffffffff-ffff-4fff-bfff-ffffffffffff',
+      rev: 4,
+      deleted: false,
+      updatedAt: '2026-07-13T10:00:00.000Z',
+    })
+    const tombstone = makeEvent({
+      id,
+      mutationId: '11111111-1111-4111-8111-111111111111',
+      rev: 4,
+      deleted: true,
+      updatedAt: '2026-07-13T06:00:00.000Z',
+    })
+
+    expect(log.append(live)).toBe('ok')
+    expect(log.append(tombstone)).toBe('ok')
+    expect(log.getAll().find(event => event.id === id)).toEqual(tombstone)
+
+    const reloaded = new EventLog({ dataDir: tmpDir })
+    expect(reloaded.loadAll().find(event => event.id === id)).toEqual(tombstone)
+
+    const reverseDir = makeTempDir()
+    try {
+      const reverse = new EventLog({ dataDir: reverseDir })
+      expect(reverse.append(tombstone)).toBe('ok')
+      expect(reverse.append(live)).toBe('ok')
+      expect(reverse.getAll().find(event => event.id === id)).toEqual(tombstone)
+    } finally {
+      fs.rmSync(reverseDir, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves distinct legacy same-revision payloads without rewriting them', () => {
+    const id = uuidv4()
+    const first = makeEvent({
+      id,
+      mutationId: undefined,
+      rev: 2,
+      data: { note: 'first legacy payload' },
+      updatedAt: '2026-07-13T08:00:00.000Z',
+    })
+    const second = makeEvent({
+      id,
+      mutationId: undefined,
+      rev: 2,
+      data: { note: 'second legacy payload' },
+      updatedAt: '2026-07-13T08:00:01.000Z',
+    })
+    const tombstone = makeEvent({
+      id,
+      mutationId: undefined,
+      rev: 2,
+      deleted: true,
+      updatedAt: '2026-07-13T07:00:00.000Z',
+    })
+
+    expect(log.append(first)).toBe('ok')
+    expect(log.append(second)).toBe('ok')
+    expect(log.append(tombstone)).toBe('ok')
+    expect(log.getAllMutations()).toHaveLength(3)
+    expect(log.getAll().find(event => event.id === id)).toEqual(tombstone)
+  })
+
   it('month file routing by event.at', () => {
     const e1 = makeEvent({ at: '2024-01-15T10:00:00.000Z' })
     const e2 = makeEvent({ at: '2024-02-20T10:00:00.000Z' })
@@ -112,6 +226,18 @@ describe('EventLog', () => {
     expect(files).toHaveLength(2)
     expect(files[0]).toMatch(/events-2024-01\.jsonl/)
     expect(files[1]).toMatch(/events-2024-02\.jsonl/)
+  })
+
+  it('pads early years on write and recovers pre-existing unpadded year files', () => {
+    const early = makeEvent({ id: 'early-year', at: '0001-01-15T00:00:00.000Z' })
+    expect(log.append(early)).toBe('ok')
+    expect(fs.existsSync(path.join(tmpDir, 'events-0001-01.jsonl'))).toBe(true)
+
+    const legacy = makeEvent({ id: 'legacy-unpadded', at: '0001-02-15T00:00:00.000Z' })
+    fs.writeFileSync(path.join(tmpDir, 'events-1-02.jsonl'), `${JSON.stringify(legacy)}\n`)
+
+    const reloaded = new EventLog({ dataDir: tmpDir })
+    expect(reloaded.loadAll()).toEqual(expect.arrayContaining([early, legacy]))
   })
 
   // ── F1 regression: torn final line (no trailing newline) fuses prevention ──

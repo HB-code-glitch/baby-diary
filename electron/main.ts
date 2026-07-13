@@ -94,6 +94,10 @@ function setupIPC(): void {
     return eventLog.getAll()
   })
 
+  ipcMain.handle('events:listMutations', async () => {
+    return eventLog.getAllMutations()
+  })
+
   ipcMain.handle('events:append', async (_, event: DiaryEvent) => {
     const result = eventLog.append(event)
     // Broadcast to renderer only on a genuinely new write (not duplicate/error)

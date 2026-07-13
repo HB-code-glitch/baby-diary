@@ -119,13 +119,13 @@ describe('P3: tombstone same-rev propagation', () => {
     expect(result).toBe('duplicate')
   })
 
-  it('tombstone already-deleted duplicate at same rev returns duplicate', () => {
-    // If existing is ALREADY deleted, a duplicate tombstone at same rev should still be 'duplicate'
+  it('distinct legacy tombstones at the same rev are both preserved', () => {
     const id = uuidv4()
-    const existing = makeEvent({ id, rev: 2, deleted: true })
+    const existing = makeEvent({ id, rev: 2, deleted: true, updatedAt: '2026-07-13T08:00:00.000Z' })
     log.append(existing)
-    const anotherTombstone = makeEvent({ id, rev: 2, deleted: true })
-    expect(log.append(anotherTombstone)).toBe('duplicate')
+    const anotherTombstone = makeEvent({ id, rev: 2, deleted: true, updatedAt: '2026-07-13T08:00:01.000Z' })
+    expect(log.append(anotherTombstone)).toBe('ok')
+    expect(log.getAllMutations()).toHaveLength(2)
   })
 })
 

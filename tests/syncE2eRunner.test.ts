@@ -12,10 +12,12 @@ import {
   buildSameRevisionConflicts,
   buildSeedSettings,
   isAllowedNetworkUrl,
+  makeMutationDocId,
   normalizeConvergence,
   parseEmulatorAddress,
   readJavaMajor,
   resolvePackagedExecutable,
+  selectMutationWinner,
 } from '../scripts/sync-e2e.mjs'
 
 describe('packaged cross-platform sync E2E runner contract', () => {
@@ -171,7 +173,20 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(a.deleted).toBe(false)
     expect(b.deleted).toBe(false)
     expect(a.at).not.toBe(b.at)
-    expect(a.updatedAt).not.toBe(b.updatedAt)
+    expect(a.updatedAt).toBe(b.updatedAt)
+    expect(a.mutationId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(b.mutationId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(a.mutationId).not.toBe(b.mutationId)
+    expect(selectMutationWinner([b, a])).toEqual(b)
+    expect(selectMutationWinner([a, b])).toEqual(b)
+    expect(normalizeConvergence([b, a])).toEqual([{
+      id: base.id,
+      rev: 2,
+      deleted: false,
+      mutationId: b.mutationId,
+    }])
+    expect(makeMutationDocId(a)).not.toBe(makeMutationDocId(b))
+    expect(makeMutationDocId(a)).not.toContain('/')
   })
 
   it('configures Auth and Firestore emulators with the UI disabled', () => {

@@ -1,6 +1,7 @@
 import { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult, FirebaseEmulatorBridge } from '../../shared/types'
 import type { HealthEvidenceSourceId } from '../../shared/healthEvidence'
 import { getEvidenceSourceById } from '../../shared/healthEvidence'
+import { getEventStorageKey, resolveLatestEvent } from '../../shared/eventResolver'
 
 declare global {
   interface Window {
@@ -8,6 +9,7 @@ declare global {
       getFirebaseEmulator: () => Promise<FirebaseEmulatorBridge | null>
       openEvidenceSource: (sourceId: HealthEvidenceSourceId) => Promise<void>
       listEvents: () => Promise<DiaryEvent[]>
+      listEventMutations: () => Promise<DiaryEvent[]>
       appendEvent: (event: DiaryEvent) => Promise<'ok' | 'duplicate' | 'error'>
       getSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<void>
@@ -57,18 +59,6 @@ function mockSaveEvents(events: DiaryEvent[]): void {
   } catch { /* ignore */ }
 }
 
-/** Resolve id+rev conflicts: higher rev wins */
-function mockMerge(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
-  const idx = list.findIndex(e => e.id === incoming.id)
-  if (idx === -1) return [...list, incoming]
-  if (incoming.rev > list[idx].rev) {
-    const next = [...list]
-    next[idx] = incoming
-    return next
-  }
-  return list
-}
-
 const mockBabyDiary: Window['babyDiary'] = {
   getFirebaseEmulator: async () => null,
 
@@ -79,23 +69,24 @@ const mockBabyDiary: Window['babyDiary'] = {
   },
 
   listEvents: async () => {
-    // Return max-rev per id (same logic as real JSONL layer)
     const all = mockGetEvents()
-    const map = new Map<string, DiaryEvent>()
+    const grouped = new Map<string, DiaryEvent[]>()
     for (const e of all) {
-      const prev = map.get(e.id)
-      if (!prev || e.rev > prev.rev) map.set(e.id, e)
+      const group = grouped.get(e.id) ?? []
+      group.push(e)
+      grouped.set(e.id, group)
     }
-    return Array.from(map.values())
+    return Array.from(grouped.values()).map(events => resolveLatestEvent(events)!).filter(Boolean)
   },
+
+  listEventMutations: async () => mockGetEvents(),
 
   appendEvent: async (event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> => {
     const all = mockGetEvents()
-    // Dedup: same id+rev is a no-op
-    const exists = all.some(e => e.id === event.id && e.rev === event.rev)
+    const mutationKey = getEventStorageKey(event)
+    const exists = all.some(existing => getEventStorageKey(existing) === mutationKey)
     if (exists) return 'duplicate'
-    const merged = mockMerge(all, event)
-    mockSaveEvents(merged)
+    mockSaveEvents([...all, event])
     // Notify listeners (simulate main→renderer push)
     setTimeout(() => {
       _mockListeners.forEach(cb => { try { cb(event) } catch { /* ignore */ } })
@@ -210,6 +201,7 @@ export const ipc = {
   openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> =>
     getApi().openEvidenceSource(sourceId),
   listEvents:       (): Promise<DiaryEvent[]>    => getApi().listEvents(),
+  listEventMutations: (): Promise<DiaryEvent[]> => getApi().listEventMutations(),
   appendEvent:      (event: DiaryEvent)          => getApi().appendEvent(event),
   getSettings:      (): Promise<AppSettings>     => getApi().getSettings(),
   saveSettings:     (settings: AppSettings)      => getApi().saveSettings(settings),

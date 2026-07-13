@@ -54,6 +54,41 @@ describe('makeDocId', () => {
     const e = makeEvent({ id, rev: 5 })
     expect(makeDocId(e)).toBe(`${id}_5`)
   })
+
+  it('same id+rev mutations receive distinct create-only document ids', () => {
+    const base = makeEvent({
+      id: 'shared-event',
+      rev: 2,
+      mutationId: '11111111-1111-4111-8111-111111111111',
+    })
+    const concurrent = {
+      ...base,
+      mutationId: '22222222-2222-4222-8222-222222222222',
+      data: { note: 'other offline edit' },
+    }
+
+    expect(makeDocId(base)).not.toBe(makeDocId(concurrent))
+    expect(makeDocId(base)).not.toContain('/')
+    expect(makeDocId(concurrent)).not.toContain('/')
+  })
+
+  it('reidentifies a reused mutation UUID by canonical payload without queue churn', () => {
+    const first = makeEvent({
+      id: 'shared-event',
+      rev: 2,
+      mutationId: '11111111-1111-4111-8111-111111111111',
+      data: { note: 'first payload' },
+    })
+    const second = { ...first, data: { note: 'second payload' } }
+    expect(makeDocId(first)).not.toBe(makeDocId(second))
+    expect(makeDocId(first)).toBe(makeDocId({ ...first, data: { note: 'first payload' } }))
+  })
+
+  it('rejects identities that cannot round-trip safely through Firestore', () => {
+    expect(() => makeDocId(makeEvent({ rev: Number.MAX_SAFE_INTEGER + 1 }))).toThrow(/rev/)
+    expect(() => makeDocId(makeEvent({ id: '가'.repeat(200) }))).toThrow(/id/)
+    expect(() => makeDocId(makeEvent({ updatedAt: '2026-07-13T08:00:00' }))).toThrow(/updatedAt/)
+  })
 })
 
 describe('parseDocId', () => {
@@ -87,6 +122,39 @@ describe('parseDocId', () => {
     expect(parsed).not.toBeNull()
     expect(parsed!.id).toBe(e.id)
     expect(parsed!.rev).toBe(7)
+  })
+
+  it('round-trips the new immutable mutation identity', () => {
+    const event = makeEvent({
+      id: 'shared_event',
+      rev: 7,
+      mutationId: '22222222-2222-4222-8222-222222222222',
+    })
+    expect(parseDocId(makeDocId(event))).toEqual({
+      id: event.id,
+      rev: 7,
+      mutationId: event.mutationId,
+      contentId: expect.any(String),
+    })
+  })
+
+  it('still decodes existing m2 immutable documents', () => {
+    expect(parseDocId('m2|shared-event|2|11111111-1111-4111-8111-111111111111')).toEqual({
+      id: 'shared-event',
+      rev: 2,
+      mutationId: '11111111-1111-4111-8111-111111111111',
+    })
+  })
+
+  it('preserves legacy ids that begin with the new-format namespace', () => {
+    const legacy = makeEvent({ id: 'm2|legacy-event', rev: 4 })
+    expect(parseDocId(makeDocId(legacy))).toEqual({ id: legacy.id, rev: 4 })
+  })
+
+  it('rejects non-canonical revisions and document path injection', () => {
+    expect(parseDocId('../../victim_2')).toBeNull()
+    expect(parseDocId('event_2junk')).toBeNull()
+    expect(parseDocId('event_0')).toBeNull()
   })
 })
 

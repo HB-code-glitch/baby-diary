@@ -129,6 +129,7 @@ export function DiaryPage() {
       } else {
         const event: DiaryEvent = {
           id: uuidv4(),
+          mutationId: uuidv4(),
           type: 'diary',
           at: time,
           data: { title, text } as DiaryData,

@@ -25,6 +25,7 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { v5 as uuidv5 } from 'uuid'
 
 export const FIREBASE_CLI_VERSION = '15.23.0'
 export const FIREBASE_PROJECT_ID = 'demo-baby-diary'
@@ -34,6 +35,7 @@ export const FIRESTORE_PORT = 8080
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
 const E2E_TIMEOUT_MS = 30_000
+const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message)
@@ -186,23 +188,64 @@ export function buildSeedSettings(deviceName) {
 }
 
 export function normalizeConvergence(events) {
-  const latest = new Map()
+  const grouped = new Map()
   for (const event of events) {
     if (!event || typeof event.id !== 'string') continue
-    const current = latest.get(event.id)
-    if (
-      !current
-      || event.rev > current.rev
-      || (event.rev === current.rev && event.deleted && !current.deleted)
-    ) {
-      latest.set(event.id, {
-        id: event.id,
-        rev: event.rev,
-        deleted: Boolean(event.deleted),
-      })
-    }
+    const group = grouped.get(event.id) ?? []
+    group.push(event)
+    grouped.set(event.id, group)
   }
-  return [...latest.values()].sort((a, b) => a.id.localeCompare(b.id))
+  return [...grouped.values()].map(group => {
+    const event = selectMutationWinner(group)
+    return {
+      id: event.id,
+      rev: event.rev,
+      deleted: Boolean(event.deleted),
+      ...(event.mutationId ? { mutationId: event.mutationId } : {}),
+    }
+  }).sort((a, b) => a.id.localeCompare(b.id))
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  return `{${Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+}
+
+function compareStrings(left, right) {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
+function mutationIdentity(event) {
+  if (typeof event.mutationId === 'string') {
+    return `mutation:${encodeURIComponent(event.id)}:${event.rev}:${event.mutationId}`
+  }
+  return `legacy:${encodeURIComponent(event.id)}:${event.rev}:${stableJson(event)}`
+}
+
+export function compareMutationEvents(left, right) {
+  if (left.rev !== right.rev) return left.rev < right.rev ? -1 : 1
+  if (Boolean(left.deleted) !== Boolean(right.deleted)) return left.deleted ? 1 : -1
+  const leftUpdatedAt = Number.isFinite(Date.parse(left.updatedAt)) ? Date.parse(left.updatedAt) : -Infinity
+  const rightUpdatedAt = Number.isFinite(Date.parse(right.updatedAt)) ? Date.parse(right.updatedAt) : -Infinity
+  if (leftUpdatedAt !== rightUpdatedAt) return leftUpdatedAt < rightUpdatedAt ? -1 : 1
+  const identityOrder = compareStrings(mutationIdentity(left), mutationIdentity(right))
+  if (identityOrder !== 0) return identityOrder
+  return compareStrings(stableJson(left), stableJson(right))
+}
+
+export function selectMutationWinner(events) {
+  invariant(Array.isArray(events) && events.length > 0, 'At least one mutation is required')
+  return events.reduce((winner, event) => compareMutationEvents(event, winner) > 0 ? event : winner)
+}
+
+export function makeMutationDocId(event) {
+  invariant(typeof event.id === 'string' && event.id.length > 0, 'Event id is required')
+  invariant(Number.isInteger(event.rev) && event.rev >= 1, 'Event revision is required')
+  invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(event.mutationId), 'Mutation id must be UUID v4')
+  const contentId = uuidv5(`baby-diary:event-content:${stableJson(event)}`, CONTENT_ID_NAMESPACE)
+  return `m3|${encodeURIComponent(event.id)}|${event.rev}|${event.mutationId}|${contentId}`
 }
 
 export function buildSameRevisionConflicts(baseEvent, nowMs = Date.now()) {
@@ -219,6 +262,7 @@ export function buildSameRevisionConflicts(baseEvent, nowMs = Date.now()) {
   return [
     {
       ...baseEvent,
+      mutationId: '11111111-1111-4111-8111-111111111111',
       at: shiftedAt(-45),
       updatedAt: new Date(nowMs).toISOString(),
       rev: baseEvent.rev + 1,
@@ -226,8 +270,9 @@ export function buildSameRevisionConflicts(baseEvent, nowMs = Date.now()) {
     },
     {
       ...baseEvent,
+      mutationId: '22222222-2222-4222-8222-222222222222',
       at: shiftedAt(45),
-      updatedAt: new Date(nowMs + 1).toISOString(),
+      updatedAt: new Date(nowMs).toISOString(),
       rev: baseEvent.rev + 1,
       deleted: false,
     },
@@ -455,6 +500,7 @@ async function openHome(device) {
 async function readSnapshot(device) {
   return device.page.evaluate(async () => ({
     events: await window.babyDiary.listEvents(),
+    mutations: await window.babyDiary.listEventMutations(),
     settings: await window.babyDiary.getSettings(),
     dataInfo: await window.babyDiary.getDataInfo(),
   }))
@@ -472,11 +518,13 @@ function convergencePayload(event) {
     updatedAt: event.updatedAt,
     rev: event.rev,
     deleted: event.deleted,
+    mutationId: event.mutationId,
   }
 }
 
-async function waitForConflictConvergence(deviceA, deviceB, eventId, allowedAt) {
+async function waitForConflictConvergence(deviceA, deviceB, expectedEvent) {
   const deadline = Date.now() + E2E_TIMEOUT_MS
+  const expected = convergencePayload(expectedEvent)
   let lastA = null
   let lastB = null
   while (Date.now() < deadline) {
@@ -484,13 +532,13 @@ async function waitForConflictConvergence(deviceA, deviceB, eventId, allowedAt) 
       readSnapshot(deviceA),
       readSnapshot(deviceB),
     ])
-    lastA = convergencePayload(snapshotA.events.find(event => event.id === eventId))
-    lastB = convergencePayload(snapshotB.events.find(event => event.id === eventId))
+    lastA = convergencePayload(snapshotA.events.find(event => event.id === expectedEvent.id))
+    lastB = convergencePayload(snapshotB.events.find(event => event.id === expectedEvent.id))
     if (
       lastA?.rev >= 2
       && lastB?.rev >= 2
       && JSON.stringify(lastA) === JSON.stringify(lastB)
-      && allowedAt.includes(lastA.at)
+      && JSON.stringify(lastA) === JSON.stringify(expected)
     ) {
       return lastA
     }
@@ -500,6 +548,14 @@ async function waitForConflictConvergence(deviceA, deviceB, eventId, allowedAt) 
   throw new Error(
     `Same-revision conflict did not converge: ${JSON.stringify(lastA)} / ${JSON.stringify(lastB)}`,
   )
+}
+
+async function readCloudEventDocIds(familyId) {
+  const endpoint = `http://127.0.0.1:${FIRESTORE_PORT}/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/families/${encodeURIComponent(familyId)}/events?pageSize=1000`
+  const response = await fetch(endpoint)
+  invariant(response.ok, `Firestore emulator document listing failed: ${response.status}`)
+  const payload = await response.json()
+  return (payload.documents ?? []).map(document => document.name.split('/').at(-1))
 }
 
 async function waitForEvent(device, expected) {
@@ -677,6 +733,7 @@ async function runInsideEmulators() {
     console.log('[sync-e2e] deterministic offline same-id/rev payload conflict')
     await Promise.all([closeDevice(a), closeDevice(b)])
     const [conflictA, conflictB] = buildSameRevisionConflicts(offlineForB)
+    const expectedConflict = selectMutationWinner([conflictA, conflictB])
     appendOfflineEvent(userDataA, conflictA)
     appendOfflineEvent(userDataB, conflictB)
     ;[a, b] = await Promise.all([
@@ -694,10 +751,25 @@ async function runInsideEmulators() {
     const convergedConflict = await waitForConflictConvergence(
       a,
       b,
-      offlineForB.id,
-      [conflictA.at, conflictB.at],
+      expectedConflict,
     )
     invariant(convergedConflict.deleted === false, 'Same-revision conflict unexpectedly deleted the event')
+    const [conflictSnapshotA, conflictSnapshotB, cloudDocIds] = await Promise.all([
+      readSnapshot(a),
+      readSnapshot(b),
+      readCloudEventDocIds(familyA),
+    ])
+    const expectedMutationIds = [conflictA.mutationId, conflictB.mutationId].sort()
+    for (const [name, snapshot] of [['A', conflictSnapshotA], ['B', conflictSnapshotB]]) {
+      const localMutationIds = snapshot.mutations
+        .filter(event => event.id === offlineForB.id && event.rev === conflictA.rev)
+        .map(event => event.mutationId)
+        .sort()
+      invariant(JSON.stringify(localMutationIds) === JSON.stringify(expectedMutationIds), `${name} did not preserve both conflict mutations: ${JSON.stringify(localMutationIds)}`)
+    }
+    for (const conflict of [conflictA, conflictB]) {
+      invariant(cloudDocIds.includes(makeMutationDocId(conflict)), `Cloud append-only log is missing mutation ${conflict.mutationId}`)
+    }
     assertCleanDiagnostics(blockedRequests, consoleErrors)
 
     console.log(`[sync-e2e] PASS ${JSON.stringify({ familyId: familyA, events: normalizedA, conflictRev: convergedConflict.rev, activeCount: 2 })}`)
