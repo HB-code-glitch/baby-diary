@@ -52,7 +52,11 @@ export async function initFirebase(
     persistentLocalCache,
     persistentMultipleTabManager,
   } = await import('firebase/firestore')
-  const { getAuth } = await import('firebase/auth')
+  const {
+    getAuth,
+    setPersistence,
+    browserLocalPersistence,
+  } = await import('firebase/auth')
 
   // 기존 앱이 있으면 삭제 후 재생성 (설정 변경 시)
   const existing = getApps().find(a => a.name === APP_NAME)
@@ -60,17 +64,30 @@ export async function initFirebase(
     await deleteApp(existing)
   }
 
-  _app = initializeApp(config, APP_NAME)
+  const app = initializeApp(config, APP_NAME)
 
   // Electron renderer에서는 IndexedDB 기반 persistentLocalCache 사용
   // 오프라인에서도 캐시된 데이터 읽기/쓰기 가능
-  _db = initializeFirestore(_app, {
+  const db = initializeFirestore(app, {
     localCache: persistentLocalCache({
       tabManager: persistentMultipleTabManager(),
     }),
   })
 
-  _auth = getAuth(_app)
+  const auth = getAuth(app)
+
+  // Make session restoration deterministic across macOS and Windows.
+  // Do not expose a half-initialized auth instance if persistence setup fails.
+  try {
+    await setPersistence(auth, browserLocalPersistence)
+  } catch (error) {
+    await deleteApp(app).catch(() => undefined)
+    throw error
+  }
+
+  _app = app
+  _db = db
+  _auth = auth
 
   return { db: _db, auth: _auth }
 }
@@ -89,9 +106,19 @@ export function getFirebaseAuth(): Auth | null {
 export async function fbSignIn(
   auth: Auth,
   email: string,
-  password: string
+  password: string,
+  keepLoggedIn = true,
 ): Promise<UserCredential> {
-  const { signInWithEmailAndPassword } = await import('firebase/auth')
+  const {
+    signInWithEmailAndPassword,
+    setPersistence,
+    browserLocalPersistence,
+    browserSessionPersistence,
+  } = await import('firebase/auth')
+  await setPersistence(
+    auth,
+    keepLoggedIn ? browserLocalPersistence : browserSessionPersistence,
+  )
   return signInWithEmailAndPassword(auth, email, password)
 }
 
@@ -99,9 +126,19 @@ export async function fbSignIn(
 export async function fbSignUp(
   auth: Auth,
   email: string,
-  password: string
+  password: string,
+  keepLoggedIn = true,
 ): Promise<UserCredential> {
-  const { createUserWithEmailAndPassword } = await import('firebase/auth')
+  const {
+    createUserWithEmailAndPassword,
+    setPersistence,
+    browserLocalPersistence,
+    browserSessionPersistence,
+  } = await import('firebase/auth')
+  await setPersistence(
+    auth,
+    keepLoggedIn ? browserLocalPersistence : browserSessionPersistence,
+  )
   return createUserWithEmailAndPassword(auth, email, password)
 }
 

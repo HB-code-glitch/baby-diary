@@ -115,6 +115,7 @@ function SignedOutView() {
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [keepLoggedIn, setKeepLoggedIn] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { settings, saveSettings } = useAppStore()
@@ -126,8 +127,8 @@ function SignedOutView() {
     setBusy(true)
     try {
       const user = mode === 'login'
-        ? await signIn(email, password)
-        : await signUp(email, password)
+        ? await signIn(email, password, keepLoggedIn)
+        : await signUp(email, password, keepLoggedIn)
 
       // Persist the real Firebase uid into settings.profile so that future
       // events and family membership use the authoritative uid, not the
@@ -186,6 +187,49 @@ function SignedOutView() {
           required
           autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
         />
+        <div style={{
+          background: 'var(--cream-100)',
+          border: '1px solid var(--stone-200)',
+          borderRadius: 10,
+          padding: '10px 12px',
+        }}>
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 9,
+            cursor: 'pointer',
+            color: 'var(--stone-700)',
+            fontSize: 12,
+            fontWeight: 600,
+          }}>
+            <input
+              type="checkbox"
+              name="keepLoggedIn"
+              checked={keepLoggedIn}
+              onChange={e => setKeepLoggedIn(e.target.checked)}
+              aria-describedby="sync-keep-logged-in-help"
+              style={{
+                width: 16,
+                height: 16,
+                margin: 0,
+                flexShrink: 0,
+                accentColor: 'var(--peach-500)',
+              }}
+            />
+            <span>{t('sync.keepLoggedIn')}</span>
+          </label>
+          <p
+            id="sync-keep-logged-in-help"
+            style={{
+              margin: '4px 0 0 25px',
+              color: 'var(--stone-500)',
+              fontSize: 11,
+              lineHeight: 1.5,
+            }}
+          >
+            {t('sync.keepLoggedInHelp')}
+          </p>
+        </div>
         {error && (
           <div style={{ fontSize: 12, color: 'var(--rose-500)', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
             <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />

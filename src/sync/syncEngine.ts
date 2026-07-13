@@ -357,16 +357,16 @@ export async function configure(cfg: FirebaseConfig | null, familyId: string): P
 }
 
 /** 회원가입 (신규 사용자) */
-export async function signUp(email: string, password: string): Promise<User> {
+export async function signUp(email: string, password: string, keepLoggedIn = true): Promise<User> {
   if (!_auth) throw new Error('Firebase not configured')
-  const cred = await fbSignUp(_auth, email, password)
+  const cred = await fbSignUp(_auth, email, password, keepLoggedIn)
   return cred.user
 }
 
 /** 로그인 */
-export async function signIn(email: string, password: string): Promise<User> {
+export async function signIn(email: string, password: string, keepLoggedIn = true): Promise<User> {
   if (!_auth) throw new Error('Firebase not configured')
-  const cred = await fbSignIn(_auth, email, password)
+  const cred = await fbSignIn(_auth, email, password, keepLoggedIn)
   return cred.user
 }
 

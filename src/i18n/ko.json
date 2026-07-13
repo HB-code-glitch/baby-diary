@@ -370,6 +370,8 @@
     "errorSaveFailed": "설정 저장 중 오류가 발생했습니다.",
     "login": "로그인",
     "signup": "회원가입",
+    "keepLoggedIn": "로그인 상태 유지",
+    "keepLoggedInHelp": "이 기기에서 앱을 다시 열어도 로그인 상태를 유지합니다.",
     "emailPlaceholder": "이메일",
     "passwordPlaceholder": "비밀번호",
     "passwordSignupPlaceholder": "비밀번호 (6자 이상)",

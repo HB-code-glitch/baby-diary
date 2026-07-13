@@ -370,6 +370,8 @@
     "errorSaveFailed": "設定の保存中にエラーが発生しました。",
     "login": "ログイン",
     "signup": "新規登録",
+    "keepLoggedIn": "ログイン状態を保持する",
+    "keepLoggedInHelp": "この端末でアプリを再度開いてもログイン状態を保持します。",
     "emailPlaceholder": "メールアドレス",
     "passwordPlaceholder": "パスワード",
     "passwordSignupPlaceholder": "パスワード（6文字以上）",
