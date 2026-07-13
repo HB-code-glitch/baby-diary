@@ -526,13 +526,15 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
           <BreastfeedingGuideCard lang={i18nInstance.language as 'ko' | 'ja'} />
 
           {/* Sync section */}
-          <DisclosureSection
-            title={t('settings.syncSection')}
-            summary={syncSummary}
-            defaultOpen={syncPresentation.defaultOpen}
-          >
-            <SyncSettingsSlot />
-          </DisclosureSection>
+          <div data-tour="settings-sync">
+            <DisclosureSection
+              title={t('settings.syncSection')}
+              summary={syncSummary}
+              defaultOpen={syncPresentation.defaultOpen}
+            >
+              <SyncSettingsSlot />
+            </DisclosureSection>
+          </div>
 
           {/* Tutorial replay */}
           {onStartTour && (
@@ -542,6 +544,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   className="btn-secondary"
                   style={{ width: '100%', textAlign: 'center' }}
                   onClick={onStartTour}
+                  data-tutorial-replay
                 >
                   {t('tour.replayBtn')}
                 </button>

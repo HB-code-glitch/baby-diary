@@ -21,6 +21,7 @@ import {
   type HomeInsightKey,
   type HomeMetricKey,
 } from '../lib/progressiveDisclosure'
+import { isTutorialShortcutBlocked } from '../lib/tutorial'
 
 // ---------------------------------------------------------------------------
 // Milestone dismiss persistence
@@ -1678,7 +1679,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
       if (popover || sleepConfirmAnchor || feverModal || timeEditEvent || feedingTip) return
       // P24: Suppress digit shortcuts while the tutorial overlay is active.
       // Pressing '1' during tour would silently record a pee event under the overlay.
-      if (document.querySelector('.tour-overlay, .tour-overlay-strip')) return
+      if (isTutorialShortcutBlocked()) return
 
       // Digits work from main view (quick-record row always visible) or from the menu
       switch (e.key) {

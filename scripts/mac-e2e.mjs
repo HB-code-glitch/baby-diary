@@ -36,6 +36,12 @@ async function shot(page, name) {
   screenshotIndex++
   const idx = String(screenshotIndex).padStart(2, '0')
   const file = path.join(SCREENSHOTS_DIR, `${idx}-${name}.png`)
+  await page.waitForFunction(() => {
+    const card = document.querySelector('.tour-card')
+    return !card || card.getAnimations().every(animation =>
+      animation.playState === 'finished' || animation.playState === 'idle'
+    )
+  }, undefined, { timeout: 2000 })
   await page.screenshot({ path: file, fullPage: false })
   console.log(`  📸 ${idx}-${name}.png`)
   return file
@@ -54,6 +60,66 @@ async function waitForQuickRecordAnimations(page) {
     },
     undefined,
     { timeout: 1000 },
+  )
+}
+
+/** Wait for a V2 tutorial step and verify its localized title. */
+async function waitForTourTitle(page, expectedTitle) {
+  await page.waitForSelector('.tour-card', { timeout: 10000 })
+  await page.waitForFunction(
+    title => document.querySelector('.tour-title')?.textContent?.trim() === title,
+    expectedTitle,
+    { timeout: 5000 },
+  )
+  const actualTitle = await page.locator('.tour-title').textContent()
+  assert(actualTitle?.trim() === expectedTitle, `tutorial title is '${expectedTitle}'`)
+}
+
+/** Return true when a Playwright bounding box is fully inside the viewport. */
+function isInsideViewport(bounds, width, height) {
+  return !!bounds
+    && bounds.x >= 0
+    && bounds.y >= 0
+    && bounds.x + bounds.width <= width
+    && bounds.y + bounds.height <= height
+}
+
+/** Verify every persistent tutorial surface fits a compact viewport without horizontal scrolling. */
+async function assertTourFitsViewport(page, label, width = 720, height = 560) {
+  await page.waitForFunction(() => {
+    const card = document.querySelector('.tour-card')
+    return card && card.getAnimations().every(animation =>
+      animation.playState === 'finished' || animation.playState === 'idle'
+    )
+  }, undefined, { timeout: 2000 })
+
+  const [cardBounds, headerBounds, actionBounds] = await Promise.all([
+    page.locator('.tour-card').boundingBox(),
+    page.locator('.tour-card-header').boundingBox(),
+    page.locator('.tour-actions').boundingBox(),
+  ])
+  assert(isInsideViewport(cardBounds, width, height), `${label} card is inside the compact viewport`)
+  assert(isInsideViewport(headerBounds, width, height), `${label} header is inside the compact viewport`)
+  assert(isInsideViewport(actionBounds, width, height), `${label} actions are inside the compact viewport`)
+
+  const overflow = await page.evaluate(() => {
+    const root = document.documentElement
+    const body = document.body
+    const card = document.querySelector('.tour-card')
+    return {
+      rootClientWidth: root.clientWidth,
+      rootScrollWidth: root.scrollWidth,
+      bodyClientWidth: body.clientWidth,
+      bodyScrollWidth: body.scrollWidth,
+      cardClientWidth: card?.clientWidth ?? 0,
+      cardScrollWidth: card?.scrollWidth ?? Number.POSITIVE_INFINITY,
+    }
+  })
+  assert(
+    overflow.rootScrollWidth <= overflow.rootClientWidth
+      && overflow.bodyScrollWidth <= overflow.bodyClientWidth
+      && overflow.cardScrollWidth <= overflow.cardClientWidth,
+    `${label} has no horizontal overflow`,
   )
 }
 
@@ -106,7 +172,7 @@ async function main() {
     })
 
     const page = await app.firstWindow()
-    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.setViewportSize({ width: 960, height: 640 })
 
     // Collect console errors (filter known-benign)
     page.on('console', msg => {
@@ -138,34 +204,223 @@ async function main() {
     assert(pickerGone, 'language picker dismissed after selecting Korean')
 
     // ---------------------------------------------------------------------------
-    // 1. Window title + tutorial overlay
+    // 1. V2 tutorial lifecycle: Korean first launch + Japanese replay
     // ---------------------------------------------------------------------------
-    console.log('\n[1] Window title + tutorial')
+    console.log('\n[1] Bilingual V2 tutorial lifecycle')
 
-    await page.waitForSelector('.tour-tooltip', { timeout: 10000 })
+    await waitForTourTitle(page, '필요한 것부터, 천천히')
     const title = await app.evaluate(({ BrowserWindow }) => {
       return BrowserWindow.getAllWindows()[0]?.getTitle()
     })
     assert(title === 'Baby Diary', `window title is 'Baby Diary' (got '${title}')`)
 
-    await shot(page, 'tutorial-step1')
+    const koWelcomeSkip = page.locator('.tour-actions .tour-skip-button')
+    const koWelcomeStart = page.locator('.tour-primary-button')
+    assert(await koWelcomeSkip.isVisible(), 'Korean welcome skip action is visible')
+    assert((await koWelcomeSkip.textContent())?.trim() === '튜토리얼 건너뛰기', 'Korean welcome skip text is correct')
+    assert(await koWelcomeStart.isVisible(), 'Korean welcome start action is visible')
+    assert((await koWelcomeStart.textContent())?.trim() === '둘러보기 시작', 'Korean welcome start text is correct')
+    const koProgressCount = await page.locator('.tour-progress-segment').count()
+    assert(koProgressCount === 6, `V2 tutorial shows 6 progress segments (got ${koProgressCount})`)
+    await shot(page, 'tutorial-ko-welcome')
 
-    // Click 다음 (Next) twice
-    await page.click('.tour-next-btn')
+    await koWelcomeSkip.click()
+    await page.waitForSelector('.tour-card', { state: 'detached', timeout: 5000 })
+    const skippedState = await page.evaluate(() => JSON.parse(localStorage.getItem('babydiary.tutorial.v2')))
+    assert(
+      skippedState?.version === 2 && skippedState?.status === 'skipped',
+      'skip persists tutorial v2 state',
+    )
+
+    await page.reload()
+    await page.waitForSelector('[data-tour="nav-settings"]', { timeout: 10000 })
+    await page.waitForTimeout(700)
+    assert(await page.locator('.tour-card').count() === 0, 'reload does not automatically show a skipped tutorial')
+    assert(await page.locator('.lang-picker-overlay').count() === 0, 'reload does not show the language picker again')
+
+    // Replay from Settings, advance once, then verify Back returns to welcome.
+    await page.click('[data-tour="nav-settings"]')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+    await page.click('[data-tutorial-replay]')
+    await waitForTourTitle(page, '필요한 것부터, 천천히')
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, '한 번 눌러 오늘을 남겨요')
+    const koBack = page.locator('.tour-back-button')
+    assert((await koBack.textContent())?.trim() === '이전', 'Korean replay shows Back on step 2')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === '다음', 'Korean replay shows Next on step 2')
+    await koBack.click()
+    await waitForTourTitle(page, '필요한 것부터, 천천히')
+    await page.click('.tour-actions .tour-skip-button')
+    await page.waitForSelector('.tour-card', { state: 'detached', timeout: 5000 })
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+
+    // Switch language through the real Settings UI, then finish all six steps.
+    await page.click('[data-tour="settings-main"] button[lang="ja"]')
+    await page.waitForFunction(() => document.documentElement.dataset.lang === 'ja')
+    assert(
+      await page.locator('[data-tour="settings-main"] button[lang="ja"]').evaluate(el => el.classList.contains('selected')),
+      'Japanese language is selected in Settings',
+    )
+    await page.setViewportSize({ width: 1200, height: 800 })
+    await page.click('[data-tutorial-replay]')
+    await waitForTourTitle(page, '必要なところから、ゆっくり')
+    assert((await page.locator('.tour-actions .tour-skip-button').textContent())?.trim() === 'チュートリアルをスキップ', 'Japanese welcome skip text is correct')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === 'ツアーを始める', 'Japanese welcome start text is correct')
+
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, 'ワンタップで今日を残せます')
+    assert((await page.locator('.tour-back-button').textContent())?.trim() === '戻る', 'Japanese contextual Back text is correct')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === '次へ', 'Japanese contextual Next text is correct')
+    assert((await page.locator('.tour-card-header .tour-skip-button').textContent())?.trim() === 'チュートリアルをスキップ', 'Japanese contextual skip text is correct')
+
+    const eventCountBeforeShortcut = await page.evaluate(async () => (await window.babyDiary.listEvents()).length)
+    await page.keyboard.press('1')
     await page.waitForTimeout(300)
-    await shot(page, 'tutorial-step2')
+    const eventCountAfterShortcut = await page.evaluate(async () => (await window.babyDiary.listEvents()).length)
+    assert(
+      eventCountAfterShortcut === eventCountBeforeShortcut,
+      `digit shortcut 1 is blocked during quick-record tutorial (${eventCountBeforeShortcut}/${eventCountAfterShortcut})`,
+    )
+    await shot(page, 'tutorial-ja-context')
 
-    await page.click('.tour-next-btn')
-    await page.waitForTimeout(300)
-    await shot(page, 'tutorial-step3')
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, '今日の流れをひと目で')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === '次へ', 'Japanese overview shows Next')
 
-    // Skip tour entirely
-    await page.click('.tour-skip-pill')
-    await page.waitForTimeout(500)
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, 'あとから、ゆっくり振り返れます')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === '次へ', 'Japanese navigation shows Next')
 
-    // Tour should be gone
-    const tourGone = await page.$('.tour-tooltip') === null
-    assert(tourGone, 'tutorial overlay dismissed after skip')
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, '設定で必要なものだけつなげます')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === '次へ', 'Japanese family-settings step shows Next')
+    await page.waitForSelector('.tour-spotlight-ring', { timeout: 5000 })
+    const settingsRingBounds = await page.locator('.tour-spotlight-ring').boundingBox()
+    const settingsShieldBounds = await page.locator('.tour-target-shield').boundingBox()
+    assert(isInsideViewport(settingsRingBounds, 1200, 800), 'settings-family spotlight ring is inside the viewport')
+    assert(isInsideViewport(settingsShieldBounds, 1200, 800), 'settings-family target shield is inside the viewport')
+
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, '最初の記録を残してみましょう')
+    assert((await page.locator('.tour-primary-button').textContent())?.trim() === '記録を始める', 'Japanese ready step shows Finish')
+    await shot(page, 'tutorial-ja-ready')
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('.tour-card', { state: 'detached', timeout: 5000 })
+
+    const completedState = await page.evaluate(() => JSON.parse(localStorage.getItem('babydiary.tutorial.v2')))
+    assert(
+      completedState?.version === 2 && completedState?.status === 'completed',
+      'Japanese six-step completion persists tutorial v2 final state',
+    )
+
+    // Compact replay: persistent card surfaces fit at representative steps and background stays inert.
+    await page.click('[data-tour="nav-settings"]')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+    await page.setViewportSize({ width: 720, height: 560 })
+    const rootInertBeforeTour = await page.locator('#root').evaluate(root => ({
+      property: root.inert,
+      attribute: root.getAttribute('inert'),
+    }))
+    await page.click('[data-tutorial-replay]')
+    await waitForTourTitle(page, '必要なところから、ゆっくり')
+    const inertFocusState = await page.evaluate(() => {
+      const root = document.getElementById('root')
+      const primary = document.querySelector('.tour-primary-button')
+      const backgroundButton = document.querySelector('[data-tour="nav-settings"]')
+      const card = document.querySelector('.tour-card')
+      primary?.focus()
+      const primaryReceivedFocus = document.activeElement === primary
+      backgroundButton?.focus()
+      return {
+        rootInert: root?.inert === true && root.hasAttribute('inert'),
+        primaryReceivedFocus,
+        backgroundReceivedFocus: document.activeElement === backgroundButton,
+        focusRemainedInTour: !!card?.contains(document.activeElement),
+      }
+    })
+    assert(inertFocusState.rootInert, '#root is inert while the tutorial is open')
+    assert(inertFocusState.primaryReceivedFocus, 'tutorial primary action receives focus outside the inert root')
+    assert(
+      !inertFocusState.backgroundReceivedFocus && inertFocusState.focusRemainedInTour,
+      'background controls cannot receive programmatic focus while the tutorial is open',
+    )
+    await assertTourFitsViewport(page, 'compact welcome')
+    await shot(page, 'tutorial-ja-compact-720x560')
+
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-quick-record', { timeout: 5000 })
+    await assertTourFitsViewport(page, 'compact quick-record')
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-today-overview', { timeout: 5000 })
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-navigation', { timeout: 5000 })
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-settings-family', { timeout: 5000 })
+    await assertTourFitsViewport(page, 'compact settings-family')
+    await page.click('.tour-primary-button')
+    await page.waitForSelector('#tour-title-ready', { timeout: 5000 })
+    await assertTourFitsViewport(page, 'compact ready')
+
+    // Escape from a Settings replay skips the tour and restores Settings/focus.
+    await page.keyboard.press('Escape')
+    await page.waitForSelector('.tour-card', { state: 'detached', timeout: 5000 })
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+    assert(await page.locator('[data-tour="settings-main"]').isVisible(), 'Escape returns a Settings replay to Settings')
+    await page.waitForFunction(() => document.activeElement?.matches('[data-tutorial-replay]'))
+    const restoredAfterTour = await page.evaluate(before => {
+      const root = document.getElementById('root')
+      return {
+        inertRestored: root?.inert === before.property && root?.getAttribute('inert') === before.attribute,
+        replayFocused: document.activeElement?.matches('[data-tutorial-replay]') === true,
+      }
+    }, rootInertBeforeTour)
+    assert(restoredAfterTour.inertRestored, '#root inert state is restored after the tutorial closes')
+    assert(restoredAfterTour.replayFocused, 'Escape restores focus to the Settings replay button')
+
+    // Dark-mode tutorial capture at the full 1200×800 review viewport.
+    await page.setViewportSize({ width: 1200, height: 800 })
+    const jaDarkButton = page.locator('[data-tour="settings-main"] .toggle-btn').filter({ hasText: 'ダーク' }).first()
+    assert(await jaDarkButton.isVisible(), 'Japanese dark theme button is visible')
+    await jaDarkButton.click()
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark')
+    await page.click('[data-tutorial-replay]')
+    await waitForTourTitle(page, '必要なところから、ゆっくり')
+    await shot(page, 'tutorial-ja-dark-1200x800')
+    await page.click('.tour-actions .tour-skip-button')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+
+    // Reduced motion must disable both the card entrance and contextual ring.
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.click('[data-tutorial-replay]')
+    await waitForTourTitle(page, '必要なところから、ゆっくり')
+    await page.click('.tour-primary-button')
+    await waitForTourTitle(page, 'ワンタップで今日を残せます')
+    await page.waitForSelector('.tour-spotlight-ring', { timeout: 5000 })
+    const reducedTutorialAnimations = await page.evaluate(() => ({
+      card: getComputedStyle(document.querySelector('.tour-card')).animationName,
+      ring: getComputedStyle(document.querySelector('.tour-spotlight-ring')).animationName,
+    }))
+    assert(
+      reducedTutorialAnimations.card === 'none' && reducedTutorialAnimations.ring === 'none',
+      `reduced motion disables tutorial card/ring animation (${reducedTutorialAnimations.card}/${reducedTutorialAnimations.ring})`,
+    )
+    await shot(page, 'tutorial-ja-reduced-motion-1200x800')
+    await page.keyboard.press('Escape')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+
+    // Restore conditions expected by the remaining broad Korean smoke test.
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    const jaLightButton = page.locator('[data-tour="settings-main"] .toggle-btn').filter({ hasText: 'ライト' }).first()
+    assert(await jaLightButton.isVisible(), 'Japanese light theme button is visible')
+    await jaLightButton.click()
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light')
+    await page.click('[data-tour="settings-main"] button[lang="ko"]')
+    await page.waitForFunction(() => document.documentElement.dataset.lang === 'ko')
+    assert(
+      await page.locator('[data-tour="settings-main"] button[lang="ko"]').evaluate(el => el.classList.contains('selected')),
+      'Korean language is restored for remaining E2E scenarios',
+    )
+    await page.setViewportSize({ width: 1280, height: 800 })
 
     // ---------------------------------------------------------------------------
     // 2. Settings: baby info
@@ -739,8 +994,8 @@ async function main() {
       failures.push(`${errorCount} unexpected console error(s): ${consoleErrors.slice(0, 3).join(' | ')}`)
     }
 
-    if (screenshotIndex !== 24) {
-      failures.push(`Expected exactly 24 screenshots, got ${screenshotIndex}`)
+    if (screenshotIndex !== 27) {
+      failures.push(`Expected exactly 27 screenshots, got ${screenshotIndex}`)
     }
 
     // Write result JSON

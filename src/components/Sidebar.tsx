@@ -56,7 +56,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const [avatarBg, avatarFg] = nameToWarmPair(babyName)
 
   return (
-    <nav className="sidebar">
+    <nav className="sidebar" data-tour="navigation">
       <div className="sidebar-header">
         {/* Wordmark */}
         <div className="sidebar-logo">Baby Diary</div>

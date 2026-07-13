@@ -1,211 +1,20 @@
-/**
- * TutorialTour — spotlight coachmark tour (10 steps)
- *
- * Design requirements:
- * - Dark overlay with spotlight cutout (box-shadow technique)
- * - Tooltip card positioned adjacent to target, viewport-clamped
- * - Progress dots (bottom-center), skip pill (bottom-left)
- * - Esc=skip, Enter=next
- * - Overlay click = no-op
- * - Persists completion to localStorage('babydiary.tutorialDone')
- * - prefers-reduced-motion aware
- * - z-index 1300 (topmost)
- * - Works at 960x640+
- */
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import type { Page } from './Sidebar'
+import { TutorialCard } from './TutorialCard'
+import {
+  markTutorialExit,
+  TUTORIAL_STEPS,
+  type TutorialExitReason,
+  type TutorialPlacement,
+} from '../lib/tutorial'
 
-import React, { useEffect, useState, useRef, useCallback } from 'react'
-import { useTranslation } from 'react-i18next'
-import { Page } from './Sidebar'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface TourStep {
-  id: string
-  page: Page
-  /** CSS selector using data-tour attribute, e.g. '[data-tour="nav-home"]' */
-  targetSelector?: string
-  titleKey: string
-  bodyKey: string
-  /** Preferred placement: 'right' | 'left' | 'bottom' | 'top' | 'center' */
-  placement: 'right' | 'left' | 'bottom' | 'top' | 'center'
-}
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
 
 interface TutorialTourProps {
   onNavigate: (page: Page) => void
-  onDone: () => void
+  onExit: (reason: TutorialExitReason) => void
 }
-
-// ---------------------------------------------------------------------------
-// localStorage helpers
-// ---------------------------------------------------------------------------
-
-const STORAGE_KEY = 'babydiary.tutorialDone'
-
-export function isTutorialDone(): boolean {
-  try {
-    return localStorage.getItem(STORAGE_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-export function markTutorialDone(): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, '1')
-  } catch { /* ignore */ }
-}
-
-export function resetTutorial(): void {
-  try {
-    localStorage.removeItem(STORAGE_KEY)
-  } catch { /* ignore */ }
-}
-
-// ---------------------------------------------------------------------------
-// Tour steps definition (10 steps)
-// ---------------------------------------------------------------------------
-
-const STEPS: TourStep[] = [
-  {
-    id: 'nav-home',
-    page: 'home',
-    targetSelector: '[data-tour="nav-home"]',
-    titleKey: 'tour.step1Title',
-    bodyKey: 'tour.step1Body',
-    placement: 'right',
-  },
-  {
-    id: 'quick-row',
-    page: 'home',
-    targetSelector: '[data-tour="quick-row"]',
-    titleKey: 'tour.step2Title',
-    bodyKey: 'tour.step2Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'hero',
-    page: 'home',
-    targetSelector: '[data-tour="hero"]',
-    titleKey: 'tour.step3Title',
-    bodyKey: 'tour.step3Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'insights',
-    page: 'home',
-    targetSelector: '[data-tour="insights"]',
-    titleKey: 'tour.step4Title',
-    bodyKey: 'tour.step4Body',
-    placement: 'left',
-  },
-  {
-    id: 'calendar',
-    page: 'history',
-    targetSelector: '[data-tour="calendar"]',
-    titleKey: 'tour.step5Title',
-    bodyKey: 'tour.step5Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'stats',
-    page: 'stats',
-    targetSelector: '[data-tour="stats"]',
-    titleKey: 'tour.step6Title',
-    bodyKey: 'tour.step6Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'diary',
-    page: 'diary',
-    targetSelector: '[data-tour="diary"]',
-    titleKey: 'tour.step7Title',
-    bodyKey: 'tour.step7Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'messages',
-    page: 'messages',
-    targetSelector: '[data-tour="messages"]',
-    titleKey: 'tour.step8Title',
-    bodyKey: 'tour.step8Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'settings-main',
-    page: 'settings',
-    targetSelector: '[data-tour="settings-main"]',
-    titleKey: 'tour.step9Title',
-    bodyKey: 'tour.step9Body',
-    placement: 'bottom',
-  },
-  {
-    id: 'finish',
-    page: 'home',
-    targetSelector: undefined,
-    titleKey: 'tour.step10Title',
-    bodyKey: 'tour.step10Body',
-    placement: 'center',
-  },
-]
-
-// ---------------------------------------------------------------------------
-// TourBody — renders body text with per-line bullet dots for multi-line strings
-// ---------------------------------------------------------------------------
-
-function TourBody({ text }: { text: string }) {
-  const lines = text.split('\n')
-  const isMulti = lines.length > 1
-
-  if (!isMulti) {
-    return (
-      <div className="tour-body" style={{ fontSize: 13.5, lineHeight: 1.55 }}>
-        {text}
-      </div>
-    )
-  }
-
-  return (
-    <div className="tour-body" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {lines.map((line, i) => (
-        <div
-          key={i}
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 7,
-            fontSize: 13.5,
-            lineHeight: 1.55,
-          }}
-        >
-          <span
-            aria-hidden="true"
-            style={{
-              flexShrink: 0,
-              marginTop: '0.3em',
-              width: 5,
-              height: 5,
-              borderRadius: '50%',
-              background: 'var(--color-accent, #f4b95e)',
-              display: 'inline-block',
-            }}
-          />
-          <span>{line}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Geometry helpers
-// ---------------------------------------------------------------------------
-
-const PADDING = 6       // spotlight padding around target
-const TOOLTIP_W = 400   // tooltip card width
-const TOOLTIP_H = 180   // estimated tooltip height
-const EDGE_GAP = 12     // minimum gap from viewport edge
 
 interface Rect {
   top: number
@@ -214,410 +23,415 @@ interface Rect {
   height: number
 }
 
-interface TooltipPosition {
-  top?: number
-  left?: number
-  bottom?: number
-  right?: number
-  transform?: string
+interface Viewport {
+  width: number
+  height: number
 }
 
-function computeTooltipPosition(
+interface MeasurableTutorialTarget {
+  getBoundingClientRect: () => Rect
+  scrollIntoView: (options: ScrollIntoViewOptions) => void
+}
+
+const SPOTLIGHT_PADDING = 6
+const CARD_WIDTH = 400
+const EDGE_GAP = 12
+const TARGET_GAP = 12
+const TARGET_REVEAL_DELAY_MS = 180
+const TARGET_WAIT_TIMEOUT_MS = 2500
+
+interface WaitForTutorialTargetOptions<Target> {
+  findTarget: () => Target | null
+  observe: (onMutation: () => void) => () => void
+  scheduleFallback: (onTimeout: () => void) => () => void
+  onResolve: (target: Target | null) => void
+}
+
+interface TutorialPresentation {
+  stepIndex: number
+  targetRect: Rect | null
+}
+
+export function presentationForTutorialStep<Presentation extends { stepIndex: number }>(
+  presentation: Presentation | null,
+  stepIndex: number,
+): Presentation | null {
+  return presentation?.stepIndex === stepIndex ? presentation : null
+}
+
+export function waitForTutorialTarget<Target>({
+  findTarget,
+  observe,
+  scheduleFallback,
+  onResolve,
+}: WaitForTutorialTargetOptions<Target>): () => void {
+  let settled = false
+  let stopObserving: (() => void) | null = null
+  let cancelFallback: (() => void) | null = null
+
+  const releaseResources = () => {
+    const stop = stopObserving
+    const cancel = cancelFallback
+    stopObserving = null
+    cancelFallback = null
+    stop?.()
+    cancel?.()
+  }
+
+  const settle = (target: Target | null) => {
+    if (settled) return
+    settled = true
+    releaseResources()
+    onResolve(target)
+  }
+
+  const findAndResolve = () => {
+    const target = findTarget()
+    if (target) settle(target)
+  }
+
+  findAndResolve()
+  if (!settled) {
+    stopObserving = observe(findAndResolve)
+    if (settled) releaseResources()
+  }
+  if (!settled) {
+    cancelFallback = scheduleFallback(() => settle(null))
+    if (settled) releaseResources()
+  }
+
+  return () => {
+    if (settled) return
+    settled = true
+    releaseResources()
+  }
+}
+
+function currentViewport(): Viewport {
+  if (typeof window === 'undefined') return { width: 960, height: 640 }
+  return { width: window.innerWidth, height: window.innerHeight }
+}
+
+export function measureTutorialTarget(target: MeasurableTutorialTarget, viewport: Viewport): Rect {
+  const initialRect = target.getBoundingClientRect()
+  const isOversized = initialRect.height > viewport.height || initialRect.width > viewport.width
+  const isOutsideViewport = initialRect.top < 0
+    || initialRect.left < 0
+    || initialRect.top + initialRect.height > viewport.height
+    || initialRect.left + initialRect.width > viewport.width
+
+  if (!isOutsideViewport || isOversized) return initialRect
+
+  target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' })
+  return target.getBoundingClientRect()
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(value, Math.max(minimum, maximum)))
+}
+
+function computeCardPosition(
   targetRect: Rect | null,
-  placement: TourStep['placement'],
-  vw: number,
-  vh: number
-): TooltipPosition {
+  placement: TutorialPlacement,
+  viewport: Viewport,
+  cardHeight: number,
+): React.CSSProperties {
+  const cardWidth = Math.min(CARD_WIDTH, viewport.width - EDGE_GAP * 2)
+  const maxLeft = viewport.width - cardWidth - EDGE_GAP
+  const maxTop = viewport.height - cardHeight - EDGE_GAP
+
   if (!targetRect || placement === 'center') {
-    // Centered in viewport
     return {
-      top: '50%' as unknown as number,
-      left: '50%' as unknown as number,
-      transform: 'translate(-50%, -50%)',
+      top: clamp((viewport.height - cardHeight) / 2, EDGE_GAP, maxTop),
+      left: clamp((viewport.width - cardWidth) / 2, EDGE_GAP, maxLeft),
     }
   }
 
-  const { top, left, width, height } = targetRect
   const padded = {
-    top: top - PADDING,
-    left: left - PADDING,
-    width: width + PADDING * 2,
-    height: height + PADDING * 2,
+    top: targetRect.top - SPOTLIGHT_PADDING,
+    left: targetRect.left - SPOTLIGHT_PADDING,
+    width: targetRect.width + SPOTLIGHT_PADDING * 2,
+    height: targetRect.height + SPOTLIGHT_PADDING * 2,
   }
-
-  let pos: TooltipPosition = {}
+  const centeredTop = padded.top + padded.height / 2 - cardHeight / 2
+  const centeredLeft = padded.left + padded.width / 2 - cardWidth / 2
 
   switch (placement) {
-    case 'right': {
-      const rawLeft = padded.left + padded.width + 12
-      const clampedLeft = Math.min(rawLeft, vw - TOOLTIP_W - EDGE_GAP)
-      const rawTop = padded.top + padded.height / 2 - TOOLTIP_H / 2
-      const clampedTop = Math.max(EDGE_GAP, Math.min(rawTop, vh - TOOLTIP_H - EDGE_GAP))
-      pos = { top: clampedTop, left: clampedLeft }
-      break
-    }
-    case 'left': {
-      const rawLeft = padded.left - TOOLTIP_W - 12
-      const clampedLeft = Math.max(EDGE_GAP, rawLeft)
-      const rawTop = padded.top + padded.height / 2 - TOOLTIP_H / 2
-      const clampedTop = Math.max(EDGE_GAP, Math.min(rawTop, vh - TOOLTIP_H - EDGE_GAP))
-      pos = { top: clampedTop, left: clampedLeft }
-      break
-    }
+    case 'right':
+      return {
+        top: clamp(centeredTop, EDGE_GAP, maxTop),
+        left: clamp(padded.left + padded.width + TARGET_GAP, EDGE_GAP, maxLeft),
+      }
+    case 'left':
+      return {
+        top: clamp(centeredTop, EDGE_GAP, maxTop),
+        left: clamp(padded.left - cardWidth - TARGET_GAP, EDGE_GAP, maxLeft),
+      }
     case 'bottom': {
-      const rawTop = padded.top + padded.height + 12
-      // Flip above if overflows
-      const fitsBelow = rawTop + TOOLTIP_H < vh - EDGE_GAP
-      const finalTop = fitsBelow ? rawTop : padded.top - TOOLTIP_H - 12
-      const rawLeft = padded.left + padded.width / 2 - TOOLTIP_W / 2
-      const clampedLeft = Math.max(EDGE_GAP, Math.min(rawLeft, vw - TOOLTIP_W - EDGE_GAP))
-      pos = { top: Math.max(EDGE_GAP, finalTop), left: clampedLeft }
-      break
+      const below = padded.top + padded.height + TARGET_GAP
+      const top = below + cardHeight <= viewport.height - EDGE_GAP
+        ? below
+        : padded.top - cardHeight - TARGET_GAP
+      return {
+        top: clamp(top, EDGE_GAP, maxTop),
+        left: clamp(centeredLeft, EDGE_GAP, maxLeft),
+      }
     }
     case 'top': {
-      const rawTop = padded.top - TOOLTIP_H - 12
-      const fitsAbove = rawTop > EDGE_GAP
-      const finalTop = fitsAbove ? rawTop : padded.top + padded.height + 12
-      const rawLeft = padded.left + padded.width / 2 - TOOLTIP_W / 2
-      const clampedLeft = Math.max(EDGE_GAP, Math.min(rawLeft, vw - TOOLTIP_W - EDGE_GAP))
-      pos = { top: Math.max(EDGE_GAP, finalTop), left: clampedLeft }
-      break
+      const above = padded.top - cardHeight - TARGET_GAP
+      const top = above >= EDGE_GAP
+        ? above
+        : padded.top + padded.height + TARGET_GAP
+      return {
+        top: clamp(top, EDGE_GAP, maxTop),
+        left: clamp(centeredLeft, EDGE_GAP, maxLeft),
+      }
     }
   }
-
-  return pos
 }
 
-// ---------------------------------------------------------------------------
-// Spotlight overlay styles
-// ---------------------------------------------------------------------------
-
-function buildSpotlightStyle(
-  targetRect: Rect | null,
-  placement: TourStep['placement'],
-  isDark: boolean
-): React.CSSProperties {
-  const dimColor = isDark
-    ? 'rgba(0,0,0,0.66)'
-    : 'rgba(20,18,15,0.55)'
-
-  if (!targetRect || placement === 'center') {
-    return {
-      position: 'fixed',
-      inset: 0,
-      zIndex: 1300,
-      background: dimColor,
-      pointerEvents: 'none',
-    }
-  }
-
-  const { top, left, width, height } = targetRect
-  const pt = top - PADDING
-  const pl = left - PADDING
-  const pw = width + PADDING * 2
-  const ph = height + PADDING * 2
-
-  // Ring color
-  const ringColor = isDark
-    ? 'rgba(255,214,140,0.95)'
-    : 'rgba(244,185,94,0.9)'
-
+function spotlightGeometry(rect: Rect): React.CSSProperties {
   return {
-    position: 'fixed',
-    inset: 0,
-    zIndex: 1300,
-    pointerEvents: 'none',
-    // clip-path approach: outer rect minus inner spotlight rect
-    // We use a combined box-shadow on the highlight div instead.
-    background: 'transparent',
+    top: rect.top - SPOTLIGHT_PADDING,
+    left: rect.left - SPOTLIGHT_PADDING,
+    width: rect.width + SPOTLIGHT_PADDING * 2,
+    height: rect.height + SPOTLIGHT_PADDING * 2,
   }
 }
 
-// ---------------------------------------------------------------------------
-// Main TutorialTour component
-// ---------------------------------------------------------------------------
+function isBlockedInteractiveTarget(target: EventTarget | null, primary: HTMLButtonElement | null): boolean {
+  if (!(target instanceof Element)) return false
+  if (primary && (target === primary || primary.contains(target))) return false
 
-export function TutorialTour({ onNavigate, onDone }: TutorialTourProps) {
-  const { t } = useTranslation()
+  const control = target.closest('input, textarea, select, button')
+  if (control) return true
+
+  const editable = target.closest('[contenteditable]')
+  return editable !== null && editable.getAttribute('contenteditable') !== 'false'
+}
+
+export function TutorialTour({ onNavigate, onExit }: TutorialTourProps) {
   const [stepIndex, setStepIndex] = useState(0)
-  const [targetRect, setTargetRect] = useState<Rect | null>(null)
-  const [visible, setVisible] = useState(false)
-  const measureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const prevPage = useRef<Page | null>(null)
+  const [resolvedPresentation, setResolvedPresentation] = useState<TutorialPresentation | null>(null)
+  const [cardHeight, setCardHeight] = useState(0)
+  const [viewport, setViewport] = useState<Viewport>(currentViewport)
+  const cardRef = useRef<HTMLElement>(null)
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const previousPageRef = useRef<Page | null>(null)
 
-  const step = STEPS[stepIndex]
-  const isLast = stepIndex === STEPS.length - 1
+  const step = TUTORIAL_STEPS[stepIndex]
+  const presentation = presentationForTutorialStep(resolvedPresentation, stepIndex)
+  const targetRect = presentation?.targetRect ?? null
+  const visible = presentation !== null
+  const compact = viewport.width <= 720 || viewport.height <= 600
 
-  // Detect dark theme
-  const [isDark, setIsDark] = useState(
-    () => document.documentElement.getAttribute('data-theme') === 'dark'
-  )
+  const handleSkip = useCallback(() => {
+    markTutorialExit('skipped')
+    onExit('skipped')
+  }, [onExit])
 
-  useEffect(() => {
-    const observer = new MutationObserver(() => {
-      setIsDark(document.documentElement.getAttribute('data-theme') === 'dark')
-    })
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
-    return () => observer.disconnect()
-  }, [])
-
-  // Measure target element
-  const measureTarget = useCallback(() => {
-    if (!step.targetSelector) {
-      setTargetRect(null)
-      setVisible(true)
+  const handleNext = useCallback(() => {
+    if (stepIndex === TUTORIAL_STEPS.length - 1) {
+      markTutorialExit('completed')
+      onExit('completed')
       return
     }
-    const el = document.querySelector(step.targetSelector)
-    if (el) {
-      const rect = el.getBoundingClientRect()
-      setTargetRect({
-        top: rect.top,
-        left: rect.left,
-        width: rect.width,
-        height: rect.height,
-      })
-      setVisible(true)
-    } else {
-      // Element not found — show centered
-      setTargetRect(null)
-      setVisible(true)
+    setStepIndex(index => index + 1)
+  }, [onExit, stepIndex])
+
+  const handleBack = useCallback(() => {
+    setStepIndex(index => Math.max(0, index - 1))
+  }, [])
+
+  const measureCurrentTarget = useCallback(() => {
+    const target = step.targetSelector
+      ? document.querySelector<HTMLElement>(step.targetSelector)
+      : null
+    setResolvedPresentation({
+      stepIndex,
+      targetRect: target ? measureTutorialTarget(target, currentViewport()) : null,
+    })
+  }, [step.targetSelector, stepIndex])
+
+  useIsomorphicLayoutEffect(() => {
+    const background = document.getElementById('root')
+    const previousInert = background?.getAttribute('inert') ?? null
+    const previousOverflow = document.body.style.overflow
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+    const restoreReplayFocus = previouslyFocused?.matches('[data-tutorial-replay]') ?? false
+
+    background?.setAttribute('inert', '')
+    document.body.style.overflow = 'hidden'
+
+    return () => {
+      if (background) {
+        if (previousInert === null) background.removeAttribute('inert')
+        else background.setAttribute('inert', previousInert)
+      }
+      document.body.style.overflow = previousOverflow
+      if (previouslyFocused?.isConnected) {
+        previouslyFocused.focus()
+      } else if (restoreReplayFocus) {
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLElement>('[data-tutorial-replay]')?.focus()
+        })
+      }
     }
-  }, [step.targetSelector])
+  }, [])
 
-  // Navigate to step's page and measure after render
   useEffect(() => {
-    setVisible(false)
+    setResolvedPresentation(null)
+    setCardHeight(0)
 
-    if (step.page !== prevPage.current) {
-      prevPage.current = step.page
+    if (step.page !== previousPageRef.current) {
+      previousPageRef.current = step.page
       onNavigate(step.page)
     }
 
-    // Wait for page render + layout
-    if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
-    measureTimerRef.current = setTimeout(() => {
-      // rAF to ensure DOM paint
-      requestAnimationFrame(() => {
-        measureTarget()
+    let cancelTargetWait: () => void = () => undefined
+    let revealFrame: number | null = null
+    const revealTimer = setTimeout(() => {
+      if (!step.targetSelector) {
+        revealFrame = requestAnimationFrame(() => {
+          revealFrame = null
+          setResolvedPresentation({ stepIndex, targetRect: null })
+        })
+        return
+      }
+
+      cancelTargetWait = waitForTutorialTarget<HTMLElement>({
+        findTarget: () => document.querySelector<HTMLElement>(step.targetSelector!),
+        observe: onMutation => {
+          const observer = new MutationObserver(onMutation)
+          observer.observe(document.body, { childList: true, subtree: true })
+          return () => observer.disconnect()
+        },
+        scheduleFallback: onTimeout => {
+          const timeout = setTimeout(onTimeout, TARGET_WAIT_TIMEOUT_MS)
+          return () => clearTimeout(timeout)
+        },
+        onResolve: target => {
+          revealFrame = requestAnimationFrame(() => {
+            revealFrame = null
+            setResolvedPresentation({
+              stepIndex,
+              targetRect: target ? measureTutorialTarget(target, currentViewport()) : null,
+            })
+          })
+        },
       })
-    }, 180)
+    }, TARGET_REVEAL_DELAY_MS)
 
     return () => {
-      if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
+      clearTimeout(revealTimer)
+      cancelTargetWait()
+      if (revealFrame !== null) cancelAnimationFrame(revealFrame)
     }
-  }, [stepIndex, step.page, onNavigate, measureTarget])
+  }, [onNavigate, step.page, step.targetSelector, stepIndex])
 
-  // Re-measure on resize
+  useIsomorphicLayoutEffect(() => {
+    if (!visible || !cardRef.current) return
+    const measuredHeight = cardRef.current.offsetHeight
+    setCardHeight(previous => previous === measuredHeight ? previous : measuredHeight)
+  }, [stepIndex, viewport.height, viewport.width, visible])
+
+  useEffect(() => {
+    if (!visible || !cardRef.current) return
+    const frame = requestAnimationFrame(() => {
+      cardRef.current?.querySelector<HTMLButtonElement>('.tour-primary-button')?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [stepIndex, visible])
+
   useEffect(() => {
     const handler = () => {
-      if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
-      measureTimerRef.current = setTimeout(measureTarget, 100)
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+      resizeTimerRef.current = setTimeout(() => {
+        setViewport(currentViewport())
+        if (visible) measureCurrentTarget()
+      }, 100)
     }
     window.addEventListener('resize', handler)
-    return () => window.removeEventListener('resize', handler)
-  }, [measureTarget])
+    return () => {
+      window.removeEventListener('resize', handler)
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+    }
+  }, [measureCurrentTarget, visible])
 
-  // Keyboard controls
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
         handleSkip()
-      } else if (e.key === 'Enter') {
-        e.preventDefault()
+        return
+      }
+
+      const primary = cardRef.current?.querySelector<HTMLButtonElement>('.tour-primary-button') ?? null
+      if (isBlockedInteractiveTarget(event.target, primary)) return
+
+      if (event.key === 'ArrowLeft' && stepIndex > 0) {
+        event.preventDefault()
+        handleBack()
+      } else if (event.key === 'ArrowRight' || event.key === 'Enter') {
+        event.preventDefault()
         handleNext()
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stepIndex])
+  }, [handleBack, handleNext, handleSkip, stepIndex])
 
-  const handleNext = () => {
-    if (isLast) {
-      markTutorialDone()
-      onDone()
-    } else {
-      setStepIndex(i => i + 1)
-    }
-  }
+  const cardPosition = compact
+    ? {}
+    : computeCardPosition(targetRect, step.placement, viewport, cardHeight)
+  const spotlightStyle = targetRect && step.placement !== 'center'
+    ? spotlightGeometry(targetRect)
+    : null
 
-  const handleSkip = () => {
-    markTutorialDone()
-    onDone()
-  }
-
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-
-  const tooltipPos = computeTooltipPosition(targetRect, step.placement, vw, vh)
-
-  // Spotlight ring color
-  const ringColor = isDark
-    ? 'rgba(255,214,140,0.95)'
-    : 'rgba(244,185,94,0.9)'
-
-  const dimColor = isDark
-    ? 'rgba(0,0,0,0.66)'
-    : 'rgba(20,18,15,0.55)'
-
-  // Reduce motion
-  const prefersReducedMotion =
-    typeof window !== 'undefined' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-
-  return (
-    <>
-      {/* ── Dim overlay (click = no-op) ── */}
-      {step.placement === 'center' || !targetRect ? (
-        <div
-          className="tour-overlay tour-overlay-full"
-          style={{ background: dimColor }}
-          onClick={e => e.stopPropagation()}
-          aria-hidden="true"
-        />
-      ) : (
-        /* Spotlight: four rects around the target */
+  const stage = (
+    <div className="tour-stage" data-tutorial-active="true">
+      {spotlightStyle ? (
         <>
-          {/* Top strip */}
+          <div className="tour-backdrop tour-backdrop-top" style={{ height: spotlightStyle.top }} aria-hidden="true" />
           <div
-            className="tour-overlay-strip"
-            style={{
-              top: 0,
-              left: 0,
-              right: 0,
-              height: Math.max(0, targetRect.top - PADDING),
-              background: dimColor,
-            }}
-            onClick={e => e.stopPropagation()}
+            className="tour-backdrop tour-backdrop-bottom"
+            style={{ top: Number(spotlightStyle.top) + Number(spotlightStyle.height) }}
             aria-hidden="true"
           />
-          {/* Bottom strip */}
           <div
-            className="tour-overlay-strip"
-            style={{
-              top: targetRect.top + targetRect.height + PADDING,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: dimColor,
-            }}
-            onClick={e => e.stopPropagation()}
+            className="tour-backdrop tour-backdrop-left"
+            style={{ top: spotlightStyle.top, width: spotlightStyle.left, height: spotlightStyle.height }}
             aria-hidden="true"
           />
-          {/* Left strip */}
           <div
-            className="tour-overlay-strip"
-            style={{
-              top: Math.max(0, targetRect.top - PADDING),
-              left: 0,
-              width: Math.max(0, targetRect.left - PADDING),
-              height: targetRect.height + PADDING * 2,
-              background: dimColor,
-            }}
-            onClick={e => e.stopPropagation()}
+            className="tour-backdrop tour-backdrop-right"
+            style={{ top: spotlightStyle.top, left: Number(spotlightStyle.left) + Number(spotlightStyle.width), height: spotlightStyle.height }}
             aria-hidden="true"
           />
-          {/* Right strip */}
-          <div
-            className="tour-overlay-strip"
-            style={{
-              top: Math.max(0, targetRect.top - PADDING),
-              left: targetRect.left + targetRect.width + PADDING,
-              right: 0,
-              height: targetRect.height + PADDING * 2,
-              background: dimColor,
-            }}
-            onClick={e => e.stopPropagation()}
-            aria-hidden="true"
-          />
-          {/* Spotlight ring */}
-          <div
-            className="tour-spotlight-ring"
-            style={{
-              position: 'fixed',
-              top: targetRect.top - PADDING,
-              left: targetRect.left - PADDING,
-              width: targetRect.width + PADDING * 2,
-              height: targetRect.height + PADDING * 2,
-              borderRadius: 10,
-              boxShadow: `0 0 0 2px ${ringColor}, 0 0 0 4px ${isDark ? 'rgba(255,214,140,0.22)' : 'rgba(244,185,94,0.28)'}, 0 0 18px 4px ${isDark ? 'rgba(255,214,140,0.18)' : 'rgba(244,185,94,0.20)'}`,
-              pointerEvents: 'none',
-              zIndex: 1301,
-            }}
-            aria-hidden="true"
-          />
+          <div className="tour-spotlight-ring" style={spotlightStyle} aria-hidden="true" />
+          <div className="tour-target-shield" style={spotlightStyle} aria-hidden="true" />
         </>
+      ) : (
+        <div className="tour-backdrop tour-backdrop-full" aria-hidden="true" />
       )}
 
-      {/* ── Tooltip card ── */}
       {visible && (
-        <div
-          className={`tour-tooltip${prefersReducedMotion ? '' : ' tour-tooltip-animate'}`}
-          style={{
-            position: 'fixed',
-            zIndex: 1302,
-            width: TOOLTIP_W,
-            maxWidth: `calc(100vw - ${EDGE_GAP * 2}px)`,
-            ...tooltipPos,
-          }}
-          role="dialog"
-          aria-modal="false"
-          aria-label={t(step.titleKey)}
-        >
-          {/* Counter */}
-          <div className="tour-counter">
-            {stepIndex + 1}/{STEPS.length}
-          </div>
-
-          {/* Title */}
-          <div className="tour-title">{t(step.titleKey)}</div>
-
-          {/* Body */}
-          <TourBody text={t(step.bodyKey)} />
-
-          {/* Next / Finish button */}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
-            <button
-              className="btn-primary tour-next-btn"
-              onClick={handleNext}
-              autoFocus
-            >
-              {isLast ? t('tour.start') : t('tour.next')}
-            </button>
-          </div>
-        </div>
+        <TutorialCard
+          step={step}
+          stepIndex={stepIndex}
+          totalSteps={TUTORIAL_STEPS.length}
+          position={cardPosition}
+          compact={compact}
+          onBack={handleBack}
+          onNext={handleNext}
+          onSkip={handleSkip}
+          cardRef={cardRef}
+        />
       )}
-
-      {/* ── Progress dots (bottom-center) ── */}
-      {visible && (
-        <div
-          className="tour-progress-dots"
-          style={{ zIndex: 1302 }}
-          aria-label={`${stepIndex + 1} / ${STEPS.length}`}
-        >
-          {STEPS.map((_, i) => (
-            <div
-              key={i}
-              className={`tour-dot${i === stepIndex ? ' active' : ''}`}
-              aria-hidden="true"
-            />
-          ))}
-        </div>
-      )}
-
-      {/* ── Skip pill (bottom-left) ── */}
-      {visible && (
-        <button
-          className="tour-skip-pill"
-          style={{ zIndex: 1302 }}
-          onClick={handleSkip}
-          aria-label={t('tour.skip')}
-        >
-          {t('tour.skip')}
-        </button>
-      )}
-    </>
+    </div>
   )
+
+  return typeof document === 'undefined' ? stage : createPortal(stage, document.body)
 }
