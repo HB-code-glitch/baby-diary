@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { IconFolderOpen, IconDownload, IconInfo } from '../components/icons'
 import { GUIDANCE_MARKERS, GUIDANCE_DISCLAIMER } from '../lib/guidance'
 import {
@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 import { DeleteAllModal } from '../components/DeleteAllModal'
 import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
-import { updateFamilyBabyInfo, updateMemberEntry, useSyncStatus } from '../sync/useSync'
+import { updateMemberEntry, useSyncStatus } from '../sync/useSync'
 import { getSyncDisclosurePresentation } from '../lib/progressiveDisclosure'
 import { getDataDisclosurePresentation } from '../lib/settingsPresentation'
 import { AgeGuidancePanel } from '../components/AgeGuidancePanel'
@@ -34,7 +34,14 @@ interface SettingsPageProps {
 }
 
 export function SettingsPage({ onStartTour }: SettingsPageProps) {
-  const { settings, saveSettings, loadDataInfo, dataInfo, softDeleteAllEvents } = useAppStore()
+  const {
+    settings,
+    saveSettings,
+    saveSettingsWithBabyInfoMutation,
+    loadDataInfo,
+    dataInfo,
+    softDeleteAllEvents,
+  } = useAppStore()
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
 
@@ -58,6 +65,10 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   // Local form state
   const [babyName,   setBabyName]   = useState(settings?.baby?.name       ?? '')
   const [birthdate,  setBirthdate]  = useState(settings?.baby?.birthdate  ?? '')
+  const babyNameDirtyRef = useRef(false)
+  const birthdateDirtyRef = useRef(false)
+  const babyNameEditGenerationRef = useRef(0)
+  const birthdateEditGenerationRef = useRef(0)
   const [babyGender, setBabyGender] = useState<'girl' | 'boy' | undefined>(settings?.baby?.gender)
   const [myName,     setMyName]     = useState(settings?.profile?.name    ?? '')
   const [myRole,     setMyRole]     = useState<'mom' | 'dad'>(settings?.profile?.role ?? 'mom')
@@ -68,9 +79,13 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [pdfSaving, setPdfSaving] = useState(false)
 
   // Hydrate form from a settings object
-  const hydrateForm = useCallback((s: AppSettings) => {
-    setBabyName(s.baby?.name       ?? '')
-    setBirthdate(s.baby?.birthdate ?? '')
+  const hydrateForm = useCallback((s: AppSettings, forceBabyInfo = false) => {
+    if (forceBabyInfo || !babyNameDirtyRef.current) {
+      setBabyName(s.baby?.name ?? '')
+    }
+    if (forceBabyInfo || !birthdateDirtyRef.current) {
+      setBirthdate(s.baby?.birthdate ?? '')
+    }
     setBabyGender(s.baby?.gender)
     setMyName(s.profile?.name      ?? '')
     setMyRole(s.profile?.role      ?? 'mom')
@@ -102,24 +117,40 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   }, [])
 
   const handleSave = async () => {
+    // Capture both values and ownership before the first await. Edits made
+    // while this submission is pending belong to a later generation and must
+    // remain visible/dirty when the older save resolves.
+    const submittedBabyName = babyName
+    const submittedBirthdate = birthdate
+    const submittedBabyNameDirty = babyNameDirtyRef.current
+    const submittedBirthdateDirty = birthdateDirtyRef.current
+    const submittedBabyNameGeneration = babyNameEditGenerationRef.current
+    const submittedBirthdateGeneration = birthdateEditGenerationRef.current
     setSaving(true)
     try {
       // Source of truth: always fetch fresh from disk before merging
       const current = await ipc.getSettings()
 
       const form: FormSnapshot = {
-        babyName,
-        birthdate,
+        babyName: submittedBabyName,
+        birthdate: submittedBirthdate,
         babyGender,
         myName,
       }
 
       // Merge: never blank-overwrite non-empty saved critical fields
       const merged = mergeSettingsSafely(current, form)
+      const babyInfoWasDirty = submittedBabyNameDirty || submittedBirthdateDirty
 
       // Apply non-critical fields from UI
       const updated: AppSettings = {
         ...merged,
+        baby: {
+          ...merged.baby,
+          // Dirty fields carry exact user intent, including an empty string.
+          name: submittedBabyNameDirty ? submittedBabyName : merged.baby.name,
+          birthdate: submittedBirthdateDirty ? submittedBirthdate : merged.baby.birthdate,
+        },
         profile: {
           ...merged.profile,
           uid:  current.profile?.uid ?? settings?.profile?.uid ?? uuidv4(),
@@ -131,26 +162,25 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
         theme:     currentTheme,
       }
 
-      await saveSettings(updated)
+      const saveResult = babyInfoWasDirty
+        ? await saveSettingsWithBabyInfoMutation(updated)
+        : { settings: await saveSettings(updated), babyInfo: 'unchanged' as const }
+      const savedSettings = saveResult.settings
 
-      // Reverse-sync: if user is a family member and baby name/birthdate actually
-      // changed, push the new values to the family doc so other devices pick them up.
-      // Guard: only when familyId is set and values differ from what was on disk.
-      if (updated.familyId) {
-        const prevName      = current.baby?.name      ?? ''
-        const prevBirthdate = current.baby?.birthdate ?? ''
-        const newName       = updated.baby?.name      ?? ''
-        const newBirthdate  = updated.baby?.birthdate ?? ''
-        if (newName !== prevName || newBirthdate !== prevBirthdate) {
-          updateFamilyBabyInfo(newName, newBirthdate).catch(() => {
-            // best-effort: family doc update failure is non-fatal (local save succeeded)
-          })
-        }
+      const babyNameChangedSinceSubmission = (
+        babyNameEditGenerationRef.current !== submittedBabyNameGeneration
+      )
+      const birthdateChangedSinceSubmission = (
+        birthdateEditGenerationRef.current !== submittedBirthdateGeneration
+      )
+      if (!babyNameChangedSinceSubmission) babyNameDirtyRef.current = false
+      if (!birthdateChangedSinceSubmission) birthdateDirtyRef.current = false
 
+      if (savedSettings.familyId) {
         // Member entry self-heal: push profile name/role to family doc member entry
         // so that any role/name change is reflected in the shared family doc.
-        const newProfileName = updated.profile?.name ?? ''
-        const newProfileRole = updated.profile?.role ?? 'mom'
+        const newProfileName = savedSettings.profile?.name ?? ''
+        const newProfileRole = savedSettings.profile?.role ?? 'mom'
         updateMemberEntry(newProfileName, newProfileRole).catch(() => {
           // best-effort: non-fatal
         })
@@ -158,19 +188,27 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 
       // Detect race scenario: form was fully blank but disk had data →
       // re-hydrate the form and show info toast instead of normal saved toast
-      const formWasBlank = !babyName.trim() && !birthdate.trim() && !myName.trim()
+      const formWasBlank = !babyInfoWasDirty
+        && !submittedBabyName.trim()
+        && !submittedBirthdate.trim()
+        && !myName.trim()
       const diskHadData  = !!(current.baby?.name?.trim() || current.baby?.birthdate?.trim() || current.profile?.name?.trim())
 
-      if (formWasBlank && diskHadData) {
+      if (saveResult.babyInfo === 'pending') {
+        showToast({ message: t('settings.babyInfoSavePending') })
+      } else if (formWasBlank
+        && diskHadData
+        && !babyNameChangedSinceSubmission
+        && !birthdateChangedSinceSubmission) {
         // Re-hydrate from merged result so the user sees their real data
-        hydrateForm(updated)
+        hydrateForm(savedSettings, true)
         showToast({ message: t('settings.restoredFromDisk') })
       } else {
         showToast({ message: t('settings.toastSaved') })
       }
     } catch {
       // P5: surface fs/IPC errors — user must know the save failed
-      showToast({ message: t('settings.toastSaveFail') })
+      showToast({ message: t('settings.toastSaveFail'), tone: 'error' })
     } finally {
       setSaving(false)
     }
@@ -366,7 +404,11 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   className="input-field"
                   placeholder={t('settings.babyNamePlaceholder')}
                   value={babyName}
-                  onChange={e => setBabyName(e.target.value)}
+                  onChange={e => {
+                    babyNameDirtyRef.current = true
+                    babyNameEditGenerationRef.current += 1
+                    setBabyName(e.target.value)
+                  }}
                 />
               </div>
               <div>
@@ -375,7 +417,11 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   type="date"
                   className="input-field"
                   value={birthdate}
-                  onChange={e => setBirthdate(e.target.value)}
+                  onChange={e => {
+                    birthdateDirtyRef.current = true
+                    birthdateEditGenerationRef.current += 1
+                    setBirthdate(e.target.value)
+                  }}
                 />
               </div>
               <div>

@@ -20,7 +20,7 @@ import type {
   DocumentData,
 } from 'firebase/firestore'
 import type { Auth, User } from 'firebase/auth'
-import { DiaryEvent } from '../../shared/types'
+import { AppSettings, DiaryEvent } from '../../shared/types'
 import {
   canonicalEventJson,
   ensureEventMutationIdentity,
@@ -29,7 +29,19 @@ import {
   isValidMutationId,
   validateDiaryEvent,
 } from '../../shared/eventResolver'
+import { assertFamilyId } from '../../shared/familyId'
 import { ipc } from '../lib/ipc'
+import {
+  makeBabyInfoDocId,
+  parseCloudBabyInfoDocument,
+  persistSettingsWithBabyInfoMutation,
+  reconcileFamilyBabyInfo,
+  setBabyInfoPersistenceObserver,
+} from './babyInfoSync'
+import type {
+  FamilyBabyInfoDocument,
+  ReconcileBabyInfoResult,
+} from './babyInfoSync'
 import {
   initFirebase,
   teardownFirebase,
@@ -40,6 +52,12 @@ import {
   FirebaseConfig,
 } from './firebase'
 
+export {
+  makeBabyInfoDocId,
+  parseCloudBabyInfoDocument,
+  persistSettingsWithBabyInfoMutation,
+}
+
 // ────────────────────────────────────────────────────────────
 // Lazy-loaded firebase/firestore helpers.
 // Populated on first call to _firestoreOps() which runs only after
@@ -49,6 +67,11 @@ import {
 type FirestoreOps = {
   collection: typeof import('firebase/firestore').collection
   doc: typeof import('firebase/firestore').doc
+  query: typeof import('firebase/firestore').query
+  orderBy: typeof import('firebase/firestore').orderBy
+  documentId: typeof import('firebase/firestore').documentId
+  startAfter: typeof import('firebase/firestore').startAfter
+  limit: typeof import('firebase/firestore').limit
   getDoc: typeof import('firebase/firestore').getDoc
   setDoc: typeof import('firebase/firestore').setDoc
   updateDoc: typeof import('firebase/firestore').updateDoc
@@ -71,6 +94,11 @@ async function _firestoreOps(): Promise<FirestoreOps> {
     _firestoreOpsCache = {
       collection: m.collection,
       doc: m.doc,
+      query: m.query,
+      orderBy: m.orderBy,
+      documentId: m.documentId,
+      startAfter: m.startAfter,
+      limit: m.limit,
       getDoc: m.getDoc,
       setDoc: m.setDoc,
       updateDoc: m.updateDoc,
@@ -120,6 +148,12 @@ interface FamilyDoc {
   members: Record<string, { name: string; role: 'dad' | 'mom' }>
   inviteCode: string
   createdAt: unknown
+  babyInfoWinnerKey?: string
+  babyInfoWinnerMutationId?: string
+  babyInfoWinnerLogicalClock?: number
+  babyInfoWinnerUpdatedAt?: string
+  babyInfoWinnerAuthorId?: string
+  babyInfoWinnerOrigin?: import('../../shared/types').BabyInfoMutation['origin']
 }
 
 interface PendingItem {
@@ -153,6 +187,9 @@ export const ERR_PERMISSION_DENIED = 'permission-denied'
 /** Emitted when the family doc is missing/inaccessible — offer create/join. */
 export const DETAIL_FAMILY_GONE = 'FAMILY_GONE'
 
+/** Access could not be classified; retain both local and cloud identity. */
+export const DETAIL_FAMILY_ACCESS_UNCERTAIN = 'FAMILY_ACCESS_UNCERTAIN'
+
 // ────────────────────────────────────────────────────────────
 // 내부 상태
 // ────────────────────────────────────────────────────────────
@@ -163,10 +200,19 @@ let _config: FirebaseConfig | null = null
 let _familyId: string = ''
 let _currentUser: User | null = null
 let _unsubSnapshot: Unsubscribe | null = null
+let _unsubBabyInfoSnapshot: Unsubscribe | null = null
+let _unsubFamilySnapshot: Unsubscribe | null = null
 let _unsubAuth: Unsubscribe | null = null
 let _statusCallbacks: StatusCallback[] = []
 let _retryTimer: ReturnType<typeof setTimeout> | null = null
 let _started = false
+let _babyInfoPendingCount = 0
+let _babyInfoNeedsRetry = false
+let _babyInfoRetryAttempts = 0
+let _babyInfoNextRetry = 0
+let _connectionNeedsRetry = false
+let _connectionRetryAttempts = 0
+let _connectionNextRetry = 0
 
 /**
  * Buffer for onAuthStateChanged events that arrive before configure() completes.
@@ -208,7 +254,65 @@ let _state: SyncState = { status: 'no-config', detail: '', pendingCount: 0 }
  * The then()-callback captures the generation at call time and only writes
  * _unsubAuth if the current generation still matches — preventing a stale
  * in-flight then() from overwriting a newer auth listener. */
-let _startGeneration = 0
+let _generation = 0
+let _lifecycleTail: Promise<void> = Promise.resolve()
+
+interface SyncContext {
+  generation: number
+  db: Firestore
+  familyId: string
+  user: User
+}
+
+interface AuthContext {
+  generation: number
+  db: Firestore
+  user: User
+}
+
+class StaleSyncOperationError extends Error {
+  constructor() {
+    super('stale sync operation')
+    this.name = 'StaleSyncOperationError'
+  }
+}
+
+function enqueueLifecycle(operation: () => Promise<void>): Promise<void> {
+  const result = _lifecycleTail.then(operation, operation)
+  _lifecycleTail = result.catch(() => undefined)
+  return result
+}
+
+function contextIsCurrent(context: SyncContext): boolean {
+  return context.generation === _generation
+    && context.db === _db
+    && context.familyId === _familyId
+    && context.user.uid === _currentUser?.uid
+}
+
+function authContextIsCurrent(context: AuthContext): boolean {
+  return context.generation === _generation
+    && context.db === _db
+    && context.user.uid === _currentUser?.uid
+}
+
+function assertAuthCurrent(context: AuthContext): void {
+  if (!authContextIsCurrent(context)) throw new StaleSyncOperationError()
+}
+
+function assertCurrent(context: SyncContext): void {
+  if (!contextIsCurrent(context)) throw new StaleSyncOperationError()
+}
+
+function currentContext(): SyncContext | null {
+  if (!_db || !_familyId || !_currentUser) return null
+  return {
+    generation: _generation,
+    db: _db,
+    familyId: _familyId,
+    user: _currentUser,
+  }
+}
 
 // ────────────────────────────────────────────────────────────
 // 상태 관리
@@ -219,6 +323,10 @@ function setState(partial: Partial<SyncState>): void {
   _statusCallbacks.forEach(cb => {
     try { cb(_state) } catch { /* ignore */ }
   })
+}
+
+function totalPendingCount(): number {
+  return _pending.length + _babyInfoPendingCount
 }
 
 // ────────────────────────────────────────────────────────────
@@ -281,8 +389,19 @@ function savePending(items: PendingItem[]): void {
 let _pending: PendingItem[] = loadPending()
 
 function syncPendingCount(): void {
-  setState({ pendingCount: _pending.length })
+  setState({ pendingCount: totalPendingCount() })
 }
+
+setBabyInfoPersistenceObserver((pendingCount, needsRetry) => {
+  _babyInfoPendingCount = pendingCount
+  _babyInfoNeedsRetry = needsRetry
+  syncPendingCount()
+  if (_state.status === 'online' && needsRetry) {
+    _babyInfoNextRetry = 0
+    const context = currentContext()
+    if (context) void enqueueLifecycle(() => drainQueue(context))
+  }
+})
 
 // ────────────────────────────────────────────────────────────
 // Immutable cloud document identity. Legacy records retain "${id}_${rev}".
@@ -375,7 +494,12 @@ function generateInviteCode(): string {
  * This mirrors the fallback already present in useSyncLifecycle but makes the engine
  * self-healing even when called directly with a null config.
  */
-export async function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
+async function configureInternal(
+  cfg: FirebaseConfig | null,
+  familyIdValue: string,
+  generation: number,
+): Promise<void> {
+  const familyId = familyIdValue === '' ? '' : assertFamilyId(familyIdValue)
   // Defensive fallback: a null config must never leave the engine at 'no-config'.
   // Dynamically import DEFAULT_FIREBASE_CONFIG to avoid a circular-module issue
   // (syncEngine ← useSync ← defaultFirebaseConfig is fine; direct import also OK here).
@@ -383,6 +507,7 @@ export async function configure(cfg: FirebaseConfig | null, familyId: string): P
   if (!effectiveCfg) {
     try {
       const { DEFAULT_FIREBASE_CONFIG } = await import('./defaultFirebaseConfig')
+      if (generation !== _generation) return
       effectiveCfg = DEFAULT_FIREBASE_CONFIG
       console.warn('[syncEngine] configure: null config — falling back to DEFAULT_FIREBASE_CONFIG')
     } catch {
@@ -390,35 +515,58 @@ export async function configure(cfg: FirebaseConfig | null, familyId: string): P
     }
   }
 
-  _config = effectiveCfg
-  _familyId = familyId
+  try {
+    if (familyId && typeof ipc.getBabyInfoSummary === 'function') {
+      const summary = await ipc.getBabyInfoSummary(familyId)
+      if (generation !== _generation) return
+      _babyInfoPendingCount = summary.totalPendingCount
+      _babyInfoNeedsRetry = summary.pendingCount > 0
+    } else {
+      _babyInfoPendingCount = 0
+      _babyInfoNeedsRetry = false
+    }
+  } catch (err) {
+    if (generation !== _generation) return
+    _babyInfoPendingCount = 0
+    _babyInfoNeedsRetry = false
+    setState({
+      status: 'error',
+      detail: `baby info settings error: ${err instanceof Error ? err.message : String(err)}`,
+      pendingCount: totalPendingCount(),
+    })
+    throw err
+  }
 
   if (!effectiveCfg) {
-    setState({ status: 'no-config', detail: 'no firebase config', pendingCount: 0 })
+    if (generation !== _generation) return
+    _config = null
+    _familyId = familyId
+    setState({ status: 'no-config', detail: 'no firebase config', pendingCount: totalPendingCount() })
     return
   }
 
   const result = await initFirebase(effectiveCfg)
+  if (generation !== _generation) return
   if (!result) {
-    setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: 0 })
+    setState({ status: 'no-config', detail: 'firebase init failed', pendingCount: totalPendingCount() })
     return
   }
 
+  _config = effectiveCfg
+  _familyId = familyId
   _db = result.db
   _auth = result.auth
-  setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
+  setState({ status: 'signed-out', detail: 'not signed in', pendingCount: totalPendingCount() })
+}
 
-  // Replay any onAuthStateChanged event that arrived before configure() completed.
-  // _pendingAuthUser is set by start() when the auth callback fires before _auth is ready.
-  if (_pendingAuthUser !== undefined) {
-    const bufferedUser = _pendingAuthUser
-    _pendingAuthUser = undefined
-    _currentUser = bufferedUser
-    if (bufferedUser) {
-      void onUserSignedIn(bufferedUser)
-    }
-    // If bufferedUser is null: status is already 'signed-out' from above — no action needed.
-  }
+/** Serialize direct configuration with teardown; callers may safely await it. */
+export function configure(cfg: FirebaseConfig | null, familyId: string): Promise<void> {
+  const generation = ++_generation
+  return enqueueLifecycle(async () => {
+    await stopRuntime(generation, false)
+    if (generation !== _generation) return
+    await configureInternal(cfg, familyId, generation)
+  })
 }
 
 /** 회원가입 (신규 사용자) */
@@ -437,12 +585,21 @@ export async function signIn(email: string, password: string, keepLoggedIn = tru
 
 /** 로그아웃 */
 export async function signOutSync(): Promise<void> {
-  if (!_auth) return
-  await fbSignOut(_auth)
+  const generation = ++_generation
+  const auth = _auth
+  const shouldRemainStarted = _started
+  // Invalidate captured callbacks synchronously, before the Firebase promise.
+  detachDataListeners()
   _currentUser = null
-  _unsubSnapshot?.()
-  _unsubSnapshot = null
-  setState({ status: 'signed-out', detail: 'signed out', pendingCount: _pending.length })
+  return enqueueLifecycle(async () => {
+    if (auth) await fbSignOut(auth)
+    if (generation !== _generation) return
+    setState({ status: 'signed-out', detail: 'signed out', pendingCount: totalPendingCount() })
+    if (shouldRemainStarted && _auth && _config) {
+      _started = false
+      await startInternal(generation)
+    }
+  })
 }
 
 /**
@@ -503,7 +660,10 @@ export async function createFamily(
   setState({ inviteCode })
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
-  if (_currentUser) void onUserSignedIn(_currentUser)
+  if (_currentUser && _db) {
+    const context: AuthContext = { generation: _generation, db: _db, user: _currentUser }
+    void enqueueLifecycle(() => onUserSignedIn(context))
+  }
   return { familyId: familyRef.id, inviteCode }
 }
 
@@ -540,7 +700,7 @@ export async function joinFamily(
 
   if (!inviteSnap.exists()) throw new Error('invite code not found')
 
-  const familyId = (inviteSnap.data() as { familyId: string }).familyId
+  const familyId = assertFamilyId((inviteSnap.data() as { familyId: string }).familyId)
 
   // F-RULES: self-join — write ONLY the members.{uid} field-path.
   // Do NOT read families/{familyId} before this write: a non-member cannot
@@ -582,21 +742,24 @@ export async function joinFamily(
 
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
-  if (_currentUser) void onUserSignedIn(_currentUser)
+  if (_currentUser && _db) {
+    const context: AuthContext = { generation: _generation, db: _db, user: _currentUser }
+    void enqueueLifecycle(() => onUserSignedIn(context))
+  }
   return { familyId, babyName, babyBirthdate }
 }
 
-/**
- * Update the family doc's babyName and babyBirthdate fields.
- * Called from SettingsPage when the user saves changed baby info while a member.
- * Guard: only call when the user is a member (familyId set) and values actually changed.
- * Rules: isMember() update with non-members fields is allowed.
- */
+/** Compatibility API routed through the durable local mutation path. */
 export async function updateFamilyBabyInfo(babyName: string, babyBirthdate: string): Promise<void> {
-  if (!_db || !_familyId || !_currentUser) return
-  const { doc, updateDoc } = await _firestoreOps()
-  const familyRef = doc(_db, 'families', _familyId)
-  await updateDoc(familyRef, { babyName, babyBirthdate })
+  const current = await ipc.getSettings()
+  await persistSettingsWithBabyInfoMutation({
+    ...current,
+    baby: {
+      ...current.baby,
+      name: babyName,
+      birthdate: babyBirthdate,
+    },
+  })
 }
 
 /**
@@ -641,94 +804,98 @@ export function enqueue(event: DiaryEvent): void {
 
   // 연결 중이면 즉시 드레인 시도
   if (_state.status === 'online') {
-    void drainQueue()
+    const context = currentContext()
+    if (context) void enqueueLifecycle(() => drainQueue(context))
   }
 }
 
-/** 동기화 시작 (앱 기동 시 호출) */
-export function start(): void {
-  if (_started) return
-  _started = true
+function detachDataListeners(): void {
+  _unsubSnapshot?.()
+  _unsubSnapshot = null
+  _unsubBabyInfoSnapshot?.()
+  _unsubBabyInfoSnapshot = null
+  _unsubFamilySnapshot?.()
+  _unsubFamilySnapshot = null
+}
 
-  if (!_auth || !_config) {
-    // configure() was called but may still be resolving (async initFirebase).
-    // Set up the onAuthStateChanged listener anyway using a safe wrapper:
-    // if _auth is still null when the callback fires, buffer the user so configure()
-    // can replay it once initFirebase() completes.
-    setState({ status: 'no-config', detail: 'waiting for firebase init', pendingCount: 0 })
-    // Listener will be attached after configure() completes via the _pendingAuthUser replay.
-    // Nothing more to do here — configure() will call onUserSignedIn if needed.
+async function startInternal(generation: number): Promise<void> {
+  if (generation !== _generation || _started) return
+  if (!_auth || !_config || !_db) {
+    setState({ status: 'no-config', detail: 'waiting for firebase init', pendingCount: totalPendingCount() })
     return
   }
 
-  // MF-08: capture generation before the async gap so a stale then() from a
-  // previous start() call cannot overwrite the newer auth listener.
-  const gen = ++_startGeneration
-  // onAuthStateChanged is loaded dynamically — firebase chunk already in cache
-  // at this point because configure() awaited initFirebase() first.
-  void _authOps().then(({ onAuthStateChanged }) => {
-    if (gen !== _startGeneration) {
-      // A newer start() has already run — discard this in-flight listener.
+  const auth = _auth
+  const db = _db
+  const { onAuthStateChanged } = await _authOps()
+  if (generation !== _generation || auth !== _auth || db !== _db) return
+
+  _unsubAuth?.()
+  _unsubAuth = onAuthStateChanged(auth, user => {
+    if (generation !== _generation || auth !== _auth || db !== _db) return
+    if (!user) {
+      _currentUser = null
+      detachDataListeners()
+      setState({ status: 'signed-out', detail: 'not signed in', pendingCount: totalPendingCount() })
       return
     }
-    // Unsubscribe any prior auth listener before attaching the new one.
-    _unsubAuth?.()
-    _unsubAuth = onAuthStateChanged(_auth!, user => {
-      if (!_auth) {
-        // configure() hasn't finished yet — buffer the event for replay
-        _pendingAuthUser = user
-        return
-      }
-      _currentUser = user
-      if (user) {
-        void onUserSignedIn(user)
-      } else {
-        setState({ status: 'signed-out', detail: 'not signed in', pendingCount: _pending.length })
-        _unsubSnapshot?.()
-        _unsubSnapshot = null
-      }
+
+    _currentUser = user
+    const context: AuthContext = { generation, db, user }
+    void enqueueLifecycle(async () => {
+      if (!authContextIsCurrent(context)) return
+      await onUserSignedIn(context)
     })
   })
+  _started = true
 }
 
-/** 동기화 중단 */
-export function stop(): void {
+/** 동기화 시작 (앱 기동 시 호출) */
+export function start(): Promise<void> {
+  const generation = _generation
+  return enqueueLifecycle(() => startInternal(generation))
+}
+
+async function stopRuntime(generation: number, publishState = true): Promise<void> {
   _started = false
-  _unsubSnapshot?.()
-  _unsubSnapshot = null
+  detachDataListeners()
   _unsubAuth?.()
   _unsubAuth = null
   if (_retryTimer) {
     clearTimeout(_retryTimer)
     _retryTimer = null
   }
-  void teardownFirebase()
   _db = null
   _auth = null
   _currentUser = null
-  _pendingAuthUser = undefined  // clear any buffered auth event
-  setState({ status: 'off', detail: 'sync stopped', pendingCount: _pending.length })
+  _pendingAuthUser = undefined
+  await teardownFirebase()
+  if (generation !== _generation) return
+  _connectionNeedsRetry = false
+  _connectionRetryAttempts = 0
+  _connectionNextRetry = 0
+  if (publishState) {
+    setState({ status: 'off', detail: 'sync stopped', pendingCount: totalPendingCount() })
+  }
 }
 
-/**
- * SYNC-07: Cleanly restart the sync engine with a new config.
- * Safe to call even when the engine was never started (idempotent stop).
- * Guards against concurrent calls with an in-flight flag.
- *
- * Sequence: stop() → configure(cfg, familyId) → start()
- */
-let _restarting = false
+/** 동기화 중단. Generation is invalidated synchronously. */
+export function stop(): Promise<void> {
+  const generation = ++_generation
+  return enqueueLifecycle(() => stopRuntime(generation))
+}
 
-export async function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
-  if (_restarting) return
-  _restarting = true
-  try {
-    stop()
-    await configure(cfg, familyId)
-    start()
-  } finally {
-    _restarting = false
-  }
+/** Latest queued restart owns Firebase and every installed listener. */
+export function restartSync(cfg: FirebaseConfig, familyId: string): Promise<void> {
+  const generation = ++_generation
+  return enqueueLifecycle(async () => {
+    if (generation !== _generation) return
+    await stopRuntime(generation, false)
+    if (generation !== _generation) return
+    await configureInternal(cfg, familyId, generation)
+    if (generation !== _generation) return
+    await startInternal(generation)
+  })
 }
 
 /** 현재 동기화 상태 반환 */
@@ -749,179 +916,197 @@ export function subscribeStatus(cb: StatusCallback): () => void {
 // 내부 로직
 // ────────────────────────────────────────────────────────────
 
-async function onUserSignedIn(user: User): Promise<void> {
-  if (!_db) {
-    setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: _pending.length })
-    return
-  }
+function markConnectionRetry(context: AuthContext, error: unknown): void {
+  if (!authContextIsCurrent(context)) return
+  _connectionNeedsRetry = true
+  _connectionRetryAttempts += 1
+  const backoff = Math.min(
+    BASE_BACKOFF_MS * Math.pow(2, _connectionRetryAttempts - 1),
+    MAX_BACKOFF_MS,
+  )
+  _connectionNextRetry = Date.now() + backoff
+  console.warn('[syncEngine] family access/sync uncertain; retaining identity', error)
+  setState({
+    status: 'error',
+    detail: DETAIL_FAMILY_ACCESS_UNCERTAIN,
+    pendingCount: totalPendingCount(),
+  })
+  scheduleRetry()
+}
 
-  setState({ status: 'connecting', detail: 'connecting...', pendingCount: _pending.length })
+async function onUserSignedIn(authContext: AuthContext): Promise<void> {
+  if (!authContextIsCurrent(authContext)) return
+  const { user, db } = authContext
+  setState({ status: 'connecting', detail: 'connecting...', pendingCount: totalPendingCount() })
 
   try {
-    const { doc, getDoc, setDoc } = await _firestoreOps()
+    const { doc, getDoc, setDoc, updateDoc } = await _firestoreOps()
+    assertAuthCurrent(authContext)
 
-    // ── A. Cloud identity reconciliation ─────────────────────────────────
-    // Read users/{uid} to get authoritative familyId from cloud.
     let cloudFamilyId: string | undefined
-    try {
-      const userDocRef = doc(_db, 'users', user.uid)
-      const userSnap = await getDoc(userDocRef)
-      if (userSnap.exists()) {
-        cloudFamilyId = (userSnap.data() as { familyId?: string }).familyId
-      }
-    } catch (e) {
-      console.warn('[syncEngine] onUserSignedIn: could not read users doc', e)
-    }
+    const userDocRef = doc(db, 'users', user.uid)
+    const userSnap = await getDoc(userDocRef)
+    assertAuthCurrent(authContext)
+    if (userSnap.exists()) cloudFamilyId = (userSnap.data() as { familyId?: string }).familyId
+    if (cloudFamilyId) cloudFamilyId = assertFamilyId(cloudFamilyId)
 
-    // Local settings as reference point
-    let localSettings: import('../../shared/types').AppSettings | null = null
-    try {
-      localSettings = await ipc.getSettings()
-    } catch {
-      // non-fatal
-    }
-    const localFamilyId = localSettings?.familyId ?? _familyId ?? ''
+    const localSettings = await ipc.getSettings()
+    assertAuthCurrent(authContext)
+    const localFamilyIdValue = localSettings.familyId || _familyId || ''
+    const localFamilyId = localFamilyIdValue ? assertFamilyId(localFamilyIdValue) : ''
 
     if (!cloudFamilyId && localFamilyId) {
-      // Legacy self-heal: local has familyId but cloud users doc absent.
-      // Verify local familyId is still valid (family doc readable and user is member).
-      try {
-        const familyRef = doc(_db, 'families', localFamilyId)
-        const testSnap = await getDoc(familyRef)
-        if (testSnap.exists()) {
-          // Local is valid — write it up to users/{uid}
-          try {
-            await setDoc(doc(_db, 'users', user.uid), { familyId: localFamilyId }, { merge: true })
-            console.log('[syncEngine] legacy self-heal: wrote users doc', localFamilyId)
-          } catch (e) {
-            console.warn('[syncEngine] legacy self-heal: could not write users doc', e)
-          }
-          cloudFamilyId = localFamilyId
-        }
-      } catch {
-        // family unreadable — fall through, cloudFamilyId stays undefined
+      const localFamilyRef = doc(db, 'families', localFamilyId)
+      const localFamilySnap = await getDoc(localFamilyRef)
+      assertAuthCurrent(authContext)
+      const localContext: SyncContext = {
+        ...authContext,
+        familyId: localFamilyId,
       }
+      if (!localFamilySnap.exists()) {
+        await handleFamilyGone(localContext)
+        return
+      }
+      const localFamilyData = localFamilySnap.data() as FamilyDoc
+      if (!localFamilyData.members?.[user.uid]) {
+        await handleFamilyGone(localContext)
+        return
+      }
+      assertAuthCurrent(authContext)
+      await setDoc(userDocRef, { familyId: localFamilyId }, { merge: true })
+      assertAuthCurrent(authContext)
+      cloudFamilyId = localFamilyId
     }
 
     if (cloudFamilyId && cloudFamilyId !== localFamilyId) {
-      // B. Cloud familyId differs from local — adopt cloud into local (field-merge)
-      console.log('[syncEngine] adopting cloud familyId', cloudFamilyId, 'over local', localFamilyId)
+      assertAuthCurrent(authContext)
+      await ipc.mergeSettings({ familyId: cloudFamilyId })
+      assertAuthCurrent(authContext)
       _familyId = cloudFamilyId
-      try {
-        await ipc.mergeSettings({ familyId: cloudFamilyId })
-      } catch (e) {
-        console.warn('[syncEngine] could not merge cloud familyId into local settings', e)
-        // fallback: use it in-memory even if disk write failed
-      }
     } else if (cloudFamilyId) {
       _familyId = cloudFamilyId
+    } else {
+      _familyId = localFamilyId
     }
 
-    // If still no familyId after reconciliation
     if (!_familyId) {
-      setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: _pending.length })
+      _connectionNeedsRetry = false
+      setState({ status: 'signed-out', detail: DETAIL_FAMILY_NEEDED, pendingCount: totalPendingCount() })
       return
     }
 
-    // ── C. Fetch family doc ───────────────────────────────────────────────
-    const familyRef = doc(_db, 'families', _familyId)
-    let familySnap: import('firebase/firestore').DocumentSnapshot
-    try {
-      familySnap = await getDoc(familyRef)
-    } catch (err) {
-      const code = (err as { code?: string }).code
-      if (code === ERR_PERMISSION_DENIED || String(err).includes('permission-denied')) {
-        // Family gone or user evicted — clear identity and guide user
-        await _handleFamilyGone(user)
-        return
-      }
-      throw err
+    const context: SyncContext = {
+      ...authContext,
+      familyId: _familyId,
     }
-
+    assertCurrent(context)
+    const familyRef = doc(db, 'families', context.familyId)
+    const familySnap = await getDoc(familyRef)
+    assertCurrent(context)
     if (!familySnap.exists()) {
-      await _handleFamilyGone(user)
+      await handleFamilyGone(context)
       return
     }
 
-    // F2: expose invite code in state so UI can display it
     const familyData = familySnap.data() as FamilyDoc
+    if (!familyData.members?.[user.uid]) {
+      await handleFamilyGone(context)
+      return
+    }
     setState({ inviteCode: familyData.inviteCode })
 
-    // ── C2. Unconditional baby info adopt from family doc ─────────────────
-    // Family doc is the sole authority for babyName/babyBirthdate.
-    // Always adopt cloud→local on connect when family doc values are non-empty
-    // and differ from local. Gender stays local (not stored in family doc).
+    // Membership is confirmed readable before any self-heal write.
     try {
-      const localSettings2 = await ipc.getSettings()
-      const localName      = localSettings2.baby?.name?.trim()      ?? ''
-      const localBirthdate = localSettings2.baby?.birthdate?.trim() ?? ''
-      const cloudName      = (familyData.babyName      ?? '').trim()
-      const cloudBirthdate = (familyData.babyBirthdate ?? '').trim()
-      const nameChanged      = cloudName      && cloudName      !== localName
-      const birthdateChanged = cloudBirthdate && cloudBirthdate !== localBirthdate
-      if (nameChanged || birthdateChanged) {
-        await ipc.mergeSettings({
-          baby: {
-            ...((localSettings2.baby ?? { name: '', birthdate: '' }) as object),
-            name:      cloudName      || localName,
-            birthdate: cloudBirthdate || localBirthdate,
-          } as import('../../shared/types').AppSettings['baby'],
-        })
-      }
-    } catch {
-      // best-effort: local settings update failure must not block sync
-    }
-
-    // ── C3. Member entry self-heal ────────────────────────────────────────
-    // Ensure own member entry in family doc reflects current profile name/role.
-    // This fixes stale entries (e.g. default 'dad' role for mom) on reconnect.
-    try {
-      const localSettings3 = await ipc.getSettings()
-      const profileName = localSettings3.profile?.name ?? ''
-      const profileRole = localSettings3.profile?.role ?? 'mom'
-      // Only update if our entry is missing or stale
-      const existingEntry = familyData.members?.[user.uid]
-      const entryName = existingEntry?.name ?? ''
-      const entryRole = existingEntry?.role
+      const profileName = localSettings.profile?.name ?? ''
+      const profileRole = localSettings.profile?.role ?? 'mom'
+      const existingEntry = familyData.members[user.uid]
       const memberName = profileName || user.email?.split('@')[0] || 'user'
-      if (!existingEntry || entryName !== memberName || entryRole !== profileRole) {
-        await updateMemberEntry(profileName, profileRole)
+      if (existingEntry.name !== memberName || existingEntry.role !== profileRole) {
+        assertCurrent(context)
+        await updateDoc(familyRef, {
+          [`members.${user.uid}`]: { name: memberName, role: profileRole },
+        })
+        assertCurrent(context)
       }
-    } catch (e) {
-      console.warn('[syncEngine] member entry self-heal failed (non-fatal)', e)
+    } catch (error) {
+      if (error instanceof StaleSyncOperationError) throw error
+      console.warn('[syncEngine] member entry self-heal failed (non-fatal)', error)
     }
 
-    await reconcile(user)
-    await attachSnapshot()
-    setState({ status: 'online', detail: `${user.email} connected`, pendingCount: _pending.length })
-    void drainQueue()
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    setState({ status: 'error', detail: `connection error: ${msg}`, pendingCount: _pending.length })
-    scheduleRetry()
+    await reconcile(context)
+    assertCurrent(context)
+    await attachSnapshot(context)
+    assertCurrent(context)
+    _connectionNeedsRetry = false
+    _connectionRetryAttempts = 0
+    _connectionNextRetry = 0
+    setState({ status: 'online', detail: `${user.email} connected`, pendingCount: totalPendingCount() })
+    void enqueueLifecycle(() => drainQueue(context))
+  } catch (error) {
+    if (error instanceof StaleSyncOperationError || !authContextIsCurrent(authContext)) return
+    markConnectionRetry(authContext, error)
   }
 }
 
-/** Family doc not found or permission denied — clear local identity gracefully. */
-async function _handleFamilyGone(user: import('firebase/auth').User): Promise<void> {
-  console.warn('[syncEngine] family gone for', user.uid, '— clearing identity')
-  _familyId = ''
-  // Clear local settings.familyId
+/** Confirmed missing/not-a-member clears only local identity, never cloud truth. */
+async function handleFamilyGone(context: SyncContext): Promise<void> {
+  assertCurrent(context)
   try {
     await ipc.mergeSettings({ familyId: '' })
-  } catch (e) {
-    console.warn('[syncEngine] _handleFamilyGone: could not merge settings', e)
+    assertCurrent(context)
+  } catch (error) {
+    if (error instanceof StaleSyncOperationError) return
+    markConnectionRetry(context, error)
+    return
   }
-  // Clear cloud users/{uid}.familyId too
-  try {
-    const { doc, setDoc } = await _firestoreOps()
-    if (_db) {
-      await setDoc(doc(_db, 'users', user.uid), { familyId: '' }, { merge: true })
-    }
-  } catch (e) {
-    console.warn('[syncEngine] _handleFamilyGone: could not clear users doc', e)
+  _familyId = ''
+  detachDataListeners()
+  _connectionNeedsRetry = false
+  _connectionRetryAttempts = 0
+  _connectionNextRetry = 0
+  setState({ status: 'signed-out', detail: DETAIL_FAMILY_GONE, pendingCount: totalPendingCount() })
+}
+
+async function runBabyInfoReconcile(
+  context: SyncContext,
+  familyDataValue?: FamilyBabyInfoDocument,
+): Promise<ReconcileBabyInfoResult> {
+  assertCurrent(context)
+  const ops = await _firestoreOps()
+  assertCurrent(context)
+  const familyRef = ops.doc(context.db, 'families', context.familyId)
+  let familyData = familyDataValue
+  if (!familyData) {
+    const familySnapshot = await ops.getDoc(familyRef)
+    assertCurrent(context)
+    if (!familySnapshot.exists()) throw new Error('family document not found')
+    familyData = familySnapshot.data() as FamilyBabyInfoDocument
   }
-  setState({ status: 'signed-out', detail: DETAIL_FAMILY_GONE, pendingCount: _pending.length })
+  const result = await reconcileFamilyBabyInfo({
+    db: context.db,
+    familyId: context.familyId,
+    familyRef,
+    familyData,
+    ops,
+    assertCurrent: () => assertCurrent(context),
+  })
+  assertCurrent(context)
+  _babyInfoPendingCount = result.pendingCount
+  _babyInfoNeedsRetry = result.needsRetry
+  if (result.needsRetry) {
+    _babyInfoRetryAttempts += 1
+    const backoff = Math.min(
+      BASE_BACKOFF_MS * Math.pow(2, _babyInfoRetryAttempts - 1),
+      MAX_BACKOFF_MS,
+    )
+    _babyInfoNextRetry = Date.now() + backoff
+    scheduleRetry()
+  } else {
+    _babyInfoRetryAttempts = 0
+    _babyInfoNextRetry = 0
+  }
+  syncPendingCount()
+  return result
 }
 
 /**
@@ -933,14 +1118,16 @@ async function _handleFamilyGone(user: import('firebase/auth').User): Promise<vo
  * 1. 원격에 없는 로컬 revision → batched write로 업로드
  * 2. 로컬에 없는 원격 revision → ipc.appendEvent로 로컬 append (dedup은 JSONL 레이어가 처리)
  */
-async function reconcile(user: User): Promise<void> {
-  if (!_db || !_familyId) return
-
+async function reconcile(context: SyncContext): Promise<void> {
+  assertCurrent(context)
+  const { user, db, familyId } = context
   const { doc, getDoc, collection, getDocs } = await _firestoreOps()
+  assertCurrent(context)
 
   // 가족 문서 확인 (멤버 검증)
-  const familyRef = doc(_db, 'families', _familyId)
+  const familyRef = doc(db, 'families', familyId)
   const familySnap = await getDoc(familyRef)
+  assertCurrent(context)
   if (!familySnap.exists()) {
     throw new Error('family document not found')
   }
@@ -960,12 +1147,14 @@ async function reconcile(user: User): Promise<void> {
     const mutation = ensureEventMutationIdentity(localEvent)
     localMutationMap.set(makeDocId(mutation), mutation)
   }
+  assertCurrent(context)
   const localEvents = Array.from(localMutationMap.values())
   const localDocIds = new Set<string>(localEvents.map(makeDocId))
 
   // 원격 이벤트 docs 전체 조회
-  const eventsRef = collection(_db, 'families', _familyId, 'events')
+  const eventsRef = collection(db, 'families', familyId, 'events')
   const remoteSnap = await getDocs(eventsRef)
+  assertCurrent(context)
 
   const remoteDocIds = new Set<string>()
   const remoteDocuments: Array<{ docId: string; event: DiaryEvent }> = []
@@ -982,14 +1171,17 @@ async function reconcile(user: User): Promise<void> {
 
   // 1. 원격에 없는 로컬 이벤트 → 업로드
   const toUpload = localEvents.filter(e => !remoteDocIds.has(makeDocId(e)))
-  await batchUpload(toUpload)
+  await batchUpload(toUpload, context)
+  assertCurrent(context)
 
   // 2. 로컬에 없는 원격 이벤트 → 로컬 append
   const locallyConfirmedDocIds = new Set(localDocIds)
   const toDownload = remoteDocuments.filter(({ docId }) => !localDocIds.has(docId))
   for (const { docId, event } of toDownload) {
+    assertCurrent(context)
     _seenFromRemote.add(docId)
     const appendResult = await ipc.appendEvent(event)
+    assertCurrent(context)
     if (appendResult !== 'error') locallyConfirmedDocIds.add(docId)
   }
 
@@ -1003,20 +1195,23 @@ async function reconcile(user: User): Promise<void> {
   })
   savePending(_pending)
   syncPendingCount()
+
+  // Baby info uses its own immutable collection and durable AppSettings log.
+  await runBabyInfoReconcile(context)
 }
 
 /** onSnapshot 리스너 부착 — 실시간 원격 업데이트 수신 */
-async function attachSnapshot(): Promise<void> {
-  if (!_db || !_familyId) return
-
-  _unsubSnapshot?.()
-
+async function attachSnapshot(context: SyncContext): Promise<void> {
+  assertCurrent(context)
+  detachDataListeners()
   const { collection, onSnapshot } = await _firestoreOps()
-  const eventsRef = collection(_db, 'families', _familyId, 'events')
+  assertCurrent(context)
+  const eventsRef = collection(context.db, 'families', context.familyId, 'events')
   _unsubSnapshot = onSnapshot(
     eventsRef,
     { includeMetadataChanges: false },
     snapshot => {
+      if (!contextIsCurrent(context)) return
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added' || change.type === 'modified') {
           const event = parseCloudEventDocument(change.doc.id, change.doc.data())
@@ -1026,9 +1221,10 @@ async function attachSnapshot(): Promise<void> {
           }
           const sourceDocId = change.doc.id
           _seenFromRemote.add(sourceDocId)
-          // 로컬 append (JSONL 레이어가 immutable mutation identity로 중복 제거)
-          void ipc.appendEvent(event).then(appendResult => {
-            if (appendResult === 'error') return
+          void (async () => {
+            if (!contextIsCurrent(context)) return
+            const appendResult = await ipc.appendEvent(event)
+            if (!contextIsCurrent(context) || appendResult === 'error') return
             const remoteCanonical = canonicalEventJson(event)
             _pending = _pending.filter(pending => (
               makeDocId(pending.event) !== sourceDocId
@@ -1036,14 +1232,78 @@ async function attachSnapshot(): Promise<void> {
             ))
             savePending(_pending)
             syncPendingCount()
-          }).catch(() => { /* keep pending for retry */ })
+          })().catch(() => { /* durable pending remains for retry */ })
         }
       })
     },
     err => {
-      setState({ status: 'error', detail: `snapshot error: ${err.message}`, pendingCount: _pending.length })
-      scheduleRetry()
+      if (!contextIsCurrent(context)) return
+      detachDataListeners()
+      markConnectionRetry(context, err)
     }
+  )
+
+  const babyInfoRef = collection(context.db, 'families', context.familyId, 'babyInfoMutations')
+  _unsubBabyInfoSnapshot = onSnapshot(
+    babyInfoRef,
+    { includeMetadataChanges: false },
+    snapshot => {
+      if (!contextIsCurrent(context)) return
+      const hasRelevantChange = snapshot.docChanges().some(change => (
+        change.type === 'added' || change.type === 'modified'
+      ))
+      if (!hasRelevantChange) return
+      void enqueueLifecycle(async () => {
+        if (!contextIsCurrent(context)) return
+        try {
+          await runBabyInfoReconcile(context)
+        } catch (error) {
+          if (error instanceof StaleSyncOperationError || !contextIsCurrent(context)) return
+          detachDataListeners()
+          markConnectionRetry(context, error)
+        }
+      })
+    },
+    err => {
+      if (!contextIsCurrent(context)) return
+      detachDataListeners()
+      markConnectionRetry(context, err)
+    },
+  )
+
+  const { doc } = await _firestoreOps()
+  assertCurrent(context)
+  const familyRef = doc(context.db, 'families', context.familyId)
+  _unsubFamilySnapshot = onSnapshot(
+    familyRef,
+    { includeMetadataChanges: false },
+    snapshot => {
+      if (!contextIsCurrent(context)) return
+      void enqueueLifecycle(async () => {
+        if (!contextIsCurrent(context)) return
+        if (!snapshot.exists()) {
+          await handleFamilyGone(context)
+          return
+        }
+        const familyData = snapshot.data() as FamilyDoc
+        if (!familyData.members?.[context.user.uid]) {
+          await handleFamilyGone(context)
+          return
+        }
+        try {
+          await runBabyInfoReconcile(context, familyData)
+        } catch (error) {
+          if (error instanceof StaleSyncOperationError || !contextIsCurrent(context)) return
+          detachDataListeners()
+          markConnectionRetry(context, error)
+        }
+      })
+    },
+    err => {
+      if (!contextIsCurrent(context)) return
+      detachDataListeners()
+      markConnectionRetry(context, err)
+    },
   )
 }
 
@@ -1077,15 +1337,21 @@ export function parseCloudEventDocument(docId: string, data: DocumentData): Diar
  * F6: when the same immutable mutation doc already exists remotely (create-conflict),
  *     we treat remote as winner and fetch it to apply locally via ipc.appendEvent.
  */
-async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | 'error'> {
-  if (!_db || !_familyId) return 'error'
+async function uploadOne(
+  event: DiaryEvent,
+  context: SyncContext,
+): Promise<'ok' | 'already-exists' | 'error'> {
+  assertCurrent(context)
   const { doc, writeBatch, getDoc } = await _firestoreOps()
+  assertCurrent(context)
   const docId = makeDocId(event)
-  const ref = doc(_db, 'families', _familyId, 'events', docId)
+  const ref = doc(context.db, 'families', context.familyId, 'events', docId)
   try {
-    const batch = writeBatch(_db)
+    const batch = writeBatch(context.db)
     batch.set(ref, { event })
+    assertCurrent(context)
     await batch.commit()
+    assertCurrent(context)
     return 'ok'
   } catch (err) {
     // Firestore returns ALREADY_EXISTS (code 6) when a create-only doc already exists
@@ -1096,6 +1362,7 @@ async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | '
     if (code === ERR_PERMISSION_DENIED || String(code) === ERR_PERMISSION_DENIED) {
       try {
         const snapshot = await getDoc(ref)
+        assertCurrent(context)
         if (snapshot.exists() && parseCloudEventDocument(snapshot.id, snapshot.data())) {
           return 'already-exists'
         }
@@ -1117,44 +1384,50 @@ async function uploadOne(event: DiaryEvent): Promise<'ok' | 'already-exists' | '
  * drainQueue uses the returned set to remove only confirmed-ok docs from _pending,
  * so partial-failure events are never silently dropped.
  */
-async function batchUpload(events: DiaryEvent[]): Promise<Set<string>> {
+async function batchUpload(events: DiaryEvent[], context: SyncContext): Promise<Set<string>> {
   const uploaded = new Set<string>()
-  if (!_db || !_familyId || events.length === 0) return uploaded
+  if (events.length === 0) return uploaded
+  assertCurrent(context)
 
   const { doc, writeBatch, getDoc } = await _firestoreOps()
+  assertCurrent(context)
 
   for (let i = 0; i < events.length; i += BATCH_SIZE) {
     const chunk = events.slice(i, i + BATCH_SIZE)
-    const batch = writeBatch(_db)
+    const batch = writeBatch(context.db)
 
     for (const event of chunk) {
       const docId = makeDocId(event)
-      const ref = doc(_db, 'families', _familyId, 'events', docId)
+      const ref = doc(context.db, 'families', context.familyId, 'events', docId)
       batch.set(ref, { event })
     }
 
     try {
+      assertCurrent(context)
       await batch.commit()
+      assertCurrent(context)
       // Full batch succeeded — all docs in this chunk are uploaded
       for (const event of chunk) uploaded.add(makeDocId(event))
     } catch {
       // F7: batch failed — fall back to per-doc so one poison doc can't block the rest
       for (const event of chunk) {
         const docId = makeDocId(event)
-        const result = await uploadOne(event)
+        const result = await uploadOne(event, context)
         if (result === 'ok') {
           uploaded.add(docId)
         } else if (result === 'already-exists') {
           // F6: remote won — fetch it and apply locally, then converge
           let converged = false
           try {
-            const ref = doc(_db, 'families', _familyId, 'events', docId)
+            const ref = doc(context.db, 'families', context.familyId, 'events', docId)
             const remoteSnap = await getDoc(ref)
+            assertCurrent(context)
             if (remoteSnap.exists()) {
               const remoteEvent = parseCloudEventDocument(remoteSnap.id, remoteSnap.data())
               if (remoteEvent) {
                 _seenFromRemote.add(docId)
                 const appendResult = await ipc.appendEvent(remoteEvent)
+                assertCurrent(context)
                 converged = appendResult !== 'error'
                   && canonicalEventJson(remoteEvent) === canonicalEventJson(event)
               }
@@ -1173,19 +1446,41 @@ async function batchUpload(events: DiaryEvent[]): Promise<Set<string>> {
 }
 
 /** 업로드 큐 드레인 */
-async function drainQueue(): Promise<void> {
-  if (!_db || !_familyId || _pending.length === 0) return
+async function drainQueue(context: SyncContext): Promise<void> {
+  if (!contextIsCurrent(context)) return
 
   const now = Date.now()
+  if (_babyInfoNeedsRetry && _babyInfoNextRetry <= now) {
+    try {
+      await runBabyInfoReconcile(context)
+      assertCurrent(context)
+    } catch (error) {
+      if (error instanceof StaleSyncOperationError || !contextIsCurrent(context)) return
+      _babyInfoNeedsRetry = true
+      _babyInfoRetryAttempts += 1
+      const backoff = Math.min(
+        BASE_BACKOFF_MS * Math.pow(2, _babyInfoRetryAttempts - 1),
+        MAX_BACKOFF_MS,
+      )
+      _babyInfoNextRetry = Date.now() + backoff
+      syncPendingCount()
+      scheduleRetry()
+    }
+  }
+
   const ready = _pending.filter(p => p.nextRetry <= now)
-  if (ready.length === 0) return
+  if (ready.length === 0) {
+    if (_pending.length > 0 || _babyInfoNeedsRetry) scheduleRetry()
+    return
+  }
 
   const toUpload = ready.map(p => p.event)
 
   try {
     // P2: batchUpload now returns only the set of docIds that succeeded or converged.
     // We filter _pending by that set so partial-failure docs stay for retry.
-    const uploadedIds = await batchUpload(toUpload)
+    const uploadedIds = await batchUpload(toUpload, context)
+    assertCurrent(context)
     _pending = _pending.filter(p => !uploadedIds.has(makeDocId(p.event)))
     // Apply backoff to any docs that were attempted but NOT confirmed (still in pending)
     const attemptedDocIds = new Set(toUpload.map(makeDocId))
@@ -1197,12 +1492,17 @@ async function drainQueue(): Promise<void> {
     })
     savePending(_pending)
     syncPendingCount()
-    if (_pending.length === 0) {
-      setState({ status: 'online', detail: _currentUser?.email ? `${_currentUser.email} connected` : 'connected', pendingCount: 0 })
+    if (totalPendingCount() === 0) {
+      setState({
+        status: 'online',
+        detail: _currentUser?.email ? `${_currentUser.email} connected` : 'connected',
+        pendingCount: 0,
+      })
     } else {
       scheduleRetry()
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof StaleSyncOperationError || !contextIsCurrent(context)) return
     // batchUpload itself threw (e.g. network-level error before any doc processed)
     // 실패: 지수 백오프로 재시도 시간 설정
     _pending = _pending.map(p => {
@@ -1221,16 +1521,31 @@ async function drainQueue(): Promise<void> {
 function scheduleRetry(): void {
   if (_retryTimer) return
 
-  const nextRetry = _pending.length > 0
-    ? Math.min(..._pending.map(p => p.nextRetry))
+  const retryTimes = _pending.map(p => p.nextRetry)
+  if (_babyInfoNeedsRetry) retryTimes.push(_babyInfoNextRetry)
+  if (_connectionNeedsRetry) retryTimes.push(_connectionNextRetry)
+  const nextRetry = retryTimes.length > 0
+    ? Math.min(...retryTimes)
     : Date.now() + 30_000
 
   const delay = Math.max(nextRetry - Date.now(), 1_000)
 
+  const generation = _generation
   _retryTimer = setTimeout(() => {
     _retryTimer = null
-    if (_state.status === 'online' || _state.status === 'error') {
-      void drainQueue()
+    if (generation !== _generation) return
+    if (_connectionNeedsRetry && _connectionNextRetry <= Date.now() && _db && _currentUser) {
+      const context: AuthContext = {
+        generation,
+        db: _db,
+        user: _currentUser,
+      }
+      void enqueueLifecycle(() => onUserSignedIn(context))
+      return
+    }
+    const context = currentContext()
+    if (context && (_state.status === 'online' || _state.status === 'error')) {
+      void enqueueLifecycle(() => drainQueue(context))
     }
   }, delay)
 }

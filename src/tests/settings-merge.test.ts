@@ -24,6 +24,15 @@ function makeSettings(overrides?: Partial<AppSettings>): AppSettings {
   }
 }
 
+function commitPair(store: SettingsStore, name: string, birthdate: string): void {
+  store.commitBabyInfo({
+    kind: 'user-edit',
+    familyId: store.get().familyId,
+    babyName: name,
+    babyBirthdate: birthdate,
+  })
+}
+
 describe('SettingsStore.merge', () => {
   let tmpDir: string
   let store: SettingsStore
@@ -39,6 +48,7 @@ describe('SettingsStore.merge', () => {
 
   it('merge writes only the provided fields, leaves others intact', () => {
     store.save(makeSettings({ familyId: 'fam-001', baby: { name: 'Sora', birthdate: '2024-06-01' } }))
+    commitPair(store, 'Sora', '2024-06-01')
     store.merge({ familyId: 'fam-002' })
     const result = store.get()
     expect(result.familyId).toBe('fam-002')
@@ -50,6 +60,7 @@ describe('SettingsStore.merge', () => {
   it('merge re-reads disk — stale full-save from Session A cannot resurrect old familyId', () => {
     // Initial state on disk
     store.save(makeSettings({ familyId: 'fam-old' }))
+    commitPair(store, 'Test Baby', '2024-01-01')
 
     // Session A reads OLD state (simulated by reading before Session B writes)
     const storeA = new SettingsStore(tmpDir) // fresh instance = fresh disk read
@@ -76,21 +87,27 @@ describe('SettingsStore.merge', () => {
     expect(final.baby.name).toBe(staleSettings.baby.name) // baby write from A applied
   })
 
-  it('merge deep-merges nested baby object without clobbering unrelated fields', () => {
+  it('merge deep-merges unmanaged baby fields without changing the managed pair', () => {
     store.save(makeSettings({
       baby: { name: 'Hana', birthdate: '2024-03-15', gender: 'girl' },
       familyId: 'fam-xyz',
     }))
-    // Merge only name — gender and birthdate must survive
-    store.merge({ baby: { name: 'Hana Updated', birthdate: '2024-03-15' } })
+    commitPair(store, 'Hana', '2024-03-15')
+    // Generic merge cannot change the managed name/date; gender still survives.
+    store.merge({
+      baby: { name: 'Hana Updated', birthdate: '2024-03-15' },
+      babyInfoRevision: store.get().babyInfoRevision,
+    })
     const result = store.get()
-    expect(result.baby.name).toBe('Hana Updated')
+    expect(result.baby.name).toBe('Hana')
+    expect(result.baby.birthdate).toBe('2024-03-15')
     expect(result.baby.gender).toBe('girl') // preserved via deep-merge
     expect(result.familyId).toBe('fam-xyz') // untouched
   })
 
   it('merge with { familyId: "" } clears familyId without touching other fields', () => {
     store.save(makeSettings({ familyId: 'fam-xyz', baby: { name: 'Rio', birthdate: '2025-01-01' } }))
+    commitPair(store, 'Rio', '2025-01-01')
     store.merge({ familyId: '' })
     const result = store.get()
     expect(result.familyId).toBe('')

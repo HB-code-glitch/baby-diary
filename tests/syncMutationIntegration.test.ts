@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DiaryEvent } from '../shared/types'
+import type { AppSettings, DiaryEvent } from '../shared/types'
 
 type FakeDoc = {
   id: string
@@ -15,6 +15,13 @@ const harness = vi.hoisted(() => ({
   localEvents: [] as DiaryEvent[],
   appended: [] as DiaryEvent[],
   remote: new Map<string, DiaryEvent>(),
+  babyRemote: new Map<string, Record<string, unknown>>(),
+  settings: {
+    baby: { name: 'Sync Baby', birthdate: '2026-01-15' },
+    profile: { uid: 'user-1', name: 'Parent', role: 'mom' as const },
+    familyId: 'family-1',
+    firebase: null,
+  } as AppSettings,
   snapshot: null as null | ((snapshot: { docChanges: () => unknown[] }) => void),
   blockWrites: false,
 }))
@@ -36,15 +43,38 @@ vi.mock('../src/lib/ipc', () => ({
       harness.appended.push(event)
       return 'ok'
     }),
-    getSettings: vi.fn(async () => ({
-      baby: { name: 'Sync Baby', birthdate: '2026-01-15' },
-      profile: { uid: 'user-1', name: 'Parent', role: 'mom' as const },
-      familyId: 'family-1',
-      firebase: null,
-    })),
-    mergeSettings: vi.fn(async () => undefined),
+    getSettings: vi.fn(async () => structuredClone(harness.settings)),
+    saveSettings: vi.fn(async (settings: AppSettings) => {
+      const { applyManagedSettingsSave } = await import('../shared/babyInfoSettingsCommit')
+      harness.settings = applyManagedSettingsSave(harness.settings, settings)
+      return structuredClone(harness.settings)
+    }),
+    mergeSettings: vi.fn(async (partial: Partial<AppSettings>) => {
+      const { applyManagedSettingsMerge } = await import('../shared/babyInfoSettingsCommit')
+      harness.settings = applyManagedSettingsMerge(harness.settings, partial)
+      return structuredClone(harness.settings)
+    }),
+    commitBabyInfo: vi.fn(async () => {
+      throw new Error('baby-info subsystem is isolated in this event-collision suite')
+    }),
     onEventAppended: vi.fn(() => () => undefined),
   },
+}))
+
+// This suite exercises immutable event collisions. Baby-info lifecycle and
+// journal behavior have dedicated real-path suites, so isolate that subsystem.
+vi.mock('../src/sync/babyInfoSync', () => ({
+  makeBabyInfoDocId: vi.fn(() => 'baby-info'),
+  parseCloudBabyInfoDocument: vi.fn(() => null),
+  persistSettingsWithBabyInfoMutation: vi.fn(),
+  reconcileFamilyBabyInfo: vi.fn(async () => ({
+    pendingCount: 0,
+    activePendingCount: 0,
+    needsRetry: false,
+    uploadFailures: 0,
+    settings: structuredClone(harness.settings),
+  })),
+  setBabyInfoPersistenceObserver: vi.fn(),
 }))
 
 vi.mock('firebase/auth', async () => {
@@ -74,6 +104,12 @@ vi.mock('firebase/firestore', async () => {
     return { kind: 'doc', path, id: path.split('/').at(-1) ?? '' }
   })
 
+  const query = vi.fn((ref: unknown) => ref)
+  const orderBy = vi.fn(() => ({}))
+  const documentId = vi.fn(() => '__name__')
+  const startAfter = vi.fn(() => ({}))
+  const limit = vi.fn(() => ({}))
+
   const familyData = {
     name: 'Family',
     babyName: 'Sync Baby',
@@ -90,17 +126,28 @@ vi.mock('firebase/firestore', async () => {
     if (ref.path === 'families/family-1') {
       return { id: ref.id, exists: () => true, data: () => familyData }
     }
+    if (ref.path.includes('/babyInfoMutations/')) {
+      const data = harness.babyRemote.get(ref.id)
+      return { id: ref.id, exists: () => data !== undefined, data: () => data }
+    }
     const event = harness.remote.get(ref.id)
     return { id: ref.id, exists: () => Boolean(event), data: () => ({ event }) }
   })
 
-  const getDocs = vi.fn(async () => ({
-    docs: [...harness.remote.entries()].map(([id, event]): FakeDoc => ({
+  const getDocs = vi.fn(async (ref: { path: string }) => ({
+    docs: ref.path.endsWith('/babyInfoMutations')
+      ? [...harness.babyRemote.entries()].map(([id, data]): FakeDoc => ({
+          id,
+          path: `families/family-1/babyInfoMutations/${id}`,
+          exists: () => true,
+          data: () => data,
+        }))
+      : [...harness.remote.entries()].map(([id, event]): FakeDoc => ({
       id,
       path: `families/family-1/events/${id}`,
       exists: () => true,
       data: () => ({ event }),
-    })),
+        })),
   }))
 
   const writeBatch = vi.fn(() => {
@@ -120,11 +167,11 @@ vi.mock('firebase/firestore', async () => {
   })
 
   const onSnapshot = vi.fn((
-    _ref: unknown,
+    ref: { path?: string },
     _options: unknown,
     callback: (snapshot: { docChanges: () => unknown[] }) => void,
   ) => {
-    harness.snapshot = callback
+    if (ref.path?.endsWith('/events')) harness.snapshot = callback
     return () => undefined
   })
 
@@ -132,9 +179,16 @@ vi.mock('firebase/firestore', async () => {
     ...actual,
     collection,
     doc,
+    query,
+    orderBy,
+    documentId,
+    startAfter,
+    limit,
     getDoc,
     getDocs,
-    setDoc: vi.fn(async () => undefined),
+    setDoc: vi.fn(async (ref: { path: string; id: string }, data: Record<string, unknown>) => {
+      if (ref.path.includes('/babyInfoMutations/')) harness.babyRemote.set(ref.id, data)
+    }),
     updateDoc: vi.fn(async () => undefined),
     onSnapshot,
     writeBatch,
@@ -186,6 +240,13 @@ describe('sync mutation collision integration', () => {
     harness.localEvents = []
     harness.appended = []
     harness.remote.clear()
+    harness.babyRemote.clear()
+    harness.settings = {
+      baby: { name: 'Sync Baby', birthdate: '2026-01-15' },
+      profile: { uid: 'user-1', name: 'Parent', role: 'mom' },
+      familyId: 'family-1',
+      firebase: null,
+    }
     harness.snapshot = null
     harness.blockWrites = false
   })

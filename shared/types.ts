@@ -61,7 +61,106 @@ export interface AppSettings {
   } | null
   language?: 'ko' | 'ja'
   theme?: 'light' | 'dark' | 'system'
+  /** Durable, lossless baby-info mutation log. Missing only on legacy settings. */
+  babyInfoSync?: BabyInfoSyncState
+  /** Bounded projection metadata for the main-process sidecar journal. */
+  babyInfoJournal?: BabyInfoJournalMetadata
+  /** Main-process managed revision guarding the baby-info pair and sync state. */
+  babyInfoRevision?: number
 }
+
+export interface BabyInfoJournalMetadata {
+  version: 1
+  /** Empty only while the app is not linked to a family. */
+  projectedFamilyId: string
+  projectedWinnerKey?: string
+}
+
+export type BabyInfoMutationOrigin = 'user' | 'legacy-local' | 'legacy-cloud'
+
+export interface BabyInfoMutation {
+  mutationId: string
+  familyId: string
+  babyName: string
+  babyBirthdate: string
+  logicalClock: number
+  updatedAt: string
+  authorId: string
+  origin: BabyInfoMutationOrigin
+}
+
+export interface BabyInfoSyncState {
+  version: 1
+  mutations: BabyInfoMutation[]
+  /** Exact content-bound identities awaiting verified cloud read-back. */
+  pendingMutationKeys: string[]
+}
+
+export type BabyInfoPersistenceStatus = 'unchanged' | 'local-only' | 'pending'
+
+export interface BabyInfoUserEditCommit {
+  kind: 'user-edit'
+  /** Empty is allowed only for an unlinked, local-only edit. */
+  familyId: string
+  babyName: string
+  babyBirthdate: string
+}
+
+export interface BabyInfoReconcileCommit {
+  kind: 'reconcile'
+  familyId: string
+  /** Strictly validated immutable originals discovered during network work. */
+  discoveredMutations: BabyInfoMutation[]
+  /** Content-bound keys confirmed by an exact Firestore read-back. */
+  exactAcknowledgedMutationKeys: string[]
+}
+
+export type BabyInfoSettingsCommitOperation =
+  | BabyInfoUserEditCommit
+  | BabyInfoReconcileCommit
+
+export interface BabyInfoSettingsCommitResult {
+  kind: BabyInfoSettingsCommitOperation['kind']
+  settings: AppSettings
+  babyInfo: BabyInfoPersistenceStatus
+  /** Present only when a user edit created a new immutable original. */
+  mutation?: BabyInfoMutation
+  /** All durable pending identities across every retained family. */
+  pendingCount: number
+  /** Count only; pending originals are fetched through bounded page IPC. */
+  activePendingCount: number
+  winner?: BabyInfoMutation
+}
+
+export interface BabyInfoPendingPageRequest {
+  familyId: string
+  limit: number
+  afterKey?: string
+}
+
+export interface BabyInfoPendingPage {
+  items: BabyInfoMutation[]
+  nextCursor?: string
+}
+
+export interface BabyInfoJournalSummary {
+  familyId: string
+  mutationCount: number
+  pendingCount: number
+  /** All durable pending identities across every retained family. */
+  totalPendingCount: number
+  winner?: BabyInfoMutation
+}
+
+export type BabyInfoCommitErrorCode =
+  | 'INVALID_OPERATION'
+  | 'FAMILY_MISMATCH'
+  | 'STORAGE_FAILURE'
+  | 'INTERNAL_ERROR'
+
+export type BabyInfoCommitIpcResponse =
+  | { ok: true; value: BabyInfoSettingsCommitResult }
+  | { ok: false; error: { code: BabyInfoCommitErrorCode; message: string } }
 
 export interface DataInfo {
   dataDir: string

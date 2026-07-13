@@ -5,7 +5,15 @@ import { pathToFileURL } from 'url'
 import { EventLog } from './store/eventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
-import { DiaryEvent, AppSettings, ExportFormat, SavePdfResult } from '../shared/types'
+import type {
+  AppSettings,
+  BabyInfoCommitIpcResponse,
+  BabyInfoSettingsCommitOperation,
+  DiaryEvent,
+  ExportFormat,
+  SavePdfResult,
+} from '../shared/types'
+import { BabyInfoSettingsCommitError } from '../shared/babyInfoSettingsCommit'
 import { attachUpdaterWindow, setupUpdater, stopUpdater, isUpdaterRunning } from './updater'
 import { registerEvidenceExternalLinkIPC } from './evidenceExternalLink'
 import { hardenBrowserWindow } from './windowSecurity'
@@ -50,6 +58,16 @@ let mainWindow: BrowserWindow | null = null
 let eventLog: EventLog
 let settingsStore: SettingsStore
 let backupManager: BackupManager
+let settingsChangeSequence = 0
+
+function publishAuthoritativeSettings(settings: AppSettings): void {
+  if (!mainWindow) return
+  settingsChangeSequence += 1
+  mainWindow.webContents.send('settings:changed', {
+    sequence: settingsChangeSequence,
+    settings,
+  })
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -118,11 +136,56 @@ function setupIPC(): void {
   })
 
   ipcMain.handle('settings:save', async (_, settings: AppSettings) => {
-    settingsStore.save(settings)
+    const saved = settingsStore.save(settings)
+    publishAuthoritativeSettings(saved)
+    return saved
   })
 
   ipcMain.handle('settings:merge', async (_, partial: Partial<AppSettings>) => {
-    settingsStore.merge(partial)
+    const saved = settingsStore.merge(partial)
+    publishAuthoritativeSettings(saved)
+    return saved
+  })
+
+  ipcMain.handle('babyInfo:listPending', async (_, request: unknown) => {
+    return settingsStore.listPendingBabyInfo(request)
+  })
+
+  ipcMain.handle('babyInfo:getSummary', async (_, familyId: string) => {
+    return settingsStore.getBabyInfoSummary(familyId)
+  })
+
+  ipcMain.handle('settings:commitBabyInfo', async (
+    _,
+    operation: BabyInfoSettingsCommitOperation,
+  ): Promise<BabyInfoCommitIpcResponse> => {
+    try {
+      const value = settingsStore.commitBabyInfo(operation)
+      publishAuthoritativeSettings(value.settings)
+      return { ok: true, value }
+    } catch (error) {
+      if (error instanceof BabyInfoSettingsCommitError) {
+        return {
+          ok: false,
+          error: {
+            code: error.code,
+            message: error.code === 'FAMILY_MISMATCH'
+              ? 'Baby info family changed. Refresh and try again.'
+              : 'Invalid baby info operation.',
+          },
+        }
+      }
+      const storageFailure = error instanceof Error && error.message.startsWith('[Settings] save failed:')
+      return {
+        ok: false,
+        error: {
+          code: storageFailure ? 'STORAGE_FAILURE' : 'INTERNAL_ERROR',
+          message: storageFailure
+            ? 'Unable to save baby info settings.'
+            : 'Unable to commit baby info settings.',
+        },
+      }
+    }
   })
 
   ipcMain.handle('data:export', async (_, format: ExportFormat) => {

@@ -3,7 +3,8 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { SettingsStore } from '../electron/store/settings'
-import { AppSettings } from '../shared/types'
+import { AppSettings, BabyInfoMutation, BabyInfoSettingsCommitResult } from '../shared/types'
+import { getBabyInfoMutationKey } from '../shared/babyInfoResolver'
 
 describe('SettingsStore', () => {
   let tmpDir: string
@@ -18,7 +19,7 @@ describe('SettingsStore', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('atomic write: saves and loads settings correctly', () => {
+  it('atomic generic write saves ordinary settings without changing the main-owned baby pair', () => {
     const settings: AppSettings = {
       baby: { name: '아기', birthdate: '2024-01-01' },
       profile: { uid: 'uid1', name: '아빠', role: 'dad' },
@@ -31,7 +32,7 @@ describe('SettingsStore', () => {
     const store2 = new SettingsStore(tmpDir)
     const loaded = store2.get()
 
-    expect(loaded.baby.name).toBe('아기')
+    expect(loaded.baby).toMatchObject({ name: '', birthdate: '' })
     expect(loaded.profile.role).toBe('dad')
     expect(loaded.familyId).toBe('family1')
   })
@@ -52,6 +53,44 @@ describe('SettingsStore', () => {
 
     const settingsFile = files.find(f => f === 'settings.json')
     expect(settingsFile).toBeDefined()
+  })
+
+  it('round-trips a committed durable baby-info log and exact pending identity', () => {
+    const mutation: BabyInfoMutation = {
+      mutationId: '10000000-0000-4000-8000-000000000001',
+      familyId: 'family1',
+      babyName: '',
+      babyBirthdate: '',
+      logicalClock: 1,
+      updatedAt: '2026-07-13T01:02:03.000Z',
+      authorId: 'uid1',
+      origin: 'user',
+    }
+    const settings: AppSettings = {
+      baby: { name: '', birthdate: '' },
+      profile: { uid: 'uid1', name: '아빠', role: 'dad' },
+      familyId: 'family1',
+      firebase: null,
+    }
+
+    store.save(settings)
+    const committed = store.commitBabyInfo({
+      kind: 'reconcile',
+      familyId: 'family1',
+      discoveredMutations: [mutation],
+      exactAcknowledgedMutationKeys: [],
+    })
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().babyInfoSync).toBeUndefined()
+    expect(restarted.getBabyInfoSummary('family1')).toMatchObject({
+      mutationCount: 1,
+      pendingCount: 1,
+      winner: mutation,
+    })
+    expect(restarted.listPendingBabyInfo({ familyId: 'family1', limit: 10 }).items)
+      .toEqual([mutation])
+    expect(committed.activePendingCount).toBe(1)
   })
 
   // ── BOM handling ────────────────────────────────────────────────────────────
@@ -142,5 +181,222 @@ describe('SettingsStore', () => {
     const loaded = new SettingsStore(tmpDir).get()
     expect(loaded.baby.name).toBe('최신아기')
     expect(loaded.familyId).toBe('new-family')
+  })
+
+  describe('managed baby-info commits', () => {
+    function initialSettings(): AppSettings {
+      return {
+        baby: { name: 'Before', birthdate: '2026-01-01' },
+        profile: { uid: 'uid-main', name: 'Parent', role: 'mom' },
+        familyId: 'family-main',
+        firebase: null,
+        language: 'ko',
+      }
+    }
+
+    function commitUserEdit(
+      target: SettingsStore,
+      _next: AppSettings,
+      name: string,
+      birthdate: string,
+    ): BabyInfoSettingsCommitResult {
+      return target.commitBabyInfo({
+        kind: 'user-edit',
+        familyId: target.get().familyId,
+        babyName: name,
+        babyBirthdate: birthdate,
+      })
+    }
+
+    function commitReconcile(
+      target: SettingsStore,
+      discoveredMutations: BabyInfoMutation[],
+      exactAcknowledgedMutationKeys: string[],
+    ): BabyInfoSettingsCommitResult {
+      return target.commitBabyInfo({
+        kind: 'reconcile',
+        familyId: 'family-main',
+        discoveredMutations,
+        exactAcknowledgedMutationKeys,
+      })
+    }
+
+    it('keeps the newest log, pending identity and pair across a stale full save', () => {
+      store.save(initialSettings())
+      const stale = store.get()
+      const committed = commitUserEdit(
+        store,
+        { ...stale, baby: { ...stale.baby, name: 'Newest', birthdate: '2026-07-01' } },
+        'Newest',
+        '2026-07-01',
+      )
+
+      store.save({ ...stale, theme: 'dark' })
+
+      const current = store.get()
+      expect(current.theme).toBe('dark')
+      expect(current.baby).toMatchObject({ name: 'Newest', birthdate: '2026-07-01' })
+      expect(current.babyInfoSync).toBeUndefined()
+      expect(current.babyInfoJournal).toEqual(committed.settings.babyInfoJournal)
+      expect(current.babyInfoRevision).toBe(committed.settings.babyInfoRevision)
+      expect(store.getBabyInfoSummary('family-main').pendingCount).toBe(1)
+    })
+
+    it('keeps managed baby info across a stale partial merge and an old renderer payload', () => {
+      store.save(initialSettings())
+      const stale = store.get()
+      const committed = commitUserEdit(
+        store,
+        { ...stale, baby: { ...stale.baby, name: 'Managed', birthdate: '2026-07-02' } },
+        'Managed',
+        '2026-07-02',
+      )
+      const oldRenderer = { ...stale } as Partial<AppSettings>
+      delete oldRenderer.babyInfoSync
+      delete oldRenderer.babyInfoRevision
+
+      store.merge({ ...oldRenderer, language: 'ja' })
+
+      const current = store.get()
+      expect(current.language).toBe('ja')
+      expect(current.baby).toMatchObject({ name: 'Managed', birthdate: '2026-07-02' })
+      expect(current.babyInfoSync).toBeUndefined()
+      expect(current.babyInfoJournal).toEqual(committed.settings.babyInfoJournal)
+      expect(current.babyInfoRevision).toBe(committed.settings.babyInfoRevision)
+      expect(store.getBabyInfoSummary('family-main').pendingCount).toBe(1)
+    })
+
+    it('does not resurrect an acknowledged pending key from a stale generic save', () => {
+      store.save(initialSettings())
+      const staleBeforeCommit = store.get()
+      const edited = commitUserEdit(
+        store,
+        { ...staleBeforeCommit, baby: { name: 'Acked', birthdate: '2026-07-03' } },
+        'Acked',
+        '2026-07-03',
+      )
+      const stalePending = edited.settings
+      const key = getBabyInfoMutationKey(edited.mutation!)
+
+      const reconciled = commitReconcile(store, [], [key])
+      expect(reconciled.activePendingCount).toBe(0)
+
+      store.save(stalePending)
+
+      expect(store.get().babyInfoSync).toBeUndefined()
+      expect(store.getBabyInfoSummary('family-main').pendingCount).toBe(0)
+      expect(store.get().babyInfoRevision).toBe(reconciled.settings.babyInfoRevision)
+    })
+
+    it('persists the invariant across SettingsStore recreation', () => {
+      store.save(initialSettings())
+      const stale = store.get()
+      const committed = commitUserEdit(
+        store,
+        { ...stale, baby: { name: 'Restart-safe', birthdate: '2026-07-04' } },
+        'Restart-safe',
+        '2026-07-04',
+      )
+
+      const restarted = new SettingsStore(tmpDir)
+      restarted.save(stale)
+
+      expect(new SettingsStore(tmpDir).get()).toMatchObject({
+        baby: { name: 'Restart-safe', birthdate: '2026-07-04' },
+        babyInfoJournal: committed.settings.babyInfoJournal,
+        babyInfoRevision: committed.settings.babyInfoRevision,
+      })
+      expect(new SettingsStore(tmpDir).getBabyInfoSummary('family-main').pendingCount).toBe(1)
+    })
+
+    it('preserves both originals with distinct clocks when stale user commits arrive in reverse order', async () => {
+      store.save(initialSettings())
+      const stale = store.get()
+
+      const late = new Promise<void>(resolve => {
+        setTimeout(() => {
+          commitUserEdit(store, stale, 'First requested', '2026-07-05')
+          resolve()
+        }, 5)
+      })
+      const early = Promise.resolve().then(() => {
+        commitUserEdit(store, stale, 'Second requested', '2026-07-06')
+      })
+      await Promise.all([late, early])
+
+      const users = store.listPendingBabyInfo({ familyId: 'family-main', limit: 10 }).items
+        .filter(mutation => mutation.origin === 'user')
+      expect(users.map(mutation => mutation.babyName)).toEqual(
+        expect.arrayContaining(['First requested', 'Second requested']),
+      )
+      expect(new Set(users.map(mutation => mutation.logicalClock)).size).toBe(2)
+      expect(store.getBabyInfoSummary('family-main').pendingCount).toBe(2)
+    })
+
+    it('rejects malformed and cross-family reconcile operations without writing', () => {
+      store.save(initialSettings())
+      const before = store.get()
+      const foreign: BabyInfoMutation = {
+        mutationId: '10000000-0000-4000-8000-000000000099',
+        familyId: 'family-foreign',
+        babyName: 'Foreign',
+        babyBirthdate: '2026-01-01',
+        logicalClock: 1,
+        updatedAt: '2026-07-13T00:00:00.000Z',
+        authorId: 'uid-foreign',
+        origin: 'user',
+      }
+      const commit = (operation: unknown) => (
+        store as SettingsStore & { commitBabyInfo: (value: unknown) => unknown }
+      ).commitBabyInfo(operation)
+
+      expect(() => commit(undefined)).toThrow(/invalid|shape/i)
+      expect(() => commit({
+        kind: 'reconcile',
+        familyId: 'family-main',
+        discoveredMutations: [foreign],
+        exactAcknowledgedMutationKeys: [],
+      })).toThrow(/family/i)
+      expect(() => commit({
+        kind: 'reconcile',
+        familyId: 'family-main',
+        discoveredMutations: [],
+        exactAcknowledgedMutationKeys: [],
+        unexpected: true,
+      })).toThrow(/invalid/i)
+      expect(() => commit({
+        kind: 'reconcile',
+        familyId: 'family-main',
+        discoveredMutations: [],
+        exactAcknowledgedMutationKeys: [
+          'baby-info:10000000-0000-4000-8000-000000000088:10000000-0000-4000-8000-000000000077',
+        ],
+      })).toThrow(/known/i)
+      expect(() => commit({
+        kind: 'user-edit',
+        familyId: 'family-main',
+        babyName: 'x'.repeat(2_000_001),
+        babyBirthdate: '',
+      })).toThrow(/too large/i)
+      expect(store.get()).toEqual(before)
+    })
+
+    it('propagates an atomic disk failure without publishing an unpersisted mutation', () => {
+      store.save(initialSettings())
+      store = new SettingsStore(tmpDir)
+      const before = store.get()
+      const settingsPath = path.join(tmpDir, 'settings.json')
+      fs.rmSync(settingsPath)
+      fs.mkdirSync(settingsPath)
+
+      expect(() => commitUserEdit(
+        store,
+        { ...before, baby: { name: 'Must not publish', birthdate: '2026-07-07' } },
+        'Must not publish',
+        '2026-07-07',
+      )).toThrow(/save failed/i)
+
+      expect(store.get()).toEqual(before)
+    })
   })
 })

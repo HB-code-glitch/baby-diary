@@ -1,5 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DiaryEvent, AppSettings, DataInfo, ExportFormat, SavePdfResult, FirebaseEmulatorBridge } from '../shared/types'
+import type {
+  AppSettings,
+  BabyInfoCommitIpcResponse,
+  BabyInfoSettingsCommitOperation,
+  BabyInfoJournalSummary,
+  BabyInfoPendingPage,
+  BabyInfoPendingPageRequest,
+  DataInfo,
+  DiaryEvent,
+  ExportFormat,
+  FirebaseEmulatorBridge,
+  SavePdfResult,
+} from '../shared/types'
 import type { HealthEvidenceSourceId } from '../shared/healthEvidence'
 
 // Sandboxed preload scripts cannot require local runtime modules. Keep this
@@ -26,11 +38,20 @@ const babyDiaryAPI = {
   getSettings: (): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:get'),
 
-  saveSettings: (settings: AppSettings): Promise<void> =>
+  saveSettings: (settings: AppSettings): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:save', settings),
 
-  mergeSettings: (partial: Partial<AppSettings>): Promise<void> =>
+  mergeSettings: (partial: Partial<AppSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:merge', partial),
+
+  commitBabyInfo: (operation: BabyInfoSettingsCommitOperation): Promise<BabyInfoCommitIpcResponse> =>
+    ipcRenderer.invoke('settings:commitBabyInfo', operation),
+
+  listPendingBabyInfo: (request: BabyInfoPendingPageRequest): Promise<BabyInfoPendingPage> =>
+    ipcRenderer.invoke('babyInfo:listPending', request),
+
+  getBabyInfoSummary: (familyId: string): Promise<BabyInfoJournalSummary> =>
+    ipcRenderer.invoke('babyInfo:getSummary', familyId),
 
   exportData: (format: ExportFormat): Promise<void> =>
     ipcRenderer.invoke('data:export', format),
@@ -45,6 +66,15 @@ const babyDiaryAPI = {
     const handler = (_: Electron.IpcRendererEvent, event: DiaryEvent) => callback(event)
     ipcRenderer.on('event:appended', handler)
     return () => ipcRenderer.removeListener('event:appended', handler)
+  },
+
+  onSettingsChanged: (callback: (payload: { sequence: number; settings: AppSettings }) => void): (() => void) => {
+    const handler = (
+      _: Electron.IpcRendererEvent,
+      payload: { sequence: number; settings: AppSettings },
+    ) => callback(payload)
+    ipcRenderer.on('settings:changed', handler)
+    return () => ipcRenderer.removeListener('settings:changed', handler)
   },
 
   // ── Auto-update ────────────────────────────────────────────────────────────

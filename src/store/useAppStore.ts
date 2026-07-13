@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import { DiaryEvent, AppSettings, DataInfo, EventType, BreastData, FormulaData, SleepData, GrowthData } from '../../shared/types'
 import { ipc } from '../lib/ipc'
-import { enqueue } from '../sync/syncEngine'
+import { enqueue, persistSettingsWithBabyInfoMutation } from '../sync/syncEngine'
+import type { BabyInfoPersistenceResult } from '../sync/babyInfoSync'
 import { v4 as uuidv4 } from 'uuid'
 import { format, isToday, parseISO, startOfDay, isSameDay } from 'date-fns'
 import i18n from '../i18n'
@@ -13,6 +14,38 @@ import { mergeResolvedEvent } from '../../shared/eventResolver'
 // ---------------------------------------------------------------------------
 
 function now() { return new Date().toISOString() }
+
+let settingsBridgeUnsubscribe: (() => void) | undefined
+let settingsBridgeGeneration = 0
+let lastSettingsSequence = 0
+let settingsBroadcastEpoch = 0
+let eventBridgeUnsubscribe: (() => void) | undefined
+let eventBridgeGeneration = 0
+
+export function disposeAppStoreSettingsBridge(): void {
+  settingsBridgeGeneration += 1
+  settingsBridgeUnsubscribe?.()
+  settingsBridgeUnsubscribe = undefined
+  lastSettingsSequence = 0
+}
+
+export function disposeAppStoreEventBridge(): void {
+  eventBridgeGeneration += 1
+  eventBridgeUnsubscribe?.()
+  eventBridgeUnsubscribe = undefined
+}
+
+function installAppStoreSettingsBridge(): void {
+  disposeAppStoreSettingsBridge()
+  const generation = settingsBridgeGeneration
+  settingsBridgeUnsubscribe = ipc.onSettingsChanged(payload => {
+    if (generation !== settingsBridgeGeneration) return
+    if (!Number.isSafeInteger(payload.sequence) || payload.sequence <= lastSettingsSequence) return
+    lastSettingsSequence = payload.sequence
+    settingsBroadcastEpoch += 1
+    useAppStore.setState({ settings: payload.settings })
+  })
+}
 
 function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): DiaryEvent {
   const t = now()
@@ -81,7 +114,8 @@ interface AppState {
   todaySleepMinutes: () => number
 
   // Settings
-  saveSettings: (s: AppSettings) => Promise<void>
+  saveSettings: (s: AppSettings) => Promise<AppSettings>
+  saveSettingsWithBabyInfoMutation: (s: AppSettings) => Promise<BabyInfoPersistenceResult>
 
   // External event merge (from sync)
   mergeExternalEvent: (event: DiaryEvent) => void
@@ -114,9 +148,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadSettings: async () => {
+    const startingEpoch = settingsBroadcastEpoch
     try {
       const settings = await ipc.getSettings()
-      set({ settings })
+      if (startingEpoch === settingsBroadcastEpoch) set({ settings })
     } catch (err) {
       set({ error: String(err) })
     }
@@ -132,19 +167,55 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   init: async () => {
-    const { loadEvents, loadSettings, loadDataInfo } = get()
-    // P13: Wait for ALL three loaders before setting isReady so birthdate-derived
-    // render sites (D+, milestone banners, InsightsPanel) never see stale/null
-    // settings while events have already resolved.
-    await Promise.all([loadEvents(), loadSettings(), loadDataInfo()])
-    set({ isReady: true })
+    installAppStoreSettingsBridge()
+    disposeAppStoreEventBridge()
+    const generation = eventBridgeGeneration
+    const bufferedEvents: DiaryEvent[] = []
+    let initializationCommitted = false
 
-    // Subscribe to external events appended by main/sync
-    if (typeof window !== 'undefined' && window.babyDiary) {
-      ipc.onEventAppended((event) => {
-        get().mergeExternalEvent(event)
-      })
+    // Subscribe first. Every append that races the initial disk read is held
+    // until the list result and the other startup state can commit atomically.
+    eventBridgeUnsubscribe = ipc.onEventAppended(event => {
+      if (generation !== eventBridgeGeneration) return
+      if (!initializationCommitted) {
+        bufferedEvents.push(event)
+        return
+      }
+      get().mergeExternalEvent(event)
+    })
+
+    const startingSettingsEpoch = settingsBroadcastEpoch
+    set({ isLoading: true, isReady: false, error: null })
+    const [eventsResult, settingsResult, dataInfoResult] = await Promise.allSettled([
+      ipc.listEvents(),
+      ipc.getSettings(),
+      ipc.getDataInfo(),
+    ])
+    if (generation !== eventBridgeGeneration) return
+
+    let events = eventsResult.status === 'fulfilled'
+      ? eventsResult.value.reduce<DiaryEvent[]>(mergeEventIntoList, [])
+      : get().events
+    for (const event of bufferedEvents) events = mergeEventIntoList(events, event)
+    bufferedEvents.length = 0
+    initializationCommitted = true
+
+    const error = eventsResult.status === 'rejected'
+      ? String(eventsResult.reason)
+      : settingsResult.status === 'rejected'
+        ? String(settingsResult.reason)
+        : null
+    const nextState: Partial<AppState> = {
+      events,
+      isLoading: false,
+      isReady: true,
+      error,
     }
+    if (settingsResult.status === 'fulfilled' && startingSettingsEpoch === settingsBroadcastEpoch) {
+      nextState.settings = settingsResult.value
+    }
+    if (dataInfoResult.status === 'fulfilled') nextState.dataInfo = dataInfoResult.value
+    set(nextState)
   },
 
   // -----------------------------------------------------------------------
@@ -351,8 +422,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   saveSettings: async (s: AppSettings) => {
-    await ipc.saveSettings(s)
-    set({ settings: s })
+    const saved = await ipc.saveSettings(s)
+    set({ settings: saved })
+    return saved
+  },
+
+  saveSettingsWithBabyInfoMutation: async (s: AppSettings) => {
+    const result = await persistSettingsWithBabyInfoMutation(s)
+    set({ settings: result.settings })
+    return result
   },
 
   // -----------------------------------------------------------------------
@@ -371,6 +449,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 // ---------------------------------------------------------------------------
 function mergeEventIntoList(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
   return mergeResolvedEvent(list, incoming)
+}
+
+const appStoreHot = (import.meta as ImportMeta & {
+  hot?: { dispose: (callback: () => void) => void }
+}).hot
+if (appStoreHot) {
+  appStoreHot.dispose(() => {
+    disposeAppStoreEventBridge()
+    disposeAppStoreSettingsBridge()
+  })
 }
 
 // ---------------------------------------------------------------------------

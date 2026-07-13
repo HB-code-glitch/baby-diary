@@ -19,6 +19,7 @@ import {
   stop,
   restartSync,
   updateFamilyBabyInfo,
+  persistSettingsWithBabyInfoMutation,
   updateMemberEntry,
   DETAIL_FAMILY_GONE,
 } from './syncEngine'
@@ -54,15 +55,15 @@ export function useSyncLifecycle(): void {
     // 덕분에 첫 설치에서도 바로 로그인/회원가입 화면으로 진입할 수 있음.
     ipc.getSettings().then(async settings => {
       await configure(settings.firebase, settings.familyId)
-      start()
+      await start()
     }).catch(async () => {
       // 설정 읽기 실패 시에도 기본 설정으로 configure
       await configure(null, '')
-      start()
+      await start()
     })
 
     return () => {
-      stop()
+      void stop()
     }
   }, [])
 }
@@ -86,6 +87,7 @@ export {
   subscribeStatus,
   restartSync,
   updateFamilyBabyInfo,
+  persistSettingsWithBabyInfoMutation,
   updateMemberEntry,
   DETAIL_FAMILY_GONE,
 }

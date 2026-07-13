@@ -2,6 +2,11 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { DiaryEvent } from '../../shared/types'
 import { compareEventMutations, getEventStorageKey, validateDiaryEvent } from '../../shared/eventResolver'
+import {
+  appendDurableFileSync,
+  type DurableFileOps,
+  type DurableWriteOptions,
+} from './durableFs'
 
 /** Validate a DiaryEvent before crossing the append-only storage boundary. */
 export function validateEvent(event: unknown): string | null {
@@ -10,6 +15,9 @@ export function validateEvent(event: unknown): string | null {
 
 export interface EventLogOptions {
   dataDir: string
+  /** Fault-injection seam shared with the durable sidecar writer tests. */
+  fileOps?: DurableFileOps
+  platform?: NodeJS.Platform
 }
 
 export class EventLog {
@@ -18,9 +26,14 @@ export class EventLog {
   /** One entry per immutable mutation physically present in the append-only log. */
   private mutations: Map<string, DiaryEvent> = new Map()
   private loaded = false
+  private readonly durableWriteOptions: DurableWriteOptions
 
   constructor(options: EventLogOptions) {
     this.dataDir = options.dataDir
+    this.durableWriteOptions = {
+      fs: options.fileOps,
+      platform: options.platform,
+    }
   }
 
   private getMonthFile(isoDate: string): string {
@@ -129,13 +142,7 @@ export class EventLog {
           fs.closeSync(readFd)
         }
         if (lastByte[0] !== 0x0a) {
-          const appendFd = fs.openSync(filePath, 'a')
-          try {
-            fs.writeSync(appendFd, '\n')
-            fs.fsyncSync(appendFd)
-          } finally {
-            fs.closeSync(appendFd)
-          }
+          appendDurableFileSync(filePath, Buffer.from('\n', 'utf8'), this.durableWriteOptions)
         }
       }
     } catch (err: unknown) {
@@ -143,13 +150,7 @@ export class EventLog {
     }
 
     try {
-      const fd = fs.openSync(filePath, 'a')
-      try {
-        fs.writeSync(fd, line)
-        fs.fsyncSync(fd)
-      } finally {
-        fs.closeSync(fd)
-      }
+      appendDurableFileSync(filePath, Buffer.from(line, 'utf8'), this.durableWriteOptions)
     } catch (err) {
       console.error('[EventLog] Failed to write event to disk:', err)
       return 'error'

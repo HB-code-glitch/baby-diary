@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import fs from 'fs'
+import * as fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { EventLog } from '../electron/store/eventLog'
@@ -100,6 +100,38 @@ describe('EventLog', () => {
 
     const events = log.loadAll()
     expect(events).toHaveLength(1)
+  })
+
+  it('loops through short writes before reporting an append as durable', () => {
+    const originalWrite = fs.writeSync.bind(fs)
+    let writeCalls = 0
+    const fileOps = {
+      existsSync: fs.existsSync,
+      mkdirSync: fs.mkdirSync,
+      openSync: fs.openSync,
+      writeSync: (
+        fd: number,
+        data: Uint8Array,
+        offset: number,
+        requestedLength: number,
+        position: number | null,
+      ): number => {
+        writeCalls += 1
+        const shortLength = Math.max(1, Math.floor(requestedLength / 2))
+        return originalWrite(fd, data, offset, shortLength, position)
+      },
+      fsyncSync: fs.fsyncSync,
+      closeSync: fs.closeSync,
+      renameSync: fs.renameSync,
+      unlinkSync: fs.unlinkSync,
+      ftruncateSync: fs.ftruncateSync,
+    }
+    const shortWriteLog = new EventLog({ dataDir: tmpDir, fileOps } as never)
+    const value = makeEvent()
+
+    expect(shortWriteLog.append(value)).toBe('ok')
+    expect(new EventLog({ dataDir: tmpDir }).loadAll()).toContainEqual(value)
+    expect(writeCalls).toBeGreaterThan(1)
   })
 
   it('preserves distinct mutations at the same id+rev and deduplicates only the same mutation', () => {

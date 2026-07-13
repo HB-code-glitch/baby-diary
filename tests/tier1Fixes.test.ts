@@ -180,15 +180,18 @@ describe('P5: settings.save() error surfacing logic', () => {
     })).toThrow(/save failed/)
   })
 
-  it('save to non-existent directory throws a structured error (real fs test)', () => {
-    const badStore = new SettingsStore(path.join(tmpDir, 'nonexistent-subdir'))
+  it('save creates a missing settings directory before the durable atomic replace', () => {
+    const nestedDir = path.join(tmpDir, 'nonexistent-subdir')
+    const nestedStore = new SettingsStore(nestedDir)
     const settings: AppSettings = {
       baby: { name: 'Test', birthdate: '' },
       profile: { uid: '', name: '', role: 'mom' },
       familyId: '',
       firebase: null,
     }
-    expect(() => badStore.save(settings)).toThrow(/save failed/)
+    expect(() => nestedStore.save(settings)).not.toThrow()
+    expect(fs.existsSync(path.join(nestedDir, 'settings.json'))).toBe(true)
+    expect(new SettingsStore(nestedDir).get().profile.role).toBe('mom')
   })
 })
 

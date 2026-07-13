@@ -82,6 +82,14 @@ class MockBrowserWindow extends EventEmitter {
 
 const ipcHandlers = new Map<string, (...args: any[]) => any>()
 const testPdfPath = join(tmpdir(), 'baby-diary-electron-security-test.pdf')
+const settingsStoreMocks = vi.hoisted(() => ({
+  get: vi.fn(() => ({})),
+  save: vi.fn(),
+  merge: vi.fn(),
+  commitBabyInfo: vi.fn(),
+  listPendingBabyInfo: vi.fn(),
+  getBabyInfoSummary: vi.fn(),
+}))
 
 vi.mock('electron', () => {
   const app = Object.assign(new EventEmitter(), {
@@ -125,9 +133,12 @@ vi.mock('../electron/store/eventLog', () => ({
 
 vi.mock('../electron/store/settings', () => ({
   SettingsStore: class {
-    get = vi.fn(() => ({}))
-    save = vi.fn()
-    merge = vi.fn()
+    get = settingsStoreMocks.get
+    save = settingsStoreMocks.save
+    merge = settingsStoreMocks.merge
+    commitBabyInfo = settingsStoreMocks.commitBabyInfo
+    listPendingBabyInfo = settingsStoreMocks.listPendingBabyInfo
+    getBabyInfoSummary = settingsStoreMocks.getBabyInfoSummary
   },
 }))
 
@@ -198,6 +209,12 @@ describe('Electron BrowserWindow security boundary', () => {
     app.removeAllListeners()
     ipcMain.removeAllListeners()
     ipcMain.handle.mockClear()
+    settingsStoreMocks.commitBabyInfo.mockReset()
+    settingsStoreMocks.get.mockReset().mockReturnValue({})
+    settingsStoreMocks.save.mockReset()
+    settingsStoreMocks.merge.mockReset()
+    settingsStoreMocks.listPendingBabyInfo.mockReset()
+    settingsStoreMocks.getBabyInfoSummary.mockReset()
   })
 
   it('explicitly sandboxes both the main and print windows', async () => {
@@ -213,6 +230,73 @@ describe('Electron BrowserWindow security boundary', () => {
     }
 
     await finishPrintWindow(printTask)
+  })
+
+  it('returns an allowlisted envelope for baby-info commits without exposing storage details', async () => {
+    await loadMainWindow()
+    const handler = ipcHandlers.get('settings:commitBabyInfo')
+    expect(handler).toBeTypeOf('function')
+
+    const value = { kind: 'user-edit', settings: {}, babyInfo: 'pending', pendingCount: 1, activePendingCount: 1 }
+    settingsStoreMocks.commitBabyInfo.mockReturnValueOnce(value)
+    await expect(handler!({}, { kind: 'user-edit' })).resolves.toEqual({ ok: true, value })
+
+    settingsStoreMocks.commitBabyInfo.mockImplementationOnce(() => {
+      throw new Error('[Settings] save failed: C:\\private\\settings.json EACCES')
+    })
+    await expect(handler!({}, { kind: 'user-edit' })).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'STORAGE_FAILURE',
+        message: 'Unable to save baby info settings.',
+      },
+    })
+  })
+
+  it('exposes bounded baby-info delta handlers and broadcasts authoritative settings after successful writes', async () => {
+    const mainWindow = await loadMainWindow()
+    const save = ipcHandlers.get('settings:save')
+    const merge = ipcHandlers.get('settings:merge')
+    const commit = ipcHandlers.get('settings:commitBabyInfo')
+    const listPending = ipcHandlers.get('babyInfo:listPending')
+    const getSummary = ipcHandlers.get('babyInfo:getSummary')
+    expect(save).toBeTypeOf('function')
+    expect(merge).toBeTypeOf('function')
+    expect(commit).toBeTypeOf('function')
+    expect(listPending).toBeTypeOf('function')
+    expect(getSummary).toBeTypeOf('function')
+
+    const first = { baby: { name: 'A', birthdate: '' } }
+    const second = { baby: { name: 'B', birthdate: '' } }
+    const third = { baby: { name: 'C', birthdate: '' } }
+    settingsStoreMocks.save.mockReturnValueOnce(first)
+    settingsStoreMocks.merge.mockReturnValueOnce(second)
+    settingsStoreMocks.commitBabyInfo.mockReturnValueOnce({
+      kind: 'reconcile',
+      settings: third,
+      babyInfo: 'unchanged',
+      pendingCount: 0,
+      activePendingCount: 0,
+    })
+    settingsStoreMocks.listPendingBabyInfo.mockReturnValueOnce({ items: [], nextCursor: undefined })
+    settingsStoreMocks.getBabyInfoSummary.mockReturnValueOnce({
+      familyId: 'family-A', mutationCount: 0, pendingCount: 0,
+    })
+
+    await expect(save!({}, first)).resolves.toBe(first)
+    await expect(merge!({}, { theme: 'dark' })).resolves.toBe(second)
+    await expect(commit!({}, {
+      kind: 'reconcile', familyId: 'family-A', discoveredMutations: [], exactAcknowledgedMutationKeys: [],
+    })).resolves.toEqual({ ok: true, value: expect.objectContaining({ settings: third }) })
+    await expect(listPending!({}, { familyId: 'family-A', limit: 100 })).resolves.toEqual({ items: [] })
+    await expect(getSummary!({}, 'family-A')).resolves.toMatchObject({ familyId: 'family-A' })
+
+    expect(mainWindow.webContents.send.mock.calls.filter(call => call[0] === 'settings:changed'))
+      .toEqual([
+        ['settings:changed', { sequence: 1, settings: first }],
+        ['settings:changed', { sequence: 2, settings: second }],
+        ['settings:changed', { sequence: 3, settings: third }],
+      ])
   })
 
   it('denies renderer-created windows and renderer-initiated navigation on both windows', async () => {
