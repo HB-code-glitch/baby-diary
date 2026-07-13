@@ -196,6 +196,8 @@ describe('Windows v0.3.8 -> v0.3.9 in-place upgrade wrapper', () => {
     expect(script).toContain('ResumeThread')
     expect(script).toContain('QueryInformationJobObject')
     expect(script).toContain('CloseHandle')
+    expect(script).toContain('ROOT_EXIT_BACKOFF_MILLISECONDS = 25')
+    expect(script).toMatch(/waitResult == WAIT_OBJECT_0[\s\S]{0,500}GetActiveProcessCount[\s\S]{0,500}Thread\.Sleep/i)
     expect(script).not.toContain('Get-CimInstance Win32_Process')
     expect(script).not.toContain('Stop-BoundedProcessTree')
     expect(script).toContain('[TimeoutException]')
@@ -283,6 +285,87 @@ describe('Windows v0.3.8 -> v0.3.9 in-place upgrade wrapper', () => {
       timeout: 30_000,
     })
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+  })
+
+  it.runIf(process.platform === 'win32')('backs off after the root exits while child-only jobs finish or time out', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'baby-diary-job-backoff-'))
+    const normalChildScript = join(fixtureRoot, 'normal-child.ps1')
+    const timeoutChildScript = join(fixtureRoot, 'timeout-child.ps1')
+    const normalRootScript = join(fixtureRoot, 'normal-root.ps1')
+    const timeoutRootScript = join(fixtureRoot, 'timeout-root.ps1')
+    const normalPidPath = join(fixtureRoot, 'normal-child.pid')
+    const timeoutPidPath = join(fixtureRoot, 'timeout-child.pid')
+    const quote = (value: string) => value.replaceAll("'", "''")
+    try {
+      writeFileSync(normalChildScript, '\uFEFFStart-Sleep -Milliseconds 1500\n')
+      writeFileSync(timeoutChildScript, '\uFEFFStart-Sleep -Seconds 30\n')
+      writeFileSync(normalRootScript, `\uFEFF${[
+        `$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','"${quote(normalChildScript)}"') -PassThru -WindowStyle Hidden`,
+        `Set-Content -LiteralPath '${quote(normalPidPath)}' -Value $child.Id -NoNewline`,
+        '$child.Dispose()',
+        'exit 0',
+      ].join('\n')}`)
+      writeFileSync(timeoutRootScript, `\uFEFF${[
+        `$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','"${quote(timeoutChildScript)}"') -PassThru -WindowStyle Hidden`,
+        `Set-Content -LiteralPath '${quote(timeoutPidPath)}' -Value $child.Id -NoNewline`,
+        '$child.Dispose()',
+        'exit 0',
+      ].join('\n')}`)
+
+      const command = [
+        '$tokens=$null',
+        '$errors=$null',
+        `$ast=[System.Management.Automation.Language.Parser]::ParseFile('${quote(scriptPath)}',[ref]$tokens,[ref]$errors)`,
+        '$functions=$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true)',
+        'Invoke-Expression (($functions | ForEach-Object { $_.Extent.Text }) -join "`n")',
+        '$ProcessCleanupTimeoutSeconds=3',
+        'Initialize-BoundedProcessJobApi',
+        "$powerShell=(Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction Stop).Source",
+        '$normalCpuBefore=(Get-Process -Id $PID).TotalProcessorTime.TotalMilliseconds',
+        '$normalTimer=[Diagnostics.Stopwatch]::StartNew()',
+        `$normal=[BabyDiary.Upgrade.JobObjectProcess]::Run($powerShell,[string[]]@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','${quote(normalRootScript)}'),(Get-Location).Path,5000,3000)`,
+        '$normalTimer.Stop()',
+        '$normalWall=[double]$normalTimer.ElapsedMilliseconds',
+        '$normalCpu=(Get-Process -Id $PID).TotalProcessorTime.TotalMilliseconds-$normalCpuBefore',
+        'if($normal.TimedOut -or -not $normal.CleanupVerified -or $normal.ExitCode -ne 0){exit 2}',
+        'if($normalWall -lt 1200 -or $normalWall -gt 5000){Write-Error "Unexpected normal wall time: $normalWall ms";exit 3}',
+        'if($normalCpu -gt 400 -or ($normalCpu/[Math]::Max(1.0,$normalWall)) -gt 0.25){Write-Error "Busy normal wait: cpu=$normalCpu wall=$normalWall";exit 4}',
+        '$timeoutCpuBefore=(Get-Process -Id $PID).TotalProcessorTime.TotalMilliseconds',
+        '$timeoutTimer=[Diagnostics.Stopwatch]::StartNew()',
+        `$timeout=[BabyDiary.Upgrade.JobObjectProcess]::Run($powerShell,[string[]]@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','${quote(timeoutRootScript)}'),(Get-Location).Path,2000,3000)`,
+        '$timeoutTimer.Stop()',
+        '$timeoutWall=[double]$timeoutTimer.ElapsedMilliseconds',
+        '$timeoutCpu=(Get-Process -Id $PID).TotalProcessorTime.TotalMilliseconds-$timeoutCpuBefore',
+        'if(-not $timeout.TimedOut -or -not $timeout.CleanupVerified){exit 5}',
+        'if($timeoutWall -lt 1700 -or $timeoutWall -gt 5000){Write-Error "Unexpected timeout wall time: $timeoutWall ms";exit 6}',
+        'if($timeoutCpu -gt 500 -or ($timeoutCpu/[Math]::Max(1.0,$timeoutWall)) -gt 0.25){Write-Error "Busy timeout wait: cpu=$timeoutCpu wall=$timeoutWall";exit 7}',
+        `if(-not (Test-Path -LiteralPath '${quote(timeoutPidPath)}' -PathType Leaf)){exit 8}`,
+        `$childId=[int](Get-Content -LiteralPath '${quote(timeoutPidPath)}' -Raw)`,
+        '$deadline=[DateTime]::UtcNow.AddSeconds(2)',
+        'while((Get-Process -Id $childId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 25}',
+        'if(Get-Process -Id $childId -ErrorAction SilentlyContinue){exit 9}',
+        'exit 0',
+      ].join('\n')
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 20_000,
+      })
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+    } finally {
+      for (const pidPath of [normalPidPath, timeoutPidPath]) {
+        if (!existsSync(pidPath)) continue
+        const childId = Number.parseInt(readFileSync(pidPath, 'utf8'), 10)
+        if (!Number.isSafeInteger(childId)) continue
+        spawnSync('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Stop-Process -Id ${childId} -Force -ErrorAction SilentlyContinue`,
+        ])
+      }
+      rmSync(fixtureRoot, { recursive: true, force: true })
+    }
   })
 
   it.runIf(process.platform === 'win32')('kills a grandchild after its intermediate parent exits before timeout', () => {

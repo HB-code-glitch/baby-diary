@@ -117,6 +117,7 @@ namespace BabyDiary.Upgrade
         private const uint WAIT_OBJECT_0 = 0x00000000;
         private const uint WAIT_TIMEOUT = 0x00000102;
         private const uint INFINITE = 0xFFFFFFFF;
+        private const int ROOT_EXIT_BACKOFF_MILLISECONDS = 25;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
@@ -454,6 +455,17 @@ namespace BabyDiary.Upgrade
                     if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_TIMEOUT)
                     {
                         throw LastWin32("WaitForSingleObject");
+                    }
+                    if (waitResult == WAIT_OBJECT_0 && GetActiveProcessCount(job) != 0)
+                    {
+                        long backoffRemaining = timeoutMilliseconds - elapsed.ElapsedMilliseconds;
+                        if (backoffRemaining > 0)
+                        {
+                            int backoffMilliseconds = (int)Math.Min(
+                                (long)ROOT_EXIT_BACKOFF_MILLISECONDS,
+                                backoffRemaining);
+                            Thread.Sleep(backoffMilliseconds);
+                        }
                     }
                 }
 
