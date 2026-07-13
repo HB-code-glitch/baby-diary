@@ -112,19 +112,19 @@ describe('History interactions', () => {
     await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="이전 달"]')!.click())
     expect(title()).toBe('2026년 6월')
     expect(container.querySelector('[data-history-preview]')?.textContent).toContain('2026년 6월 13일')
-    expect(container.querySelector('[data-history-date="2026-06-13"]')?.getAttribute('aria-pressed')).toBe('true')
+    expect(container.querySelector('[data-history-date="2026-06-13"]')?.getAttribute('aria-selected')).toBe('true')
     await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="다음 달"]')!.click())
     expect(title()).toBe('2026년 7월')
     expect(container.querySelector('[data-history-preview]')?.textContent).toContain('2026년 7월 13일')
 
     await act(async () => container.querySelector<HTMLButtonElement>('[data-history-view="week"]')!.click())
-    expect(title()).toBe('7월 12일 ~ 18일')
+    expect(title()).toBe('2026년 7월 12일 ~ 18일')
     await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="이전 주"]')!.click())
-    expect(title()).toBe('7월 5일 ~ 11일')
+    expect(title()).toBe('2026년 7월 5일 ~ 11일')
     expect(container.querySelector('[data-history-preview]')?.textContent).toContain('2026년 7월 6일')
     expect(container.querySelector('[data-history-date="2026-07-06"]')?.getAttribute('aria-pressed')).toBe('true')
     await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="다음 주"]')!.click())
-    expect(title()).toBe('7월 12일 ~ 18일')
+    expect(title()).toBe('2026년 7월 12일 ~ 18일')
     expect(container.querySelector('[data-history-preview]')?.textContent).toContain('2026년 7월 13일')
 
     await act(async () => container.querySelector<HTMLButtonElement>('[data-history-view="day"]')!.click())
@@ -147,7 +147,7 @@ describe('History interactions', () => {
     expect(container.querySelector('.history-period-nav .cal-nav-title')?.textContent).toBe(
       `${selected.getFullYear()}년 ${selected.getMonth() + 1}월`,
     )
-    expect(container.querySelector(`[data-history-date="${selectedDate}"]`)?.getAttribute('aria-pressed')).toBe('true')
+    expect(container.querySelector(`[data-history-date="${selectedDate}"]`)?.getAttribute('aria-selected')).toBe('true')
     expect(container.querySelector('[data-history-preview]')?.textContent).toContain(
       `${selected.getFullYear()}년 ${selected.getMonth() + 1}월 ${selected.getDate()}일`,
     )
@@ -160,7 +160,7 @@ describe('History interactions', () => {
     await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="다음 달"]')!.click())
 
     expect(container.querySelector('.history-period-nav .cal-nav-title')?.textContent).toBe('2026년 2월')
-    expect(container.querySelector('[data-history-date="2026-02-28"]')?.getAttribute('aria-pressed')).toBe('true')
+    expect(container.querySelector('[data-history-date="2026-02-28"]')?.getAttribute('aria-selected')).toBe('true')
     expect(container.querySelector('[data-history-preview]')?.textContent).toContain('2026년 2월 28일')
   })
 
@@ -180,7 +180,7 @@ describe('History interactions', () => {
     await act(async () => monthCell.click())
 
     expect(container.querySelector('[data-history-view="month"]')?.getAttribute('aria-selected')).toBe('true')
-    expect(monthCell.getAttribute('aria-pressed')).toBe('true')
+    expect(monthCell.getAttribute('aria-selected')).toBe('true')
     expect(monthCell.getAttribute('aria-label')).toContain('4건')
     expect(monthCell.getAttribute('aria-label')).toContain('소변 1')
     expect(monthCell.querySelector('.cal-day-event-count')?.textContent).toBe('4건')

@@ -1,8 +1,9 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   addDays,
   addMonths,
   addWeeks,
+  addYears,
   differenceInDays,
   eachDayOfInterval,
   endOfMonth,
@@ -18,6 +19,7 @@ import {
   subDays,
   subMonths,
   subWeeks,
+  subYears,
 } from 'date-fns'
 import { ja, ko } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
@@ -135,12 +137,39 @@ function MonthView({
   birthdate,
 }: MonthViewProps) {
   const { t } = useTranslation()
+  const dayRefs = useRef(new Map<string, HTMLButtonElement>())
+  const pendingFocusDate = useRef<string | null>(null)
   const monthStart = startOfMonth(displayMonth)
   const monthEnd = endOfMonth(displayMonth)
   const days = eachDayOfInterval({
     start: startOfWeek(monthStart, { weekStartsOn: 0 }),
     end: endOfWeek(monthEnd, { weekStartsOn: 0 }),
   })
+
+  useEffect(() => {
+    const date = pendingFocusDate.current
+    if (!date) return
+    dayRefs.current.get(date)?.focus()
+    pendingFocusDate.current = null
+  }, [displayMonth, selectedDate])
+
+  const moveSelection = (event: React.KeyboardEvent<HTMLButtonElement>, day: Date) => {
+    let nextDate: Date | null = null
+    switch (event.key) {
+      case 'ArrowLeft': nextDate = subDays(day, 1); break
+      case 'ArrowRight': nextDate = addDays(day, 1); break
+      case 'ArrowUp': nextDate = subDays(day, 7); break
+      case 'ArrowDown': nextDate = addDays(day, 7); break
+      case 'Home': nextDate = startOfWeek(day, { weekStartsOn: 0 }); break
+      case 'End': nextDate = endOfWeek(day, { weekStartsOn: 0 }); break
+      case 'PageUp': nextDate = event.shiftKey ? subYears(day, 1) : subMonths(day, 1); break
+      case 'PageDown': nextDate = event.shiftKey ? addYears(day, 1) : addMonths(day, 1); break
+      default: return
+    }
+    event.preventDefault()
+    pendingFocusDate.current = format(nextDate, 'yyyy-MM-dd')
+    onSelectDay(nextDate)
+  }
 
   return (
     <div className="card cal-month">
@@ -155,19 +184,39 @@ function MonthView({
         ))}
       </div>
 
-      <div className="cal-grid-7">
-        {days.map(day => (
-          <MonthDayCell
-            key={day.toISOString()}
-            day={day}
-            displayMonth={displayMonth}
-            selectedDate={selectedDate}
-            eventsByDay={eventsByDay}
-            onSelect={onSelectDay}
-            milestones={milestones}
-            guidanceItems={guidanceItems}
-            birthdate={birthdate}
-          />
+      <div
+        className="cal-grid-7 cal-month-grid"
+        role="grid"
+        aria-label={t('history.monthGridLabel', {
+          month: t('history.monthTitle', {
+            year: displayMonth.getFullYear(),
+            month: displayMonth.getMonth() + 1,
+          }),
+        })}
+        data-history-month-grid
+      >
+        {Array.from({ length: Math.ceil(days.length / 7) }, (_, weekIndex) => (
+          <div className="cal-month-row" role="row" key={weekIndex}>
+            {days.slice(weekIndex * 7, weekIndex * 7 + 7).map(day => (
+              <MonthDayCell
+                key={day.toISOString()}
+                day={day}
+                displayMonth={displayMonth}
+                selectedDate={selectedDate}
+                eventsByDay={eventsByDay}
+                onSelect={onSelectDay}
+                milestones={milestones}
+                guidanceItems={guidanceItems}
+                birthdate={birthdate}
+                buttonRef={button => {
+                  const date = format(day, 'yyyy-MM-dd')
+                  if (button) dayRefs.current.set(date, button)
+                  else dayRefs.current.delete(date)
+                }}
+                onKeyDown={event => moveSelection(event, day)}
+              />
+            ))}
+          </div>
         ))}
       </div>
     </div>
@@ -183,6 +232,8 @@ interface MonthDayCellProps {
   milestones: Milestone[]
   guidanceItems: GuidanceItem[]
   birthdate?: string
+  buttonRef: (button: HTMLButtonElement | null) => void
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void
 }
 
 function MonthDayCell({
@@ -194,6 +245,8 @@ function MonthDayCell({
   milestones,
   guidanceItems,
   birthdate,
+  buttonRef,
+  onKeyDown,
 }: MonthDayCellProps) {
   const { t, i18n } = useTranslation()
   const dayEvents = eventsForDay(eventsByDay, day)
@@ -215,23 +268,33 @@ function MonthDayCell({
   const accessibleSummary = dayEvents.length > 0
     ? `${t('history.eventCount', { count: dayEvents.length })}, ${summary}`
     : t('history.noRecords')
-  const ariaLabel = [dayString, accessibleSummary, milestoneName, guidanceTitle].filter(Boolean).join(', ')
+  const dateFnsLocale = i18n.language === 'ja' ? ja : ko
+  const fullDate = format(day, t('date.formatFull'), { locale: dateFnsLocale })
+  const ariaLabel = [fullDate, isToday(day) ? t('history.today') : '', accessibleSummary, milestoneName, guidanceTitle]
+    .filter(Boolean)
+    .join(', ')
   const dayNumber = getDay(day)
+  const selected = isSameDay(day, selectedDate)
 
   return (
     <button
       type="button"
+      ref={buttonRef}
+      role="gridcell"
       className={[
         'cal-day-cell',
         !isSameMonth(day, displayMonth) ? 'cal-day-other-month' : '',
         isToday(day) ? 'cal-day-today' : '',
-        isSameDay(day, selectedDate) ? 'cal-day-selected' : '',
+        selected ? 'cal-day-selected' : '',
         dayNumber === 0 ? 'cal-sunday' : dayNumber === 6 ? 'cal-saturday' : '',
       ].filter(Boolean).join(' ')}
       data-history-date={dayString}
       onClick={() => onSelect(day)}
+      onKeyDown={onKeyDown}
       aria-label={ariaLabel}
-      aria-pressed={isSameDay(day, selectedDate)}
+      aria-selected={selected}
+      aria-current={isToday(day) ? 'date' : undefined}
+      tabIndex={selected ? 0 : -1}
     >
       <span className="cal-day-num">{day.getDate()}</span>
       {dayEvents.length > 0 && (
@@ -366,10 +429,17 @@ function SelectedDayPreview({ selectedDate, eventsByDay, onOpenDay }: SelectedDa
         />
       </div>
 
-      <button type="button" className="btn-secondary history-preview-action" onClick={onOpenDay}>
-        {t('history.viewAllRecords')}
-        <IconChevronRight size={15} color="currentColor" />
-      </button>
+      {selectedEvents.length > 0 && (
+        <button
+          type="button"
+          className="btn-secondary history-preview-action"
+          data-history-preview-action
+          onClick={onOpenDay}
+        >
+          {t('history.viewAllRecords')}
+          <IconChevronRight size={15} color="currentColor" />
+        </button>
+      )}
     </aside>
   )
 }
@@ -449,29 +519,36 @@ function DayView({
         </div>
       ))}
 
-      <div className="history-filter-row" role="group" aria-label={t('history.filterLabel')}>
-        <button
-          type="button"
-          className={`filter-chip${activeFilter === null ? ' active' : ''}`}
-          data-history-filter="all"
-          aria-pressed={activeFilter === null}
-          onClick={() => onFilterChange(null)}
+      {availableTypes.length > 1 && (
+        <div
+          className="history-filter-row"
+          role="group"
+          aria-label={t('history.filterLabel')}
+          data-history-filters
         >
-          {t('history.filterAll')} {dayEvents.length}
-        </button>
-        {availableTypes.map(({ type, labelKey }) => (
           <button
             type="button"
-            key={type}
-            className={`filter-chip${activeFilter === type ? ' active' : ''}`}
-            data-history-filter={type}
-            aria-pressed={activeFilter === type}
-            onClick={() => onFilterChange(activeFilter === type ? null : type)}
+            className={`filter-chip${activeFilter === null ? ' active' : ''}`}
+            data-history-filter="all"
+            aria-pressed={activeFilter === null}
+            onClick={() => onFilterChange(null)}
           >
-            {t(labelKey)} {counts[type]}
+            {t('history.filterAll')} {dayEvents.length}
           </button>
-        ))}
-      </div>
+          {availableTypes.map(({ type, labelKey }) => (
+            <button
+              type="button"
+              key={type}
+              className={`filter-chip${activeFilter === type ? ' active' : ''}`}
+              data-history-filter={type}
+              aria-pressed={activeFilter === type}
+              onClick={() => onFilterChange(activeFilter === type ? null : type)}
+            >
+              {t(labelKey)} {counts[type]}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="card history-day-timeline-card">
         <EventTimeline
@@ -578,9 +655,27 @@ export function HistoryPage() {
       const weekEnd = endOfWeek(displayWeek, { weekStartsOn: 0 })
       const firstMonth = weekStart.getMonth() + 1
       const secondMonth = weekEnd.getMonth() + 1
+      const firstYear = weekStart.getFullYear()
+      const secondYear = weekEnd.getFullYear()
+      if (firstYear !== secondYear) {
+        return t('history.weekTitleAcrossYears', {
+          y1: firstYear,
+          m1: firstMonth,
+          d1: weekStart.getDate(),
+          y2: secondYear,
+          m2: secondMonth,
+          d2: weekEnd.getDate(),
+        })
+      }
       return firstMonth === secondMonth
-        ? t('history.weekTitleSameMonth', { month: firstMonth, d1: weekStart.getDate(), d2: weekEnd.getDate() })
+        ? t('history.weekTitleSameMonth', {
+            year: firstYear,
+            month: firstMonth,
+            d1: weekStart.getDate(),
+            d2: weekEnd.getDate(),
+          })
         : t('history.weekTitle', {
+            year: firstYear,
             m1: firstMonth,
             d1: weekStart.getDate(),
             m2: secondMonth,
@@ -601,7 +696,7 @@ export function HistoryPage() {
   return (
     <div className="page-container" data-tour="calendar">
       <div className="page-header history-page-header">
-        <div className="page-title">{t('history.title')}</div>
+        <h1 className="page-title">{t('history.title')}</h1>
       </div>
 
       <div className="history-toolbar" aria-label={t('history.toolbarLabel')}>

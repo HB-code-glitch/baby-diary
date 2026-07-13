@@ -144,7 +144,8 @@
     "deleteConfirmAria": "{{label}} {{time}}の削除確認",
     "deletePrompt": "削除しますか？",
     "cancelDelete": "キャンセル",
-    "confirmDeleteAction": "削除"
+    "confirmDeleteAction": "削除",
+    "label": "記録タイムライン"
   },
   "role": {
     "mom": "ママ",
@@ -158,13 +159,17 @@
     "deleted": "削除しました。",
     "saveFailed": "保存に失敗しました。ディスクの空き容量をご確認ください",
     "editFailed": "修正に失敗しました。ディスクの空き容量をご確認ください",
-    "deleteFailed": "削除に失敗しました。ディスクの空き容量をご確認ください"
+    "deleteFailed": "削除に失敗しました。ディスクの空き容量をご確認ください",
+    "dismiss": "通知を閉じる"
   },
   "timeEdit": {
     "title": "時間を修正",
+    "description": "日付と時刻を確認して保存してください。",
     "label": "記録時間",
     "cancel": "キャンセル",
-    "confirm": "確認"
+    "confirm": "確認",
+    "saving": "保存中…",
+    "close": "時間修正画面を閉じる"
   },
   "quickBtnHint": "ショートカット 1〜6",
   "sleep": {
@@ -207,8 +212,10 @@
     "viewWeek": "週間",
     "viewDay": "1日",
     "monthTitle": "{{year}}年{{month}}月",
-    "weekTitle": "{{m1}}月{{d1}}日〜{{m2}}月{{d2}}日",
-    "weekTitleSameMonth": "{{month}}月{{d1}}日〜{{d2}}日",
+    "weekTitle": "{{year}}年{{m1}}月{{d1}}日〜{{m2}}月{{d2}}日",
+    "weekTitleSameMonth": "{{year}}年{{month}}月{{d1}}日〜{{d2}}日",
+    "weekTitleAcrossYears": "{{y1}}年{{m1}}月{{d1}}日〜{{y2}}年{{m2}}月{{d2}}日",
+    "monthGridLabel": "{{month}}のカレンダー。矢印キーで日付を移動",
     "weekdaySun": "日",
     "weekdayMon": "月",
     "weekdayTue": "火",

@@ -144,7 +144,8 @@
     "deleteConfirmAria": "{{label}} {{time}} 삭제 확인",
     "deletePrompt": "삭제할까요?",
     "cancelDelete": "취소",
-    "confirmDeleteAction": "삭제"
+    "confirmDeleteAction": "삭제",
+    "label": "기록 타임라인"
   },
   "role": {
     "mom": "엄마",
@@ -158,13 +159,17 @@
     "deleted": "삭제되었습니다.",
     "saveFailed": "저장에 실패했습니다 — 디스크 공간을 확인해주세요",
     "editFailed": "수정에 실패했습니다 — 디스크 공간을 확인해주세요",
-    "deleteFailed": "삭제에 실패했습니다 — 디스크 공간을 확인해주세요"
+    "deleteFailed": "삭제에 실패했습니다 — 디스크 공간을 확인해주세요",
+    "dismiss": "알림 닫기"
   },
   "timeEdit": {
     "title": "시간 수정",
+    "description": "날짜와 시간을 확인한 뒤 저장하세요.",
     "label": "기록 시간",
     "cancel": "취소",
-    "confirm": "확인"
+    "confirm": "확인",
+    "saving": "저장 중…",
+    "close": "시간 수정 창 닫기"
   },
   "quickBtnHint": "단축키 1~6",
   "sleep": {
@@ -207,8 +212,10 @@
     "viewWeek": "주간",
     "viewDay": "하루",
     "monthTitle": "{{year}}년 {{month}}월",
-    "weekTitle": "{{m1}}월 {{d1}}일 ~ {{m2}}월 {{d2}}일",
-    "weekTitleSameMonth": "{{month}}월 {{d1}}일 ~ {{d2}}일",
+    "weekTitle": "{{year}}년 {{m1}}월 {{d1}}일 ~ {{m2}}월 {{d2}}일",
+    "weekTitleSameMonth": "{{year}}년 {{month}}월 {{d1}}일 ~ {{d2}}일",
+    "weekTitleAcrossYears": "{{y1}}년 {{m1}}월 {{d1}}일 ~ {{y2}}년 {{m2}}월 {{d2}}일",
+    "monthGridLabel": "{{month}} 달력. 화살표 키로 날짜 이동",
     "weekdaySun": "일",
     "weekdayMon": "월",
     "weekdayTue": "화",

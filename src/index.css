@@ -51,6 +51,11 @@
   from { opacity: 0; transform: scale(0.92) translateY(6px); }
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
+/* Keep modal hit targets at their full size while preserving a soft entrance. */
+@keyframes timeEditAppear {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 /* fixed+translate(-50%,-50%) 센터링 요소 전용 — glassAppear는 transform을 덮어써 센터링을 깨뜨림 */
 @keyframes feverModalAppear {
   from { opacity: 0; transform: translate(-50%, -48%) scale(0.94); }
@@ -92,7 +97,7 @@
   /* ── Typography ── */
   --text-primary: #161513;
   --text-secondary: #6b6660;
-  --text-muted: #8a847c;
+  --text-muted: #706a62;
   --text-placeholder: #b5b0a8;
 
   /* ── Primary action (near-black pill) ── */
@@ -150,6 +155,14 @@
   --stone-700: #4a3f2e;
   --stone-800: #2e261a;
   --stone-900: #1a140e;
+
+  /* ── History readability and state contrast ── */
+  --history-selection-ring: #1a4a8a;
+  --history-selected-surface: #f2f6fb;
+  --history-outside-month: #716b63;
+  --history-weekend-sunday: #b52d50;
+  --history-weekend-saturday: #a94b22;
+  --history-icon-muted: #82745c;
 
   /* ── Cream palette (kept for compatibility) ── */
   --cream-50: #fefdf8;
@@ -430,6 +443,7 @@ body {
 }
 
 .page-title {
+  margin: 0;
   font-size: 28px;
   font-weight: 700;
   color: var(--text-primary);
@@ -1711,10 +1725,33 @@ details[open] > summary .evidence-source-chevron {
   position: relative;
 }
 
+.timeline-region:focus-visible {
+  outline: 2px solid var(--history-selection-ring);
+  outline-offset: 4px;
+  border-radius: 12px;
+}
+
 .timeline-content {
   flex: 1;
   min-width: 0;
   align-self: center;
+}
+
+.timeline-event-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.timeline-event-label {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.timeline-event-value {
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .timeline-actions {
@@ -1738,7 +1775,7 @@ details[open] > summary .evidence-source-chevron {
   border: 0;
   border-radius: 10px;
   background: transparent;
-  color: var(--stone-400);
+  color: var(--history-icon-muted);
   cursor: pointer;
 }
 
@@ -1781,6 +1818,7 @@ details[open] > summary .evidence-source-chevron {
 
 .timeline-confirm-button:hover { background: rgba(255,255,255,0.45); }
 .timeline-confirm-button-danger { color: var(--rose-500); }
+.timeline-confirm-button:disabled { opacity: 0.55; cursor: wait; }
 
 .timeline-rail-compact {
   padding-left: 22px;
@@ -1835,6 +1873,97 @@ details[open] > summary .evidence-source-chevron {
   font-weight: 700;
   flex-shrink: 0;
   color: white;
+}
+
+/* Accessible time editor: modal semantics, stable focus targets, and compact layout. */
+.time-edit-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(22, 21, 19, 0.38);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  overscroll-behavior: contain;
+}
+
+.time-edit-dialog {
+  position: relative;
+  width: min(360px, 100%);
+  min-width: 0;
+  padding: 20px;
+}
+
+.time-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.time-edit-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.time-edit-description {
+  margin: 4px 0 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.time-edit-input {
+  min-height: 40px;
+  margin-bottom: 14px;
+}
+
+.time-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.time-edit-control {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.time-edit-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--history-icon-muted);
+  cursor: pointer;
+}
+
+.time-edit-close:hover { background: var(--bg); color: var(--text-primary); }
+.time-edit-control:disabled { opacity: 0.58; cursor: wait; }
+
+.cal-day-cell,
+.cal-week-row,
+.cal-view-btn,
+.history-period-nav button,
+.filter-chip,
+.history-preview-action,
+.timeline-action-button,
+.timeline-confirm-button,
+.time-edit-control {
+  touch-action: manipulation;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .time-edit-backdrop { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 /* ══════════════════════════════════════════
@@ -1903,7 +2032,9 @@ details[open] > summary .evidence-source-chevron {
   background: rgba(255,255,255,0.16);
   border: none;
   color: white;
-  padding: 3px 10px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 10px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
@@ -1940,6 +2071,10 @@ details[open] > summary .evidence-source-chevron {
 .modal {
   animation: glassAppear var(--dur-appear) var(--spring-snappy) both;
   transform-origin: top center;
+}
+
+.popover.time-edit-dialog {
+  animation-name: timeEditAppear;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2940,6 +3075,18 @@ details[open] > summary .evidence-source-chevron {
   gap: 1px;
 }
 
+.cal-grid-7.cal-month-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cal-month-row {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 1px;
+}
+
 .cal-weekday-header {
   text-align: center;
   font-size: 11px;
@@ -2949,8 +3096,8 @@ details[open] > summary .evidence-source-chevron {
   letter-spacing: 0.04em;
 }
 
-.cal-sunday  { color: var(--rose-400); }
-.cal-saturday { color: var(--peach-500); }
+.cal-sunday  { color: var(--history-weekend-sunday); }
+.cal-saturday { color: var(--history-weekend-saturday); }
 
 .cal-day-cell {
   display: flex;
@@ -2958,7 +3105,7 @@ details[open] > summary .evidence-source-chevron {
   align-items: center;
   gap: 3px;
   padding: 8px 2px;
-  border: none;
+  border: 2px solid transparent;
   background: transparent;
   cursor: pointer;
   border-radius: 10px;
@@ -2974,7 +3121,7 @@ details[open] > summary .evidence-source-chevron {
 
 .cal-day-cell.cal-day-today .cal-day-num {
   background: var(--action-bg);
-  color: white;
+  color: var(--surface);
   border-radius: 50%;
   width: 22px;
   height: 22px;
@@ -2984,9 +3131,16 @@ details[open] > summary .evidence-source-chevron {
   line-height: 1;
 }
 
-.cal-day-cell.cal-day-selected { background: var(--bg); }
+.cal-day-cell.cal-day-selected {
+  border-color: var(--history-selection-ring);
+  background: var(--history-selected-surface);
+  box-shadow: inset 0 0 0 1px var(--history-selection-ring);
+}
 
-.cal-day-cell.cal-day-other-month .cal-day-num { opacity: 0.28; }
+.cal-day-cell.cal-day-other-month .cal-day-num {
+  color: var(--history-outside-month);
+  opacity: 1;
+}
 
 .cal-day-num {
   font-size: 12px;
@@ -2995,8 +3149,9 @@ details[open] > summary .evidence-source-chevron {
   line-height: 1;
 }
 
-.cal-day-cell.cal-sunday .cal-day-num  { color: var(--rose-400); }
-.cal-day-cell.cal-saturday .cal-day-num { color: var(--peach-500); }
+.cal-day-cell.cal-sunday .cal-day-num  { color: var(--history-weekend-sunday); }
+.cal-day-cell.cal-saturday .cal-day-num { color: var(--history-weekend-saturday); }
+.cal-day-cell.cal-day-today .cal-day-num { color: var(--surface); }
 
 .cal-day-indicators {
   display: flex;
@@ -3071,7 +3226,11 @@ details[open] > summary .evidence-source-chevron {
 }
 
 .cal-week-row.cal-week-row-today  { border-color: var(--text-secondary); }
-.cal-week-row.cal-week-row-selected { background: var(--bg); border-color: var(--text-secondary); }
+.cal-week-row.cal-week-row-selected {
+  background: var(--history-selected-surface);
+  border-color: var(--history-selection-ring);
+  box-shadow: inset 0 0 0 1px var(--history-selection-ring);
+}
 
 .cal-week-row-date { display: flex; flex-direction: column; gap: 3px; }
 .cal-week-day-num  { font-size: 14px; font-weight: 700; color: var(--text-primary); }
@@ -3505,6 +3664,14 @@ details[open] > summary .evidence-source-chevron {
   --text-secondary: #b0b0b8;
   --text-muted: #9a9aa0;
   --text-placeholder: #5a5a62;
+
+  /* ── History readability and state contrast ── */
+  --history-selection-ring: #9ec1e8;
+  --history-selected-surface: #1f2733;
+  --history-outside-month: #a0a0aa;
+  --history-weekend-sunday: #f0a0ad;
+  --history-weekend-saturday: #f0a06f;
+  --history-icon-muted: #a0a0aa;
 
   /* ── Primary action — inverted pill ── */
   --action-bg: #ececec;

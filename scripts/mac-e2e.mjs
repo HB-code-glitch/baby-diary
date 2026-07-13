@@ -702,6 +702,7 @@ async function main() {
     await page.waitForSelector('[data-tour="calendar"]', { timeout: 8000 })
 
     const historyTabs = page.locator('[role="tablist"] button[data-history-view]')
+    assert((await page.locator('[data-tour="calendar"] h1').textContent())?.trim() === '기록', 'History exposes a document h1')
     assert(await historyTabs.count() === 3, 'History exposes one three-option tablist')
     assert(
       JSON.stringify(await historyTabs.allTextContents()) === JSON.stringify(['월간', '주간', '하루']),
@@ -732,7 +733,19 @@ async function main() {
     const todayMonthCell = page.locator('.cal-day-cell.cal-day-today')
     assert(await todayMonthCell.count() === 1, 'month view exposes exactly one today cell')
     await todayMonthCell.click()
-    assert(await todayMonthCell.getAttribute('aria-pressed') === 'true', 'selected month cell exposes aria-pressed')
+    assert(await todayMonthCell.getAttribute('aria-selected') === 'true', 'selected month cell exposes aria-selected')
+    assert(await todayMonthCell.getAttribute('aria-current') === 'date', 'today month cell exposes aria-current=date')
+    assert(/오늘/.test((await todayMonthCell.getAttribute('aria-label')) ?? ''), 'today month cell has a localized full-date name')
+    const monthTabStops = await page.locator('.cal-day-cell').evaluateAll(cells => cells.filter(cell => cell.tabIndex === 0).length)
+    assert(monthTabStops === 1, `month calendar exposes one roving tab stop (${monthTabStops})`)
+    await todayMonthCell.focus()
+    await page.keyboard.press('ArrowRight')
+    const keyboardSelectedCell = page.locator('.cal-day-cell[aria-selected="true"]')
+    assert(
+      await keyboardSelectedCell.evaluate(cell => document.activeElement === cell),
+      'month ArrowRight keeps focus and selection on the same date',
+    )
+    await page.keyboard.press('ArrowLeft')
     const historyPreview = page.locator('[data-history-preview]')
     assert(await historyPreview.isVisible(), 'selected-date preview is visible beside the month')
     assert(/선택한 날 기록/.test(await historyPreview.textContent()), 'selected-date preview title is localized')
@@ -789,7 +802,7 @@ async function main() {
         === JSON.stringify(expectedPreviewOrder),
       'preview exposes the newest three event IDs and displayed times in descending order',
     )
-    await shot(page, 'history-month')
+    await shot(page, 'history-month-ko-light')
 
     // Week rows also update selection without changing view and contain no time teaser.
     await page.locator('button[data-history-view="week"]').click()
@@ -802,7 +815,7 @@ async function main() {
     )
     assert(await todayWeekRow.getAttribute('aria-pressed') === 'true', 'selected week row exposes aria-pressed')
     assert(await todayWeekRow.locator('.cal-week-times').count() === 0, 'week rows do not expose time previews')
-    await shot(page, 'history-week')
+    await shot(page, 'history-week-ko-light')
 
     // Preview CTA enters the full day timeline; the exact data selector avoids the old Diary misclick.
     await historyPreview.locator('.history-preview-action').click()
@@ -824,7 +837,7 @@ async function main() {
       dayTimelineActionHitTargets.every(({ width, height }) => width >= 40 && height >= 40),
       'day timeline action hit targets are at least 40px',
     )
-    await shot(page, 'history-day')
+    await shot(page, 'history-day-ko-light')
 
     const peeFilter = page.locator('[data-history-filter="pee"]')
     assert(await peeFilter.isVisible(), 'day exposes a filter for the present pee event')
@@ -837,9 +850,27 @@ async function main() {
     const editHistoryEvent = page.locator('.cal-day .timeline-action-button[aria-label*="시간 수정"]').first()
     assert(await editHistoryEvent.isVisible(), 'History day event exposes an accessible time-edit action')
     await editHistoryEvent.click()
-    await page.waitForSelector('.popover input[type="datetime-local"]', { timeout: 5000 })
+    const timeEditDialog = page.locator('[data-time-edit-modal] [role="dialog"]')
+    await page.waitForSelector('[data-time-edit-modal] [role="dialog"]', { timeout: 5000 })
+    assert(await timeEditDialog.getAttribute('aria-modal') === 'true', 'time editor exposes aria-modal dialog semantics')
+    assert(
+      await page.locator('[data-time-edit-input]').evaluate(input => document.activeElement === input),
+      'time editor initially focuses the date input',
+    )
+    const timeEditTargets = await timeEditDialog.locator('input, button').evaluateAll(controls => controls.map(control => {
+      const rect = control.getBoundingClientRect()
+      return { width: rect.width, height: rect.height }
+    }))
+    assert(
+      timeEditTargets.every(({ width, height }) => width >= 40 && height >= 40),
+      `time editor targets are at least 40px (${JSON.stringify(timeEditTargets)})`,
+    )
     await shot(page, 'history-day-edit')
-    await page.locator('.popover .btn-secondary').filter({ hasText: '취소' }).click()
+    await page.keyboard.press('Escape')
+    assert(
+      await editHistoryEvent.evaluate(button => document.activeElement === button),
+      'Escape closes the time editor and restores its trigger',
+    )
 
     const deleteHistoryEvent = page.locator('.cal-day .timeline-action-button[aria-label$="삭제"]').first()
     assert(await deleteHistoryEvent.isVisible(), 'History day event exposes an accessible delete action')
@@ -1150,6 +1181,7 @@ async function main() {
       compactHistoryLayout.toolbarColumns.trim().split(/\s+/).filter(Boolean).length === 1,
       `compact History stacks the shared toolbar (${compactHistoryLayout.toolbarColumns})`,
     )
+    await shot(page, 'history-month-ja-dark-compact-720x560')
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.waitForTimeout(50)
     const reducedHistoryMotion = await page.evaluate(() => {
@@ -1173,6 +1205,22 @@ async function main() {
     )
     await page.emulateMedia({ reducedMotion: 'no-preference' })
     await page.setViewportSize({ width: 1280, height: 800 })
+
+    // Korean dark captures complete the locale × theme History review matrix.
+    await page.click('[data-tour="nav-settings"]')
+    await page.waitForSelector('[data-tour="settings-main"]', { timeout: 5000 })
+    const koDarkButton = page.locator('button[lang="ko"]')
+    assert(await koDarkButton.count() === 1, 'Korean language button is available in dark mode')
+    await koDarkButton.click()
+    await page.waitForTimeout(400)
+    await page.click('[data-tour="nav-history"]')
+    await page.waitForSelector('[data-tour="calendar"]', { timeout: 5000 })
+    await page.locator('button[data-history-view="month"]').click()
+    await shot(page, 'history-month-ko-dark')
+    await page.locator('button[data-history-view="week"]').click()
+    await shot(page, 'history-week-ko-dark')
+    await page.locator('button[data-history-view="day"]').click()
+    await shot(page, 'history-day-ko-dark')
 
     await page.click('[data-tour="nav-home"]')
     await page.waitForSelector('[data-tour="hero"]', { timeout: 5000 })
@@ -1258,8 +1306,8 @@ async function main() {
       failures.push(`${errorCount} unexpected console error(s): ${consoleErrors.slice(0, 3).join(' | ')}`)
     }
 
-    if (screenshotIndex !== 36) {
-      failures.push(`Expected exactly 36 screenshots, got ${screenshotIndex}`)
+    if (screenshotIndex !== 40) {
+      failures.push(`Expected exactly 40 screenshots, got ${screenshotIndex}`)
     }
     const screenshotFiles = fs.readdirSync(SCREENSHOTS_DIR)
       .filter(name => /^\d{2}-.+\.png$/.test(name))

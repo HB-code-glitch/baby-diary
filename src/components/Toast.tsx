@@ -8,6 +8,7 @@ interface ToastItem {
   onUndo?: () => void
   onTimeEdit?: () => void
   className?: string
+  tone?: 'status' | 'error'
 }
 
 interface ToastContextValue {
@@ -45,8 +46,15 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={{ showToast }}>
       {children}
       <div className="toast-container">
-        {toasts.map(toast => (
-          <div key={toast.id} className={['toast', toast.className].filter(Boolean).join(' ')}>
+        {toasts.map(toast => {
+          const isError = toast.tone === 'error' || toast.className?.split(' ').includes('toast-error')
+          return (
+          <div
+            key={toast.id}
+            className={['toast', isError ? 'toast-error' : '', toast.className].filter(Boolean).join(' ')}
+            role={isError ? 'alert' : 'status'}
+            aria-atomic="true"
+          >
             <span>{toast.message}</span>
             {toast.onTimeEdit && (
               <button
@@ -74,11 +82,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               className="toast-btn"
               style={{ opacity: 0.6 }}
               onClick={() => removeToast(toast.id)}
+              aria-label={t('toast.dismiss')}
             >
-              ✕
+              <span aria-hidden="true">×</span>
             </button>
           </div>
-        ))}
+          )
+        })}
       </div>
     </ToastContext.Provider>
   )

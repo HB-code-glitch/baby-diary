@@ -3,6 +3,7 @@
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { format } from 'date-fns'
+import { ja, ko } from 'date-fns/locale'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { DiaryEvent } from '../shared/types'
 import i18n from '../src/i18n'
@@ -57,7 +58,9 @@ describe('history temperature-record accessibility', () => {
       root.render(<HistoryPage />)
     })
 
-    const dateLabel = format(recordedAt, 'yyyy-MM-dd')
+    const dateLabel = format(recordedAt, i18n.t('date.formatFull'), {
+      locale: locale === 'ja' ? ja : ko,
+    })
     const monthButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.cal-day-cell'))
     const recordedDay = monthButtons.find(button => {
       const name = accessibleName(button)
