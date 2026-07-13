@@ -1,285 +1,63 @@
-/**
- * tests/guidance.test.ts
- * Vitest unit tests for getGuidanceForAge() and getCalendarGuidance().
- */
-
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
-  getGuidanceForAge,
-  getCalendarGuidance,
-  GUIDANCE_MARKERS,
-  GUIDANCE_DISCLAIMER,
-  GUIDANCE_SOURCES,
-  evaluateFever,
+  FEEDING_BANDS,
   FEVER_CARE,
   FEVER_DURATION_GUIDANCE,
   FEVER_RED_FLAGS,
+  GUIDANCE_ITEMS,
+  GUIDANCE_MARKERS,
+  evaluateFever,
+  getCalendarGuidance,
+  getCurrentFormulaGuidance,
+  getFeedingBand,
+  getGuidanceForAge,
+  getGuidanceForDay,
 } from '../src/lib/guidance'
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+describe('legacy health guidance exposure guard', () => {
+  it('keeps only the minimum fever compatibility markers with Task 1 source-id seams', () => {
+    expect(GUIDANCE_MARKERS.map(marker => marker.id).sort()).toEqual([
+      'antipyretic_age_limits',
+      'fever_red_flags',
+      'fever_under_3mo_emergency',
+    ])
 
-/** Returns age-in-days offset date string relative to a birth date */
-function ageDayStr(birthdate: string, ageInDays: number): string {
-  const birth = new Date(birthdate)
-  const d = new Date(birth.getTime() + ageInDays * 24 * 60 * 60 * 1000)
-  return d.toISOString().slice(0, 10)
-}
-
-// ---------------------------------------------------------------------------
-// Dataset shape checks
-// ---------------------------------------------------------------------------
-
-describe('GUIDANCE_MARKERS dataset', () => {
-  it('has exactly 14 markers (P34: formula_1_3mo split into 2)', () => {
-    expect(GUIDANCE_MARKERS).toHaveLength(14)
-  })
-
-  it('all markers have required fields', () => {
-    for (const m of GUIDANCE_MARKERS) {
-      expect(m.id).toBeTruthy()
-      expect(typeof m.startDay).toBe('number')
-      expect(m.startDay).toBeGreaterThanOrEqual(0)
-      expect(m.titleKo).toBeTruthy()
-      expect(m.titleJa).toBeTruthy()
-      expect(m.bodyKo).toBeTruthy()
-      expect(m.bodyJa).toBeTruthy()
-      expect(m.sourceLabel).toBeTruthy()
-      expect(['guideline-consensus', 'RCT']).toContain(m.evidenceLevel)
+    for (const marker of GUIDANCE_MARKERS) {
+      expect(marker.sourceIds.length).toBeGreaterThan(0)
+      expect(marker.sourceIds.every(id => id.startsWith('nice-'))).toBe(true)
+      expect(marker.sourceLabel).toContain('NICE')
+      expect(marker.titleKo).toBeTruthy()
+      expect(marker.titleJa).toBeTruthy()
+      expect(marker.bodyKo).toBeTruthy()
+      expect(marker.bodyJa).toBeTruthy()
     }
   })
 
-  it('contains the 5 calendar markers (startDay > 0; P34 split)', () => {
-    // P34: formula_1_3mo split into formula_1_2mo + formula_2_3mo → now 5 cal markers
-    const calMarkers = GUIDANCE_MARKERS.filter(m => m.startDay > 0)
-    const ids = calMarkers.map(m => m.id)
-    expect(ids).toContain('formula_1_2mo')
-    expect(ids).toContain('formula_2_3mo')
-    expect(ids).toContain('formula_3_6mo')
-    expect(ids).toContain('weaning_start_readiness')
-    expect(ids).toContain('allergen_early_intro')
+  it('removes fixed feeding quotas and stale fever-duration claims from all legacy screen data', () => {
+    const exposed = JSON.stringify({
+      markers: GUIDANCE_MARKERS,
+      items: GUIDANCE_ITEMS,
+      feedingBands: FEEDING_BANDS,
+    })
+
+    expect(exposed).not.toMatch(/formula_|960\s*m?l|24시간|24時間|3일|3日/)
+    expect(exposed).not.toMatch(/KellyMom|Seattle Children|Nemours|たまひよ|mamanoko|ままのて/i)
+    expect(exposed).not.toMatch(/직장 체온|直腸体温/)
   })
 
-  it('day-0 markers: all 9 have startDay===0', () => {
-    const day0 = GUIDANCE_MARKERS.filter(m => m.startDay === 0)
-    expect(day0).toHaveLength(9)
-  })
-})
-
-describe('GUIDANCE_DISCLAIMER', () => {
-  it('ko disclaimer is in Korean', () => {
-    expect(GUIDANCE_DISCLAIMER.ko).toMatch(/소아과/)
-  })
-
-  it('ja disclaimer is in Japanese', () => {
-    expect(GUIDANCE_DISCLAIMER.ja).toMatch(/小児科/)
-  })
-})
-
-describe('GUIDANCE_SOURCES', () => {
-  it('has sources with org/title/year/url', () => {
-    expect(GUIDANCE_SOURCES.length).toBeGreaterThan(0)
-    for (const s of GUIDANCE_SOURCES) {
-      expect(s.org).toBeTruthy()
-      expect(s.title).toBeTruthy()
-      expect(s.year).toBeTruthy()
-      expect(s.url).toBeTruthy()
+  it('retires fixed-day History/calendar/formula compatibility results', () => {
+    expect(GUIDANCE_ITEMS).toEqual([])
+    expect(FEEDING_BANDS).toEqual([])
+    expect(getGuidanceForAge('2026-01-01', '2026-07-01')).toEqual([])
+    expect(getCalendarGuidance('2026-01-01')).toEqual([])
+    expect(getGuidanceForDay(0)).toEqual([])
+    expect(getGuidanceForDay(120)).toEqual([])
+    expect(getCurrentFormulaGuidance(60)).toBeNull()
+    for (const ageDays of [-1, 0, 30, 90, 179, 365]) {
+      expect(getFeedingBand(ageDays)).toBeNull()
     }
   })
 })
-
-// ---------------------------------------------------------------------------
-// getGuidanceForAge — age band selection
-// ---------------------------------------------------------------------------
-
-describe('getGuidanceForAge — formula band selection', () => {
-  const birth = '2026-01-01'
-
-  it('day 10 → formula_0_1mo', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 10))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_0_1mo')
-  })
-
-  it('day 45 → formula_1_2mo (startDay 30 is highest <= 45; P34)', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 45))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_1_2mo')
-  })
-
-  it('day 100 → formula_3_6mo (startDay 90 is highest <= 100)', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 100))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_3_6mo')
-  })
-
-  it('day 0 → formula_0_1mo', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 0))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_0_1mo')
-  })
-
-  it('day 29 → formula_0_1mo (startDay 30 not yet reached)', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 29))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_0_1mo')
-  })
-
-  it('day 30 → formula_1_2mo (startDay 30 exactly reached; P34)', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 30))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_1_2mo')
-  })
-
-  it('day 90 → formula_3_6mo (startDay 90 exactly reached)', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 90))
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    expect(formula?.id).toBe('formula_3_6mo')
-  })
-
-  it('returns only one formula marker', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 45))
-    const formulaMarkers = markers.filter(m => m.id.startsWith('formula_'))
-    expect(formulaMarkers).toHaveLength(1)
-  })
-})
-
-describe('getGuidanceForAge — weaning and allergen markers', () => {
-  const birth = '2026-01-01'
-
-  it('day 119 → no weaning/allergen markers yet (startDay 120 not reached)', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 119))
-    expect(markers.find(m => m.id === 'weaning_start_readiness')).toBeUndefined()
-    expect(markers.find(m => m.id === 'allergen_early_intro')).toBeUndefined()
-  })
-
-  it('day 120 → weaning_start_readiness and allergen_early_intro both active', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 120))
-    expect(markers.find(m => m.id === 'weaning_start_readiness')).toBeDefined()
-    expect(markers.find(m => m.id === 'allergen_early_intro')).toBeDefined()
-  })
-
-  it('day 200 → weaning and allergen still active', () => {
-    const markers = getGuidanceForAge(birth, ageDayStr(birth, 200))
-    expect(markers.find(m => m.id === 'weaning_start_readiness')).toBeDefined()
-    expect(markers.find(m => m.id === 'allergen_early_intro')).toBeDefined()
-  })
-})
-
-describe('getGuidanceForAge — edge cases', () => {
-  it('empty birthdate → empty result', () => {
-    expect(getGuidanceForAge('')).toEqual([])
-  })
-
-  it('negative age (future birth) → empty result', () => {
-    const futureDate = '2099-01-01'
-    expect(getGuidanceForAge(futureDate, '2026-07-11')).toEqual([])
-  })
-})
-
-// ---------------------------------------------------------------------------
-// getCalendarGuidance — date mapping
-// ---------------------------------------------------------------------------
-
-describe('getCalendarGuidance', () => {
-  it('birth 2026-01-01 → weaning_start_readiness on 2026-05-01 (day 120)', () => {
-    const items = getCalendarGuidance('2026-01-01')
-    const weaning = items.find(i => i.marker.id === 'weaning_start_readiness')
-    expect(weaning).toBeDefined()
-    expect(weaning?.date).toBe('2026-05-01')
-  })
-
-  it('birth 2026-01-01 → allergen_early_intro on 2026-05-01 (day 120)', () => {
-    const items = getCalendarGuidance('2026-01-01')
-    const allergen = items.find(i => i.marker.id === 'allergen_early_intro')
-    expect(allergen).toBeDefined()
-    expect(allergen?.date).toBe('2026-05-01')
-  })
-
-  it('birth 2026-01-01 → formula_1_2mo on 2026-01-31 (day 30; P34)', () => {
-    const items = getCalendarGuidance('2026-01-01')
-    const f = items.find(i => i.marker.id === 'formula_1_2mo')
-    expect(f).toBeDefined()
-    expect(f?.date).toBe('2026-01-31')
-  })
-
-  it('birth 2026-01-01 → formula_2_3mo on 2026-03-02 (day 60; P34)', () => {
-    const items = getCalendarGuidance('2026-01-01')
-    const f = items.find(i => i.marker.id === 'formula_2_3mo')
-    expect(f).toBeDefined()
-    // Jan 1 + 60 days = March 2
-    expect(f?.date).toBe('2026-03-02')
-  })
-
-  it('birth 2026-01-01 → formula_3_6mo on 2026-04-01 (day 90)', () => {
-    const items = getCalendarGuidance('2026-01-01')
-    const f = items.find(i => i.marker.id === 'formula_3_6mo')
-    expect(f).toBeDefined()
-    expect(f?.date).toBe('2026-04-01')
-  })
-
-  it('day-0 markers excluded from calendar list', () => {
-    const items = getCalendarGuidance('2026-01-01')
-    const day0Items = items.filter(i => i.marker.startDay === 0)
-    expect(day0Items).toHaveLength(0)
-  })
-
-  it('returns exactly 5 items (the 5 startDay>0 markers after P34 split)', () => {
-    // P34: formula_1_3mo split into formula_1_2mo (startDay 30) + formula_2_3mo (startDay 60)
-    // Total startDay>0: formula_1_2mo, formula_2_3mo, formula_3_6mo, weaning_start_readiness, allergen_early_intro = 5
-    const items = getCalendarGuidance('2026-01-01')
-    expect(items).toHaveLength(5)
-  })
-
-  it('empty birthdate → empty result', () => {
-    expect(getCalendarGuidance('')).toEqual([])
-  })
-
-  it('all returned dates are valid yyyy-MM-dd', () => {
-    const items = getCalendarGuidance('2026-06-15')
-    for (const item of items) {
-      expect(item.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-    }
-  })
-})
-
-// ---------------------------------------------------------------------------
-// fever marker quote fields — must not truncate at decimal points
-// ---------------------------------------------------------------------------
-
-describe('fever marker quoteKo/quoteJa fields', () => {
-  it('fever_under_3mo_emergency has non-empty quoteKo containing 38.0', () => {
-    const m = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
-    expect(m.quoteKo).toBeTruthy()
-    expect(m.quoteKo).toContain('38.0')
-  })
-
-  it('fever_under_3mo_emergency has non-empty quoteJa containing 38.0', () => {
-    const m = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
-    expect(m.quoteJa).toBeTruthy()
-    expect(m.quoteJa).toContain('38.0')
-  })
-
-  it('antipyretic_age_limits has non-empty quoteKo', () => {
-    const m = GUIDANCE_MARKERS.find(m => m.id === 'antipyretic_age_limits')!
-    expect(m.quoteKo).toBeTruthy()
-  })
-
-  it('antipyretic_age_limits has non-empty quoteJa', () => {
-    const m = GUIDANCE_MARKERS.find(m => m.id === 'antipyretic_age_limits')!
-    expect(m.quoteJa).toBeTruthy()
-  })
-
-  it('fever_under_3mo_emergency quoteKo is a complete first sentence (ends with 가요.)', () => {
-    const m = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
-    expect(m.quoteKo).toMatch(/가요\.$/)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Fever safety routing — exact day and calendar-month boundaries
-// ---------------------------------------------------------------------------
 
 describe('evaluateFever safety routing', () => {
   it('routes an 89-day-old baby at 38.0°C to urgent care', () => {
@@ -295,17 +73,12 @@ describe('evaluateFever safety routing', () => {
       birthdate: '2026-01-31',
       measuredAt: '2026-05-01T12:00:00+09:00',
     }
-
     expect(evaluateFever({ ...base, celsius: 38.3 })).toBe('warning')
     expect(evaluateFever({ ...base, celsius: 39 })).toBe('danger')
   })
 
   it('does not approximate the three-month boundary from 90 days', () => {
-    const base = {
-      birthdate: '2026-03-01',
-      measuredAt: '2026-05-30T12:00:00+09:00',
-    }
-
+    const base = { birthdate: '2026-03-01', measuredAt: '2026-05-30T12:00:00+09:00' }
     expect(evaluateFever({ ...base, celsius: 39 })).toBe('caution')
     expect(evaluateFever({
       ...base,
@@ -314,16 +87,19 @@ describe('evaluateFever safety routing', () => {
     })).toBe('danger')
   })
 
-  it('does not classify temperature alone as danger from six calendar months', () => {
-    expect(evaluateFever({
-      celsius: 40,
-      birthdate: '2026-01-31',
-      measuredAt: '2026-07-31T12:00:00+09:00',
-    })).toBe('caution')
+  it('uses clinician contact without a serious-diagnosis label at 39.4°C after six months', () => {
+    const base = {
+      birthdate: '2026-01-01',
+      measuredAt: '2026-07-13T12:00:00+09:00',
+    }
+    expect(evaluateFever({ ...base, celsius: 39.3 })).toBe('caution')
+    expect(evaluateFever({ ...base, celsius: 39.4 })).toBe('warning')
+    expect(evaluateFever({ ...base, celsius: 42 })).toBe('warning')
   })
 
-  it('routes 38.0°C with unknown age to immediate clinician contact', () => {
+  it('routes unknown age at either 38°C+ or below 35.5°C to immediate contact', () => {
     expect(evaluateFever({ celsius: 38, birthdate: null })).toBe('emergency')
+    expect(evaluateFever({ celsius: 35.4, birthdate: null })).toBe('emergency')
   })
 
   it('routes newborn low temperature below 35.5°C to urgent care', () => {
@@ -341,12 +117,25 @@ describe('evaluateFever safety routing', () => {
       measuredAt: '2026-07-13T12:00:00+09:00',
       symptomIds: ['breathing_difficulty'],
     })).toBe('emergency')
-
     expect(evaluateFever({
       celsius: 36.8,
       birthdate: '2026-07-01',
       measuredAt: '2026-07-13T12:00:00+09:00',
       symptomIds: ['poor_feeding'],
+    })).toBe('emergency')
+  })
+
+  it('rejects NaN and infinite temperatures without producing a medical tier', () => {
+    expect(evaluateFever({ celsius: Number.NaN, birthdate: null })).toBeNull()
+    expect(evaluateFever({ celsius: Number.POSITIVE_INFINITY, birthdate: null })).toBeNull()
+    expect(evaluateFever({ celsius: Number.NEGATIVE_INFINITY, birthdate: null })).toBeNull()
+  })
+
+  it('keeps a selected red flag urgent even when the temperature value is invalid', () => {
+    expect(evaluateFever({
+      celsius: Number.NaN,
+      birthdate: null,
+      symptomIds: ['breathing_difficulty'],
     })).toBe('emergency')
   })
 })
@@ -356,7 +145,6 @@ describe('fever guidance content safety', () => {
     expect(FEVER_RED_FLAGS.length).toBeGreaterThanOrEqual(8)
     expect(FEVER_RED_FLAGS.some(flag => flag.id === 'breathing_difficulty')).toBe(true)
     expect(FEVER_RED_FLAGS.some(flag => flag.id === 'poor_feeding' && flag.newbornOnly)).toBe(true)
-
     for (const flag of FEVER_RED_FLAGS) {
       expect(flag.id).toBeTruthy()
       expect(flag.ko).toBeTruthy()
@@ -364,9 +152,11 @@ describe('fever guidance content safety', () => {
     }
   })
 
-  it('keeps home care neutral and excludes tepid sponging', () => {
+  it('keeps home care neutral, source-linked, and excludes tepid sponging', () => {
     const serialized = JSON.stringify(FEVER_CARE)
-    expect(serialized).not.toMatch(/미온|ぬるま湯|spong/i)
+    expect(FEVER_CARE.sourceIds).toEqual(['nice-fever-ng143'])
+    expect(FEVER_CARE.sourceLabel).toBe('NICE NG143')
+    expect(serialized).not.toMatch(/미온|ぬるま湯|spong|NHS/i)
     expect(serialized).toMatch(/수분|水分/)
     expect(serialized).toMatch(/벗기|脱がせ/)
   })

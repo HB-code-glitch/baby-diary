@@ -13,6 +13,30 @@ afterEach(async () => {
   await i18n.changeLanguage('ko')
 })
 
+describe('Korean/Japanese health copy parity', () => {
+  it('keeps equivalent red-flag and responsive-feeding keys without retired recommendations', () => {
+    const ko = JSON.parse(readFileSync('src/i18n/ko.json', 'utf8'))
+    const ja = JSON.parse(readFileSync('src/i18n/ja.json', 'utf8'))
+    const keys = [
+      'riskCheck',
+      'riskIntro',
+      'riskSelectedCount',
+    ]
+    for (const key of keys) {
+      expect(ko.popover[key]).toBeTruthy()
+      expect(ja.popover[key]).toBeTruthy()
+    }
+    expect(ko.popover.riskIntro).toContain('하나라도')
+    expect(ja.popover.riskIntro).toContain('いずれか一つでも')
+
+    const exposedCopy = JSON.stringify({
+      ko: { home: ko.home, popover: ko.popover, feedingTip: ko.feedingTip, feverModal: ko.feverModal },
+      ja: { home: ja.home, popover: ja.popover, feedingTip: ja.feedingTip, feverModal: ja.feverModal },
+    })
+    expect(exposedCopy).not.toMatch(/반대쪽 추천|反対側がおすすめ|다음 수유|次の授乳|960|24시간|24時間|3일|3日/)
+  })
+})
+
 describe('FeedingTipPopup safety copy', () => {
   it('shows the recorded formula total and cues without quota or remaining calculations', async () => {
     await i18n.changeLanguage('ko')
@@ -51,7 +75,13 @@ describe('FeedingTipPopup safety copy', () => {
     expect(html).toContain('마지막 수유 후')
     expect(html).toContain('기록한 쪽')
     expect(html).toContain('신생아')
+    expect(html).toContain('모유 수유 8회')
     expect(html).not.toMatch(/다음 수유|반대쪽 추천|~\s*\d{2}:\d{2}/)
+  })
+
+  it('stays visible until the caregiver dismisses it manually', () => {
+    const source = readFileSync('src/components/FeedingTipPopup.tsx', 'utf8')
+    expect(source).not.toMatch(/AUTO_DISMISS|setTimeout\s*\(/)
   })
 
   it('keeps the same safety meaning in Japanese', async () => {
@@ -88,6 +118,8 @@ describe('FeverModal safety and accessibility', () => {
 
     expect(html).toContain('role="alertdialog"')
     expect(html).toContain('tabindex="-1"')
+    expect(html).toContain('aria-labelledby=')
+    expect(html).toContain('aria-describedby=')
     expect(html).toContain('119')
     expect(html).toContain('측정 부위')
     expect(html).toContain('호흡')
@@ -108,6 +140,7 @@ describe('FeverModal safety and accessibility', () => {
 
     expect(html).toContain('5日')
     expect(html).toContain('測定部位')
+    expect(html).toContain('いずれか一つでも')
     expect(html).not.toMatch(/24時間|3日|ぬるま湯/)
   })
 

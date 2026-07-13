@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   BF_DISCLAIMER,
@@ -19,8 +19,6 @@ export interface FeedingTipPopupProps {
   onNavigate?: (page: 'settings') => void
   onDismiss: () => void
 }
-
-const AUTO_DISMISS_MS = 8000
 
 function elapsedParts(lastAtISO: string | undefined): { hours: number; minutes: number } | null {
   if (!lastAtISO) return null
@@ -45,14 +43,6 @@ export function FeedingTipPopup({
   onDismiss,
 }: FeedingTipPopupProps): React.JSX.Element | null {
   const { t, i18n } = useTranslation()
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    timerRef.current = setTimeout(onDismiss, AUTO_DISMISS_MS)
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    }
-  }, [onDismiss])
 
   if (ageDays === null) return null
 

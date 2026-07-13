@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   FEVER_CARE,
@@ -7,11 +7,13 @@ import {
   FeverLevel,
 } from '../lib/guidance'
 
-interface FeverModalProps {
+export interface FeverModalProps {
   celsius: number
   level: Exclude<FeverLevel, null | 'caution'>
   ageDays: number | null
+  completedMonths?: number | null
   lang: string
+  returnFocusTo?: HTMLElement | null
   onConfirm: () => void
 }
 
@@ -58,17 +60,37 @@ export function resolveFeverDialogKeyAction({
   return null
 }
 
-export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverModalProps): React.JSX.Element {
+export function FeverModal({
+  celsius,
+  level,
+  ageDays,
+  completedMonths = null,
+  lang,
+  returnFocusTo = null,
+  onConfirm,
+}: FeverModalProps): React.JSX.Element {
   const { t } = useTranslation()
   const [redFlagsOpen, setRedFlagsOpen] = useState(level === 'emergency' || level === 'danger')
   const dialogRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+  const descriptionId = useId()
 
   useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement
+    const activeBeforeDialog = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null
-    return focusDialogAndCreateRestore(dialogRef.current, previouslyFocused)
-  }, [])
+    const restoreFocus = focusDialogAndCreateRestore(
+      dialogRef.current,
+      returnFocusTo ?? activeBeforeDialog,
+    )
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    return () => {
+      document.body.style.overflow = previousOverflow
+      restoreFocus()
+    }
+  }, [returnFocusTo])
 
   const title = level === 'emergency'
     ? t('feverModal.emergencyTitle')
@@ -80,6 +102,7 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
   const isNewborn = ageDays != null && ageDays >= 0 && ageDays < 28
   const visibleRedFlags = FEVER_RED_FLAGS.filter(flag => !flag.newbornOnly || isNewborn)
   const language = lang === 'ja' ? 'ja' : 'ko'
+  const isOlderHighTemperature = level === 'warning' && completedMonths != null && completedMonths >= 6
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     const focusable = dialogRef.current
@@ -122,12 +145,13 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
         className={`fever-modal${isRed ? ' fever-modal-red' : ' fever-modal-amber'}`}
         role="alertdialog"
         aria-modal="true"
-        aria-label={title}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
         tabIndex={-1}
         onKeyDown={handleKeyDown}
       >
         <div className="fever-modal-temp">{celsius.toFixed(1)}&deg;C</div>
-        <h2 className="fever-modal-title">{title}</h2>
+        <h2 id={titleId} className="fever-modal-title">{title}</h2>
 
         {isRed && (
           <p className="fever-modal-note fever-modal-note-rule">
@@ -135,12 +159,14 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
           </p>
         )}
 
-        <p className="fever-modal-body">
+        <p id={descriptionId} className="fever-modal-body">
           {level === 'emergency'
             ? t('feverModal.emergencyBody')
             : level === 'danger'
               ? t('feverModal.dangerBody')
-              : t('feverModal.warningBody')}
+              : isOlderHighTemperature
+                ? t('feverModal.olderHighTemperatureBody')
+                : t('feverModal.warningBody')}
         </p>
 
         {ageDays === null && (
@@ -168,6 +194,7 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
         </p>
 
         <div className="fever-modal-section">
+          <p className="fever-modal-note">{t('feverModal.redFlagIntro')}</p>
           <button
             className="fever-modal-collapse-btn"
             onClick={() => setRedFlagsOpen(open => !open)}

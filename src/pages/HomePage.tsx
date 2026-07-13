@@ -5,12 +5,18 @@ import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
 import { TimeEditModal } from '../components/TimeEditModal'
 import { DiaryEvent, BreastData, FormulaData, TempData, DataInfo } from '../../shared/types'
-import { differenceInMinutes, differenceInCalendarDays, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
+import { differenceInMinutes, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
 import { getMilestones, getUpcoming, Milestone } from '../lib/milestones'
-import { evaluateFever, FeverLevel } from '../lib/guidance'
+import {
+  evaluateFever,
+  FEVER_RED_FLAGS,
+  getFeverAgeContext,
+  type FeverLevel,
+  type FeverRedFlagId,
+} from '../lib/guidance'
 import { FeedingTipPopup } from '../components/FeedingTipPopup'
 import { FeverModal } from '../components/FeverModal'
 import { useSyncStatus } from '../sync/useSync'
@@ -599,17 +605,20 @@ function QuickMenu({ anchor, onPee, onPoop, onOpenTemp, onOpenBreast, onOpenForm
 // ---------------------------------------------------------------------------
 // Temperature popover
 // ---------------------------------------------------------------------------
-interface TempPopoverProps {
+export interface TempPopoverProps {
   anchor: DOMRect
-  onConfirm: (celsius: number) => void
+  ageDays: number | null
+  onConfirm: (celsius: number, symptomIds: readonly FeverRedFlagId[]) => void
   onClose: () => void
   defaultValue: number
 }
 
-function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverProps) {
+export function TempPopover({ anchor, ageDays, onConfirm, onClose, defaultValue }: TempPopoverProps) {
   const [value, setValue] = useState(defaultValue.toFixed(1))
+  const [riskOpen, setRiskOpen] = useState(false)
+  const [selectedRiskIds, setSelectedRiskIds] = useState<FeverRedFlagId[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   useEffect(() => {
     if (inputRef.current) {
@@ -623,8 +632,18 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
     // HTML min/max attributes are bypassed by direct input — enforce in JS too.
     const n = parseFloat(value)
     if (!isNaN(n) && isFinite(n)) {
-      onConfirm(Math.min(Math.max(n, 35.0), 42.0))
+      onConfirm(Math.min(Math.max(n, 35.0), 42.0), [...selectedRiskIds])
     }
+  }
+
+  const visibleRiskFlags = FEVER_RED_FLAGS.filter(flag =>
+    !flag.newbornOnly || ageDays === null || (ageDays >= 0 && ageDays < 28)
+  )
+
+  const toggleRisk = (id: FeverRedFlagId): void => {
+    setSelectedRiskIds(current => current.includes(id)
+      ? current.filter(item => item !== id)
+      : [...current, id])
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -637,7 +656,7 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
   const rawLeft = anchor.left - 80
   const clampedLeft = Math.min(Math.max(8, rawLeft), window.innerWidth - POPOVER_W - 8)
   // If popover would overflow bottom, open upward (approx height 140px)
-  const POPOVER_H = 160
+  const POPOVER_H = riskOpen ? 520 : 210
   const openUpward = anchor.bottom + 8 + POPOVER_H > window.innerHeight - 8
   const style: React.CSSProperties = openUpward
     ? { bottom: window.innerHeight - anchor.top + 8, left: clampedLeft }
@@ -648,7 +667,7 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
       <div className="popover-overlay" onClick={onClose} />
       <form
         className="popover"
-        style={style}
+        style={{ ...style, maxHeight: 'min(72vh, 560px)', overflowY: 'auto' }}
         onSubmit={e => { e.preventDefault(); handleSubmit() }}
       >
         <div className="label">{t('popover.tempInput')}</div>
@@ -667,6 +686,41 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
           />
           <span style={{ fontSize: 14, color: 'var(--text-secondary)', fontWeight: 600 }}>℃</span>
         </div>
+        <button
+          type="button"
+          className="fever-modal-collapse-btn"
+          aria-expanded={riskOpen}
+          aria-controls="temperature-risk-flags"
+          onClick={() => setRiskOpen(open => !open)}
+          style={{ width: '100%', marginBottom: 8 }}
+        >
+          {t('popover.riskCheck')}
+        </button>
+        {riskOpen && (
+          <div id="temperature-risk-flags" style={{ marginBottom: 10 }}>
+            <p style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-secondary)', margin: '0 0 8px' }}>
+              {t('popover.riskIntro')}
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {visibleRiskFlags.map(flag => (
+                <label key={flag.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, lineHeight: 1.4 }}>
+                  <input
+                    type="checkbox"
+                    value={flag.id}
+                    checked={selectedRiskIds.includes(flag.id)}
+                    onChange={() => toggleRisk(flag.id)}
+                  />
+                  <span>{i18n.resolvedLanguage === 'ja' ? flag.ja : flag.ko}</span>
+                </label>
+              ))}
+            </div>
+            {selectedRiskIds.length > 0 && (
+              <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'var(--butter-text)' }}>
+                {t('popover.riskSelectedCount', { count: selectedRiskIds.length })}
+              </div>
+            )}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
           <button type="button" className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
           <button type="submit" className="btn-primary">{t('popover.record')}</button>
@@ -1274,6 +1328,24 @@ function GrowthPopover({ anchor, onConfirm, onClose }: GrowthPopoverProps) {
 
 type ActivePopover = 'temp' | 'breast' | 'formula' | 'growth' | null
 
+export async function presentTemperatureSafetyThenPersist({
+  presentSafety,
+  persist,
+  onPersistError,
+}: {
+  presentSafety: () => void
+  persist: () => Promise<void>
+  onPersistError: () => void
+}): Promise<void> {
+  // Safety guidance must never depend on local storage availability.
+  presentSafety()
+  try {
+    await persist()
+  } catch {
+    onPersistError()
+  }
+}
+
 interface HomePageProps {
   onNavigate?: (page: 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings') => void
 }
@@ -1288,7 +1360,11 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const todaySleepMin = useAppStore(s => s.todaySleepMinutes())
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
-  const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
+  const [popover, setPopover] = useState<{
+    type: ActivePopover
+    anchor: DOMRect
+    opener?: HTMLElement | null
+  } | null>(null)
   const [quickMenuAnchor, setQuickMenuAnchor] = useState<DOMRect | null>(null)
   const [timeEditEvent, setTimeEditEvent] = useState<DiaryEvent | null>(null)
   const [timerTick, setTimerTick] = useState(0)
@@ -1301,8 +1377,12 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const [feverModal, setFeverModal] = useState<{
     celsius: number
     level: Exclude<FeverLevel, null | 'caution'>
+    ageDays: number | null
+    completedMonths: number | null
+    returnFocusTo: HTMLElement | null
   } | null>(null)
   const quickRecordRef = useRef<HTMLDivElement>(null)
+  const quickMenuOpenerRef = useRef<HTMLButtonElement>(null)
   const todayFormulaMlNow = useAppStore(s => s.todayFormulaTotalMl())
 
   const today = todayEvents()
@@ -1318,11 +1398,9 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const dday = birthdate ? getDDay(birthdate) : null
   const lang = i18nInstance.language
 
-  const ageDays = React.useMemo<number | null>(() => {
-    if (!birthdate) return null
-    const days = differenceInCalendarDays(new Date(), parseISO(birthdate))
-    return Number.isFinite(days) && days >= 0 ? days : null
-  }, [birthdate])
+  // App-level useMidnightRefresh reloads the store at local midnight. Compute
+  // on every render so the same birthdate cannot retain yesterday's memoized age.
+  const ageDays = getFeverAgeContext(birthdate ?? null, new Date())?.ageDays ?? null
 
   const lastFormulaMl = React.useMemo(() => {
     const formulas = events.filter(e => !e.deleted && e.type === 'formula')
@@ -1374,22 +1452,38 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const handlePoop = useCallback(() => quickRecord(() => addPoop(), t('quickBtn.poop')), [quickRecord, addPoop, t])
 
   const openPopover = (type: ActivePopover, e: React.MouseEvent) => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    setPopover({ type, anchor: rect })
+    const opener = e.currentTarget as HTMLElement
+    const rect = opener.getBoundingClientRect()
+    setPopover({ type, anchor: rect, opener })
   }
 
-  const handleTempConfirm = async (celsius: number) => {
+  const handleTempConfirm = async (
+    celsius: number,
+    symptomIds: readonly FeverRedFlagId[],
+  ) => {
+    const returnFocusTo = popover?.type === 'temp' ? popover.opener ?? null : null
     setPopover(null)
     const label = `${t('quickBtn.temp')} ${celsius.toFixed(1)}℃`
-    const level = evaluateFever({ celsius, birthdate: birthdate ?? null, measuredAt: new Date() })
+    const measuredAt = new Date()
+    const ageContext = getFeverAgeContext(birthdate ?? null, measuredAt)
+    const level = evaluateFever({
+      celsius,
+      birthdate: birthdate ?? null,
+      measuredAt,
+      symptomIds,
+    })
     if (level === 'emergency' || level === 'danger' || level === 'warning') {
-      // Blocking modal — save directly (no undo available while modal is open)
-      try {
-        await addTemp(celsius)
-        setFeverModal({ celsius, level })
-      } catch {
-        showToast({ message: t('toast.saveFailed') })
-      }
+      await presentTemperatureSafetyThenPersist({
+        presentSafety: () => setFeverModal({
+          celsius,
+          level,
+          ageDays: ageContext?.ageDays ?? null,
+          completedMonths: ageContext?.completedMonths ?? null,
+          returnFocusTo,
+        }),
+        persist: async () => { await addTemp(celsius) },
+        onPersistError: () => showToast({ message: t('toast.saveFailed') }),
+      })
     } else if (level === 'caution') {
       // Save with undo available + amber hint toast
       await quickRecord(() => addTemp(celsius), label)
@@ -1579,6 +1673,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
         {/* + Record button — opens glass quick-menu dropdown */}
         <button
+          ref={quickMenuOpenerRef}
           className="btn-add-record"
           onClick={(e) => {
             const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -1681,7 +1776,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           onPoop={handlePoop}
           onOpenTemp={() => {
             const rect = quickMenuAnchor
-            setPopover({ type: 'temp', anchor: rect })
+            setPopover({ type: 'temp', anchor: rect, opener: quickMenuOpenerRef.current })
           }}
           onOpenBreast={() => {
             const rect = quickMenuAnchor
@@ -1704,6 +1799,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
       {popover?.type === 'temp' && (
         <TempPopover
           anchor={popover.anchor}
+          ageDays={ageDays}
           onConfirm={handleTempConfirm}
           onClose={() => setPopover(null)}
           defaultValue={lastTemp}
@@ -1762,8 +1858,10 @@ export function HomePage({ onNavigate }: HomePageProps) {
         <FeverModal
           celsius={feverModal.celsius}
           level={feverModal.level}
-          ageDays={ageDays}
+          ageDays={feverModal.ageDays}
+          completedMonths={feverModal.completedMonths}
           lang={lang}
+          returnFocusTo={feverModal.returnFocusTo}
           onConfirm={() => setFeverModal(null)}
         />
       )}

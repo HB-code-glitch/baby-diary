@@ -179,52 +179,12 @@ describe('P20: getAll() serves from cache without re-scanning disk', () => {
 // ---------------------------------------------------------------------------
 // Formula bands must not be extrapolated beyond their source age window.
 // ---------------------------------------------------------------------------
-describe('getFeedingBand valid window cutoff', () => {
-  it('ageDays 179 returns formula_3_6mo band', () => {
-    expect(getFeedingBand(179)?.id).toBe('formula_3_6mo')
-  })
-
-  it('ageDays 180 and later return null', () => {
-    expect(getFeedingBand(180)).toBeNull()
-    expect(getFeedingBand(365)).toBeNull()
-  })
-
-  it('ageDays -1 returns null', () => {
-    expect(getFeedingBand(-1)).toBeNull()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// P34 — FeedingBand split: formula_1_2mo / formula_2_3mo
-// ---------------------------------------------------------------------------
-describe('P34: formula band split at 60 days', () => {
-  it('ageDays 30 → formula_1_2mo (perMax 160)', () => {
-    const band = getFeedingBand(30)
-    expect(band!.id).toBe('formula_1_2mo')
-    expect(band!.perFeedMlMax).toBe(160)
-  })
-
-  it('ageDays 45 → formula_1_2mo (perMax 160)', () => {
-    const band = getFeedingBand(45)
-    expect(band!.id).toBe('formula_1_2mo')
-    expect(band!.perFeedMlMax).toBe(160)
-  })
-
-  it('ageDays 60 → formula_2_3mo (perMax 180)', () => {
-    const band = getFeedingBand(60)
-    expect(band!.id).toBe('formula_2_3mo')
-    expect(band!.perFeedMlMax).toBe(180)
-  })
-
-  it('ageDays 75 → formula_2_3mo (perMax 180)', () => {
-    const band = getFeedingBand(75)
-    expect(band!.id).toBe('formula_2_3mo')
-    expect(band!.perFeedMlMax).toBe(180)
-  })
-
-  it('ageDays 90 → formula_3_6mo', () => {
-    const band = getFeedingBand(90)
-    expect(band!.id).toBe('formula_3_6mo')
+describe('retired formula bands stay empty', () => {
+  it('returns no quota band at any age', () => {
+    expect(FEEDING_BANDS).toEqual([])
+    for (const ageDays of [-1, 0, 30, 60, 90, 179, 365]) {
+      expect(getFeedingBand(ageDays)).toBeNull()
+    }
   })
 })
 
