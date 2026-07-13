@@ -1,8 +1,31 @@
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+
+import {
+  buildRunManifest,
+  createSourceProvenanceMarker,
+  platformReleaseAssetNames,
+} from '../scripts/release-provenance.mjs'
 
 const VERSION = '0.3.9'
 const TAG = `v${VERSION}`
+const CONTEXT = {
+  sourceRepository: 'HB-code-glitch/baby-diary',
+  releaseRepository: 'HB-code-glitch/baby-diary-releases',
+  tag: TAG,
+  sha: 'a'.repeat(40),
+  version: VERSION,
+  workflowRunId: '24681012',
+  workflowRunAttempt: '2',
+}
+const yaml = createRequire(import.meta.url)('js-yaml') as {
+  dump(value: unknown, options?: Record<string, unknown>): string
+}
 
 const EXPECTED_ASSET_NAMES = [
   `Baby-Diary-${VERSION}-arm64-mac.zip`,
@@ -25,6 +48,7 @@ interface ReleaseFixture {
   tag_name: string
   draft: boolean
   prerelease: boolean
+  body: string
   assets: Array<{
     name: string
     state: string
@@ -33,19 +57,54 @@ interface ReleaseFixture {
   }>
 }
 
+function digest(algorithm: 'sha256' | 'sha512', bytes: Uint8Array, encoding: 'hex' | 'base64') {
+  return createHash(algorithm).update(bytes).digest(encoding)
+}
+
+function assetBytesFixture() {
+  const bytes = new Map(EXPECTED_ASSET_NAMES.map(name => [name, Buffer.from(`current-run:${name}`)]))
+  bytes.set(
+    'INSTALL-ME-BabyDiary-Mac.dmg',
+    Buffer.from(bytes.get(`Baby-Diary-${VERSION}-universal.dmg`)!),
+  )
+  const windows = `Baby-Diary-Setup-${VERSION}.exe`
+  const macArm = `Baby-Diary-${VERSION}-arm64-mac.zip`
+  const macUniversal = `Baby-Diary-${VERSION}-universal-mac.zip`
+  bytes.set('latest.yml', Buffer.from(yaml.dump({
+    version: VERSION,
+    files: [{
+      url: windows,
+      sha512: digest('sha512', bytes.get(windows)!, 'base64'),
+      size: bytes.get(windows)!.byteLength,
+    }],
+    path: windows,
+    sha512: digest('sha512', bytes.get(windows)!, 'base64'),
+  }, { noRefs: true }), 'utf8'))
+  bytes.set('latest-mac.yml', Buffer.from(yaml.dump({
+    version: VERSION,
+    files: [macArm, macUniversal].map(name => ({
+      url: name,
+      sha512: digest('sha512', bytes.get(name)!, 'base64'),
+      size: bytes.get(name)!.byteLength,
+    })),
+    path: macUniversal,
+    sha512: digest('sha512', bytes.get(macUniversal)!, 'base64'),
+  }, { noRefs: true }), 'utf8'))
+  return bytes
+}
+
 function releaseFixture(): ReleaseFixture {
-  const universalDigest = `sha256:${String(5).padStart(64, '0')}`
+  const bytes = assetBytesFixture()
   return {
     tag_name: TAG,
     draft: true,
     prerelease: false,
-    assets: EXPECTED_ASSET_NAMES.map((name, index) => ({
+    body: createSourceProvenanceMarker(CONTEXT),
+    assets: EXPECTED_ASSET_NAMES.map(name => ({
       name,
       state: 'uploaded',
-      size: 100 + index,
-      digest: name === 'INSTALL-ME-BabyDiary-Mac.dmg'
-        ? universalDigest
-        : `sha256:${String(index + 1).padStart(64, '0')}`,
+      size: bytes.get(name)!.byteLength,
+      digest: `sha256:${digest('sha256', bytes.get(name)!, 'hex')}`,
     })),
   }
 }
@@ -54,14 +113,40 @@ function runValidator(payload: unknown, {
   preUpload = false,
   includeTag = true,
 } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'baby-diary-release-validator-'))
+  const manifestsDir = join(root, 'manifests')
+  const assetsDir = join(root, 'assets')
+  mkdirSync(manifestsDir)
+  mkdirSync(assetsDir)
+  const bytes = assetBytesFixture()
+  for (const [name, value] of bytes) writeFileSync(join(assetsDir, name), value)
+  for (const platform of ['mac', 'windows'] as const) {
+    const manifest = buildRunManifest({
+      platform,
+      context: CONTEXT,
+      assets: platformReleaseAssetNames(platform, VERSION).map(name => ({ name, bytes: bytes.get(name)! })),
+    })
+    writeFileSync(join(manifestsDir, `${platform}.json`), JSON.stringify(manifest))
+  }
   const args = [
     'scripts/validate-release-assets.mjs',
+    '--source-repository', CONTEXT.sourceRepository,
+    '--release-repository', CONTEXT.releaseRepository,
+    '--sha', CONTEXT.sha,
+    '--version', VERSION,
+    '--run-id', CONTEXT.workflowRunId,
+    '--run-attempt', CONTEXT.workflowRunAttempt,
   ]
   if (includeTag) args.push('--tag', TAG)
-  if (preUpload) args.push('--pre-upload')
-  else args.push('--version', VERSION)
+  if (preUpload) {
+    args.push('--pre-upload', '--plan', join(root, 'plan.json'), '--notes', join(root, 'notes.txt'))
+  } else {
+    args.push('--manifests-dir', manifestsDir, '--assets-dir', assetsDir)
+  }
 
-  return runValidatorWithArgs(payload, args)
+  const result = runValidatorWithArgs(payload, args)
+  rmSync(root, { recursive: true, force: true })
+  return result
 }
 
 function runValidatorWithArgs(payload: unknown, args: string[]) {
@@ -94,6 +179,16 @@ describe('pre-upload release guard', () => {
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('safe to resume private draft')
+  })
+
+  it('rejects a private draft whose machine-readable source provenance is missing', () => {
+    const fixture = releaseFixture()
+    fixture.body = 'stale unbound draft'
+
+    const result = runValidator([[fixture]], { preUpload: true })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('provenance')
   })
 
   it('rejects rerunning an already-public tag before any upload can mutate it', () => {
@@ -206,6 +301,26 @@ describe('release asset validator', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('invalid digest')
     expect(result.stderr).toContain(fixture.assets[0].name)
+  })
+
+  it('rejects a well-formed GitHub digest from different bytes', () => {
+    const fixture = releaseFixture()
+    fixture.assets[0].digest = `sha256:${'f'.repeat(64)}`
+
+    const result = runValidator([[fixture]])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('remote digest mismatch')
+  })
+
+  it('rejects a positive GitHub size from different bytes', () => {
+    const fixture = releaseFixture()
+    fixture.assets[0].size += 1
+
+    const result = runValidator([[fixture]])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('remote size mismatch')
   })
 
   it('rejects a release that is already public', () => {

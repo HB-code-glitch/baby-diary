@@ -335,7 +335,7 @@ function releaseGateContractErrors(candidate: ReleaseWorkflow): string[] {
       errors.push(`publish command must not run outside a gated release job: ${jobName}`)
     }
   }
-  if (publishCommands.length !== 3) errors.push('expected exactly three gated publish commands')
+  if (publishCommands.length !== 2) errors.push('expected exactly two gated platform upload commands')
   return errors
 }
 
@@ -345,6 +345,105 @@ function releaseTagValidationCode(candidate: ReleaseWorkflow): string | null {
   const command = step ? normalizedRun(step) : null
   const match = command?.match(/^node -e "([\s\S]+)"$/)
   return match?.[1] ?? null
+}
+
+function releaseProvenanceContractErrors(candidate: ReleaseWorkflow): string[] {
+  const errors: string[] = []
+  const preflight = candidate.jobs['release-preflight']
+  const targetStep = preflight?.steps.find(step => step.name === RELEASE_UPLOAD_TARGET_STEP_NAME)
+  const targetCommand = targetStep ? normalizedRun(targetStep) ?? '' : ''
+  for (const fragment of [
+    'repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}',
+    'GITHUB_SHA',
+    'node scripts/validate-release-assets.mjs --pre-upload',
+    '--source-repository "${GITHUB_REPOSITORY}"',
+    '--release-repository "HB-code-glitch/baby-diary-releases"',
+    '--sha "${GITHUB_SHA}"',
+    '--run-id "${GITHUB_RUN_ID}"',
+    '--run-attempt "${GITHUB_RUN_ATTEMPT}"',
+    'gh release create',
+    '--draft',
+    '--notes-file',
+  ]) {
+    if (!targetCommand.includes(fragment)) errors.push(`prepare draft is missing: ${fragment}`)
+  }
+  if ((targetCommand.match(/gh\s+release\s+create/g) ?? []).length !== 1) {
+    errors.push('prepare draft must have exactly one create transition')
+  }
+
+  for (const [jobName, platform, artifactName] of [
+    ['release-win', 'windows', 'release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}'],
+    ['release-mac', 'mac', 'release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}'],
+  ] as const) {
+    const job = candidate.jobs[jobName]
+    if (!job) {
+      errors.push(`missing ${jobName}`)
+      continue
+    }
+    const commands = job.steps.flatMap(step => normalizedRun(step) ?? [])
+    const commandText = commands.join('\n')
+    for (const fragment of [
+      '--publish never',
+      `node scripts/create-release-manifest.mjs --platform ${platform}`,
+      '--source-repository "${{ github.repository }}"',
+      '--sha "${{ github.sha }}"',
+      '--run-id "${{ github.run_id }}"',
+      '--run-attempt "${{ github.run_attempt }}"',
+      'gh release upload',
+      '--clobber',
+    ]) {
+      if (!commandText.includes(fragment)) errors.push(`${jobName} is missing: ${fragment}`)
+    }
+    if (/--publish\s+always/.test(commandText)) errors.push(`${jobName} must not let electron-builder upload`)
+    const manifestUploads = job.steps.filter(step => (
+      step.uses === 'actions/upload-artifact@v4'
+      && step.with?.name === artifactName
+      && step.with?.['if-no-files-found'] === 'error'
+    ))
+    if (manifestUploads.length !== 1) errors.push(`${jobName} must upload one run-scoped manifest artifact`)
+    const releaseUploads = job.steps.filter(step => /gh\s+release\s+upload/.test(normalizedRun(step) ?? ''))
+    if (releaseUploads.length !== 1) errors.push(`${jobName} must upload one exact platform staging set`)
+    if (releaseUploads[0]?.env?.GH_TOKEN !== '${{ secrets.RELEASE_TOKEN }}') {
+      errors.push(`${jobName} upload must authenticate with RELEASE_TOKEN`)
+    }
+  }
+
+  const publish = candidate.jobs['publish-release']
+  if (!publish) return [...errors, 'missing publish-release']
+  const publishCommands = publish.steps.flatMap(step => normalizedRun(step) ?? [])
+  const publishText = publishCommands.join('\n')
+  const downloads = publish.steps.filter(step => step.uses === 'actions/download-artifact@v4')
+  for (const artifactName of [
+    'release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}',
+    'release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}',
+  ]) {
+    if (!downloads.some(step => step.with?.name === artifactName)) {
+      errors.push(`publish-release must download ${artifactName}`)
+    }
+  }
+  for (const fragment of [
+    'gh release download',
+    'gh api --paginate --slurp',
+    'node scripts/validate-release-assets.mjs',
+    '--manifests-dir',
+    '--assets-dir',
+    '--source-repository "${GITHUB_REPOSITORY}"',
+    '--release-repository "HB-code-glitch/baby-diary-releases"',
+    '--sha "${GITHUB_SHA}"',
+    '--run-id "${GITHUB_RUN_ID}"',
+    '--run-attempt "${GITHUB_RUN_ATTEMPT}"',
+  ]) {
+    if (!publishText.includes(fragment)) errors.push(`final provenance gate is missing: ${fragment}`)
+  }
+  if (publish.if !== RELEASE_TAG_CONDITION || /always\s*\(/.test(publish.if ?? '')) {
+    errors.push('publish-release must not bypass failed dependencies')
+  }
+  for (const dependency of REQUIRED_PUBLISH_NEEDS) {
+    if (!normalizedNeeds(publish).includes(dependency)) {
+      errors.push(`publish-release must need ${dependency}`)
+    }
+  }
+  return errors
 }
 
 describe('release workflow CI gates', () => {
@@ -687,5 +786,38 @@ describe('release workflow CI gates', () => {
     const alwaysBypass = structuredClone(workflow)
     alwaysBypass.jobs['release-mac'].if = `${RELEASE_TAG_CONDITION} && always()`
     expect(releaseGateContractErrors(alwaysBypass)).not.toEqual([])
+  })
+
+  it('binds draft preparation, platform manifests, remote bytes, and final publication to one run', () => {
+    expect(releaseProvenanceContractErrors(workflow)).toEqual([])
+  })
+
+  it('rejects release provenance dependency and bypass mutations', () => {
+    const missingPreflight = structuredClone(workflow)
+    missingPreflight.jobs['release-win'].needs = ['e2e-win', 'e2e-mac']
+    expect(releaseGateContractErrors(missingPreflight)).not.toEqual([])
+
+    const missingManifest = structuredClone(workflow)
+    missingManifest.jobs['publish-release'].steps = missingManifest.jobs['publish-release'].steps
+      .filter(step => step.with?.name !== 'release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}')
+    expect(releaseProvenanceContractErrors(missingManifest)).toContain(
+      'publish-release must download release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}',
+    )
+
+    const staleSha = structuredClone(workflow)
+    const macManifest = staleSha.jobs['release-mac'].steps
+      .find(step => (normalizedRun(step) ?? '').includes('create-release-manifest.mjs'))
+    expect(macManifest).toBeDefined()
+    macManifest!.run = (normalizedRun(macManifest!) ?? '').replace(
+      '--sha "${{ github.sha }}"',
+      `--sha "${'f'.repeat(40)}"`,
+    )
+    expect(releaseProvenanceContractErrors(staleSha)).not.toEqual([])
+
+    const alwaysPublish = structuredClone(workflow)
+    alwaysPublish.jobs['publish-release'].if = `${RELEASE_TAG_CONDITION} && always()`
+    expect(releaseProvenanceContractErrors(alwaysPublish)).toContain(
+      'publish-release must not bypass failed dependencies',
+    )
   })
 })

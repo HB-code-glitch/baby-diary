@@ -26,7 +26,7 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm test
-      # electron-builder는 CI에서 자동 게시를 시도함(GH_TOKEN 필요) — 아티팩트 업로드만 쓰므로 게시 비활성화
+      # electron-builder auto-publishing is disabled; only workflow artifacts are produced here.
       - run: npm run build:mac -- --publish=never
       - uses: actions/upload-artifact@v4
         with:
@@ -52,7 +52,7 @@ jobs:
       - run: npm run build
       # Launch the unpacked universal app, not the development Electron entrypoint.
       - run: npx electron-builder --mac --dir --universal --publish never
-      # playwright electron support is built-in — no browser download required
+      # Playwright Electron support is built in, so no browser download is required.
       - run: npm run test:e2e
         env:
           BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary
@@ -110,6 +110,7 @@ jobs:
         with:
           node-version: '24.18.0'
           cache: 'npm'
+      - run: npm ci
       - name: Verify release tag matches package version
         run: >-
           node -e "const { version } = require('./package.json');
@@ -121,8 +122,50 @@ jobs:
       - name: Verify release upload target is absent or a private draft
         run: |
           set -euo pipefail
+          mkdir -p .release-provenance
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)"
+          if [ "${remote_sha}" != "${GITHUB_SHA}" ]; then
+            echo "Source tag ${GITHUB_REF_NAME} moved from ${GITHUB_SHA} to ${remote_sha}" >&2
+            exit 1
+          fi
           gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
-            | node scripts/validate-release-assets.mjs --pre-upload --tag "${GITHUB_REF_NAME}"
+            > .release-provenance/releases.json
+          node scripts/validate-release-assets.mjs --pre-upload \
+            --input .release-provenance/releases.json \
+            --plan .release-provenance/plan.json \
+            --notes .release-provenance/notes.txt \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --version "$(node -p "require('./package.json').version")" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          action="$(node -p "require('./.release-provenance/plan.json').action")"
+          if [ "${action}" = create ]; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo HB-code-glitch/baby-diary-releases \
+              --title "${GITHUB_REF_NAME}" \
+              --draft \
+              --notes-file .release-provenance/notes.txt
+          elif [ "${action}" != resume ]; then
+            echo "Unexpected release preparation action: ${action}" >&2
+            exit 1
+          fi
+          gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
+            > .release-provenance/prepared-releases.json
+          node scripts/validate-release-assets.mjs --pre-upload \
+            --input .release-provenance/prepared-releases.json \
+            --plan .release-provenance/prepared-plan.json \
+            --notes .release-provenance/prepared-notes.txt \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --version "$(node -p "require('./package.json').version")" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          test "$(node -p "require('./.release-provenance/prepared-plan.json').action")" = resume
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
@@ -138,11 +181,40 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm test
-      # NOTE: call electron-builder directly (not build:win) to skip the
-      # PowerShell shortcut script which is not needed for CI publishing.
-      - run: npm run build && npx electron-builder --win --publish always
+      # Call electron-builder directly so the local shortcut helper is not run in CI.
+      - run: npm run build && npx electron-builder --win --publish never
+      - id: package-version
+        name: Read package version
+        shell: bash
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + require('./package.json').version + '\n')"
+      - name: Stage Windows assets and create the current-run manifest
+        run: >-
+          node scripts/create-release-manifest.mjs --platform windows
+          --source-dir release --staging-dir release-upload
+          --manifest release-manifest/windows.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ github.ref_name }}" --sha "${{ github.sha }}"
+          --version "${{ steps.package-version.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+      - name: Upload the exact Windows staging set to the private draft
+        shell: pwsh
+        run: |
+          $remoteSha = gh api "repos/${{ github.repository }}/commits/${{ github.ref_name }}" --jq .sha
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($remoteSha -ne "${{ github.sha }}") { throw "Source tag moved before Windows upload" }
+          $files = @(Get-ChildItem -LiteralPath release-upload -File | ForEach-Object { $_.FullName })
+          if ($files.Count -ne 4) { throw "Expected exactly 4 Windows release assets" }
+          gh release upload "${{ github.ref_name }}" @files --repo HB-code-glitch/baby-diary-releases --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest/windows.json
+          if-no-files-found: error
+          retention-days: 1
 
   release-mac:
     needs: [release-preflight, e2e-win, e2e-mac]
@@ -156,16 +228,37 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm test
-      # 컴파일(dist + dist-electron) 없이 패키징하면 entry file 부재로 실패함
-      - run: npm run build && npx electron-builder --mac --publish always
+      # Packaging must follow compilation so the Electron entry files exist.
+      - run: npm run build && npx electron-builder --mac --publish never
+      - id: package-version
+        name: Read package version
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + require('./package.json').version + '\n')"
+      - name: Stage Mac assets and create the current-run manifest
+        run: >-
+          node scripts/create-release-manifest.mjs --platform mac
+          --source-dir release --staging-dir release-upload
+          --manifest release-manifest/mac.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ github.ref_name }}" --sha "${{ github.sha }}"
+          --version "${{ steps.package-version.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+      - name: Upload the exact Mac staging set to the private draft
+        run: |
+          set -euo pipefail
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)"
+          test "${remote_sha}" = "${GITHUB_SHA}"
+          assets=(release-upload/*)
+          test "${#assets[@]}" = 10
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --repo HB-code-glitch/baby-diary-releases --clobber
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-      # 엄마용 쉬운 이름 사본 — 고정 링크(/releases/latest/download/INSTALL-ME-BabyDiary-Mac.dmg)용
-      - run: |
-          cp release/*universal.dmg INSTALL-ME-BabyDiary-Mac.dmg
-          gh release upload "${GITHUB_REF_NAME}" INSTALL-ME-BabyDiary-Mac.dmg --repo HB-code-glitch/baby-diary-releases --clobber
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest/mac.json
+          if-no-files-found: error
+          retention-days: 1
 
   publish-release:
     needs: [build-mac, release-win, release-mac]
@@ -177,22 +270,40 @@ jobs:
         with:
           node-version: '24.18.0'
           cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifests
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifests
       - name: Verify the complete draft release
         run: |
           set -euo pipefail
-          verified=false
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
-              | node scripts/validate-release-assets.mjs --tag "${GITHUB_REF_NAME}" --version "$(node -p "require('./package.json').version")"; then
-              verified=true
-              break
-            fi
-            if [ "${attempt}" -lt 12 ]; then sleep 10; fi
-          done
-          if [ "${verified}" != true ]; then
-            echo "Draft release validation did not converge" >&2
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)"
+          if [ "${remote_sha}" != "${GITHUB_SHA}" ]; then
+            echo "Source tag moved before final publication" >&2
             exit 1
           fi
+          mkdir verified-assets
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo HB-code-glitch/baby-diary-releases \
+            --dir verified-assets
+          gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
+            > .release-api.json
+          node scripts/validate-release-assets.mjs \
+            --input .release-api.json \
+            --manifests-dir release-manifests \
+            --assets-dir verified-assets \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --version "$(node -p "require('./package.json').version")" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
       - name: Publish the verified draft once
