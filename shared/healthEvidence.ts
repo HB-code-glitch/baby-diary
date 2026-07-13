@@ -26,6 +26,8 @@ export const OFFICIAL_EVIDENCE_HOSTS = Object.freeze([
   'nip.kdca.go.kr',
   'www.cfa.go.jp',
   'www.mhlw.go.jp',
+  'nfa.go.kr',
+  'www.fdma.go.jp',
 ] as const)
 
 const sourceDefinitions = [
@@ -51,7 +53,7 @@ const sourceDefinitions = [
     reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
   },
   {
-    id: 'cdc-responsive-feeding',
+    id: 'cdc-breastfeeding-frequency',
     organization: { ko: '미국 질병통제예방센터(CDC)', ja: '米国疾病予防管理センター（CDC）' },
     title: { ko: '모유 수유량과 수유 빈도', ja: '母乳を与える量と頻度' },
     url: 'https://www.cdc.gov/infant-toddler-nutrition/breastfeeding/how-much-and-how-often.html',
@@ -125,6 +127,13 @@ const sourceDefinitions = [
     organization: { ko: '미국 질병통제예방센터(CDC)', ja: '米国疾病予防管理センター（CDC）' },
     title: { ko: '어린이 구강 건강', ja: '子どもの口腔保健' },
     url: 'https://www.cdc.gov/oral-health/prevention/oral-health-tips-for-children.html',
+    reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
+  },
+  {
+    id: 'cdc-picky-eaters',
+    organization: { ko: '미국 질병통제예방센터(CDC)', ja: '米国疾病予防管理センター（CDC）' },
+    title: { ko: '편식하는 아이 돕기', ja: '好き嫌いのある子どもへの対応' },
+    url: 'https://www.cdc.gov/infant-toddler-nutrition/foods-and-drinks/picky-eaters.html',
     reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
   },
   {
@@ -230,6 +239,27 @@ const sourceDefinitions = [
     organization: { ko: '일본 후생노동성', ja: '厚生労働省' },
     title: { ko: '예방접종 정보', ja: '予防接種情報' },
     url: 'https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/kenkou/kekkaku-kansenshou/yobou-sesshu/index.html',
+    reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
+  },
+  {
+    id: 'who-healthy-diet',
+    organization: { ko: '세계보건기구(WHO)', ja: '世界保健機関（WHO）' },
+    title: { ko: '건강한 식생활', ja: '健康的な食事' },
+    url: 'https://www.who.int/news-room/fact-sheets/detail/healthy-diet',
+    reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
+  },
+  {
+    id: 'kr-nfa-119',
+    organization: { ko: '대한민국 소방청', ja: '韓国消防庁' },
+    title: { ko: '119 신고 안내', ja: '韓国の119番通報案内' },
+    url: 'https://nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration',
+    reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
+  },
+  {
+    id: 'jp-fdma-119',
+    organization: { ko: '일본 총무성 소방청', ja: '総務省消防庁' },
+    title: { ko: '일본 119 신고 안내', ja: '119番緊急通報' },
+    url: 'https://www.fdma.go.jp/mission/enrichment/kyukyumusen_kinkyutuhou/119.html',
     reviewedOn: HEALTH_EVIDENCE_REVIEW_DATE,
   },
 ] as const satisfies readonly HealthEvidenceSourceDefinition[]

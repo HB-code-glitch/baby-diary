@@ -11,7 +11,7 @@ const requiredSourceIds = [
   'who-infant-feeding',
   'who-complementary-feeding',
   'who-under-five-activity',
-  'cdc-responsive-feeding',
+  'cdc-breastfeeding-frequency',
   'cdc-formula-feeding',
   'cdc-hunger-fullness-cues',
   'cdc-complementary-foods',
@@ -22,6 +22,7 @@ const requiredSourceIds = [
   'cdc-developmental-milestones',
   'cdc-developmental-screening',
   'cdc-child-oral-health',
+  'cdc-picky-eaters',
   'nichd-safe-sleep',
   'niaid-peanut-allergy',
   'aap-safe-sleep-2022',
@@ -37,6 +38,9 @@ const requiredSourceIds = [
   'cfa-one-month-checkup',
   'mhlw-feeding-weaning',
   'mhlw-vaccination',
+  'who-healthy-diet',
+  'kr-nfa-119',
+  'jp-fdma-119',
 ] as const
 
 const retiredCommercialHosts = [
@@ -88,6 +92,15 @@ describe('HEALTH_EVIDENCE_SOURCES', () => {
     const source = HEALTH_EVIDENCE_SOURCES.find(item => item.id === 'cdc-child-oral-health')
     expect(source?.url).toBe(
       'https://www.cdc.gov/oral-health/prevention/oral-health-tips-for-children.html'
+    )
+  })
+
+  it('uses exact official emergency-service URLs for Korean and Japanese 119', () => {
+    expect(getEvidenceSourceById('kr-nfa-119')?.url).toBe(
+      'https://nfa.go.kr/nfa/safetyinfo/emergencyservice/119emergencydeclaration'
+    )
+    expect(getEvidenceSourceById('jp-fdma-119')?.url).toBe(
+      'https://www.fdma.go.jp/mission/enrichment/kyukyumusen_kinkyutuhou/119.html'
     )
   })
 

@@ -24,6 +24,11 @@ describe('legacy guidance compatibility', () => {
       expect(marker.bodyKo).toBeTruthy()
       expect(marker.bodyJa).toBeTruthy()
       expect(marker.sourceLabel).toMatch(/NICE/)
+      expect(marker.sourceIds.length).toBeGreaterThan(0)
+      expect(Object.isFrozen(marker.sourceIds)).toBe(true)
+      for (const sourceId of marker.sourceIds) {
+        expect(HEALTH_EVIDENCE_SOURCES.some(source => source.id === sourceId)).toBe(true)
+      }
       expect(marker.evidenceLevel).toBe('guideline-consensus')
     }
   })
@@ -64,6 +69,19 @@ describe('legacy guidance compatibility', () => {
     expect(fever.quoteJa).toContain('38.0°C以上')
     expect(fever.quoteKo).not.toContain('직장')
     expect(fever.quoteJa).not.toContain('直腸')
+    expect(fever.bodyKo).not.toContain('앱은')
+    expect(fever.bodyJa).not.toContain('アプリは')
+  })
+
+  it('derives legacy source labels from typed registry source IDs', () => {
+    const marker = GUIDANCE_MARKERS.find(item => item.id === 'fever_red_flags')!
+    expect(marker.sourceIds).toEqual(['nice-fever-ng143', 'nice-newborn-red-flags-ng194'])
+    const organizations = marker.sourceIds.map(id =>
+      HEALTH_EVIDENCE_SOURCES.find(source => source.id === id)!.organization.ko
+    )
+    for (const organization of organizations) {
+      expect(marker.sourceLabel).toContain(organization)
+    }
   })
 })
 

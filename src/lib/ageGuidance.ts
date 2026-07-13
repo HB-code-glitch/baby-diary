@@ -13,7 +13,8 @@ export type AgeStageId =
   | 'eighteen-to-twenty-three-months'
   | 'two-years'
   | 'three-to-four-years'
-  | 'five-plus'
+  | 'five-years'
+  | 'older-child-fallback'
 
 export type AgeGuidanceCategory =
   | 'feeding'
@@ -28,7 +29,12 @@ export type AgeGuidanceCategory =
 
 export type AgeGuidanceUrgency = 'routine' | 'important' | 'urgent'
 export type AgeGuidanceCountry = 'KR' | 'JP'
-export type AgeGuidanceLinkPurpose = 'nutrition' | 'checkup' | 'vaccination'
+export type AgeGuidanceLinkPurpose =
+  | 'nutrition'
+  | 'checkup'
+  | 'vaccination'
+  | 'checkup-vaccination'
+  | 'emergency'
 type DateInput = string | Date
 
 export interface AgeStage {
@@ -51,7 +57,8 @@ const stageDefinitions: readonly AgeStage[] = [
   { id: 'eighteen-to-twenty-three-months', labelKo: '18~23개월', labelJa: '18〜23か月', minCompletedMonths: 18, maxCompletedMonths: 23 },
   { id: 'two-years', labelKo: '2세 · 24~35개월', labelJa: '2歳・24〜35か月', minCompletedMonths: 24, maxCompletedMonths: 35 },
   { id: 'three-to-four-years', labelKo: '3~4세 · 36~59개월', labelJa: '3〜4歳・36〜59か月', minCompletedMonths: 36, maxCompletedMonths: 59 },
-  { id: 'five-plus', labelKo: '5세 이상', labelJa: '5歳以上', minCompletedMonths: 60, maxCompletedMonths: Number.POSITIVE_INFINITY },
+  { id: 'five-years', labelKo: '5세 · 60~71개월', labelJa: '5歳・60〜71か月', minCompletedMonths: 60, maxCompletedMonths: 71 },
+  { id: 'older-child-fallback', labelKo: '6세 이상', labelJa: '6歳以上', minCompletedMonths: 72, maxCompletedMonths: Number.POSITIVE_INFINITY },
 ]
 
 export const AGE_STAGES: readonly AgeStage[] = Object.freeze(
@@ -195,8 +202,14 @@ const checkpointDefinitions: readonly DevelopmentCheckpoint[] = [
 export const DEVELOPMENT_CHECKPOINTS: readonly DevelopmentCheckpoint[] = Object.freeze(
   checkpointDefinitions.map(checkpoint => Object.freeze({
     ...checkpoint,
-    actionsKo: Object.freeze([...checkpoint.actionsKo]),
-    actionsJa: Object.freeze([...checkpoint.actionsJa]),
+    actionsKo: Object.freeze([
+      ...checkpoint.actionsKo,
+      '아직 못 하는 항목이 있거나 하던 기술을 잃었거나 보호자가 걱정되면 다음 검진을 기다리지 말고 의료진과 상의해요. 이 목록은 진단이 아니에요.',
+    ]),
+    actionsJa: Object.freeze([
+      ...checkpoint.actionsJa,
+      'まだできていない項目がある、できていたことを失った、または保護者が心配な場合は次の健診を待たず医療者に相談してください。この一覧は診断ではありません。',
+    ]),
     screening: Object.freeze([...checkpoint.screening]),
     sourceIds: Object.freeze([...checkpoint.sourceIds]),
   }))
@@ -207,7 +220,7 @@ export function getDevelopmentCheckpointForDate(
   asOf: DateInput = new Date()
 ): DevelopmentCheckpoint | null {
   const completedMonths = calculateCompletedCalendarMonths(birthdate, asOf)
-  if (completedMonths === null) return null
+  if (completedMonths === null || completedMonths >= 72) return null
   for (let index = DEVELOPMENT_CHECKPOINTS.length - 1; index >= 0; index -= 1) {
     if (completedMonths >= DEVELOPMENT_CHECKPOINTS[index].completedMonth) {
       return DEVELOPMENT_CHECKPOINTS[index]
@@ -238,24 +251,24 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     id: 'newborn-responsive-feeding', stageId: 'newborn', category: 'feeding', priority: 1, urgency: 'important',
     titleKo: '신호에 맞춰 자주 수유해요', titleJa: 'サインに合わせてこまめに授乳',
     summaryKo: '정해진 시계보다 배고픔·배부름 신호와 성장 상태를 우선해요.', summaryJa: '決まった時刻より空腹・満腹のサインと成長を優先します。',
-    actionsKo: ['입을 찾거나 손을 빠는 초기 배고픔 신호에 반응하고, 고개를 돌리거나 빨기를 멈추면 억지로 먹이지 않아요.', '계속 깨우기 어렵거나 빠는 힘이 약하고, 먹는 양·소변·체중이 걱정되면 당일 의료진과 상의해요.'],
-    actionsJa: ['口を探す、手を吸うなど早めの空腹サインに応じ、顔をそむける、吸うのをやめる時は無理に飲ませません。', '起こしにくい、吸う力が弱い、飲み方・尿・体重が心配な時は当日中に医療者へ相談してください。'],
+    actionsKo: ['입을 찾거나 손을 빠는 초기 배고픔 신호에 반응하고, 고개를 돌리거나 빨기를 멈추면 억지로 먹이지 않아요.', '계속 깨우기 어렵거나 빠는 힘이 약하면 즉시 의료진과 상의해요. 먹는 양·소변·체중이 걱정될 때도 의료진에게 확인해요.'],
+    actionsJa: ['口を探す、手を吸うなど早めの空腹サインに応じ、顔をそむける、吸うのをやめる時は無理に飲ませません。', '起こしにくい、吸う力が弱い時は直ちに医療者へ相談してください。飲み方・尿・体重が心配な時も医療者へ確認してください。'],
     sourceIds: ['who-infant-feeding', 'cdc-hunger-fullness-cues', 'nice-newborn-red-flags-ng194'],
   },
   {
     id: 'infant-safe-sleep', stageId: 'newborn', category: 'safe-sleep', priority: 2, urgency: 'important',
     titleKo: '등으로, 단단하고 비어 있는 침대에서', titleJa: 'あおむけで、硬く何もない寝床に',
     summaryKo: '모든 잠은 등을 대고, 단단하고 평평한 별도 수면 공간에서 재워요.', summaryJa: 'すべての睡眠はあおむけ、硬く平らな別の寝床にします。',
-    actionsKo: ['꼭 맞는 시트 외에는 베개·이불·범퍼·인형을 두지 않고, 같은 방의 별도 침대를 사용해요.', '항상 등을 대고 눕혀요. 양방향으로 스스로 뒤집기 전에는 자세를 바로잡고, 양방향으로 스스로 뒤집으면 아기가 취한 자세는 그대로 둘 수 있어요.', '뒤집으려는 시도가 보이는 즉시 속싸개를 중단해요.'],
-    actionsJa: ['ぴったりしたシーツ以外の枕・掛け布団・バンパー・ぬいぐるみを置かず、同室の別の寝床を使います。', '寝かせる時は常にあおむけにします。両方向に自分で寝返りできるまでは姿勢を戻し、両方向にできるようになれば自分でとった姿勢はそのままでかまいません。', '寝返りを試みたらすぐにおくるみをやめてください。'],
+    actionsKo: ['단단하고 평평한 매트리스에 꼭 맞는 시트만 사용하고 베개·이불·범퍼·인형은 두지 않으며, 같은 방의 별도 침대를 사용해요.', '항상 등을 대고 눕혀요. 양방향으로 스스로 뒤집기 전에는 자세를 바로잡고, 양방향으로 스스로 뒤집으면 아기가 취한 자세는 그대로 둘 수 있어요.', '뒤집으려는 시도가 보이는 즉시 속싸개를 중단해요.'],
+    actionsJa: ['硬く平らなマットレスにぴったりしたシーツだけを使い、枕・掛け布団・バンパー・ぬいぐるみを置かず、同室の別の寝床を使います。', '寝かせる時は常にあおむけにします。両方向に自分で寝返りできるまでは姿勢を戻し、両方向にできるようになれば自分でとった姿勢はそのままでかまいません。', '寝返りを試みたらすぐにおくるみをやめてください。'],
     sourceIds: ['aap-safe-sleep-2022', 'nichd-safe-sleep', 'cfa-safe-sleep'],
   },
   {
     id: 'newborn-urgent-signs', stageId: 'newborn', category: 'urgent-care', priority: 3, urgency: 'urgent',
     titleKo: '신생아 위험 신호는 바로 진료', titleJa: '新生児の危険サインはすぐ受診',
     summaryKo: '38°C 이상 발열, 심한 처짐·호흡곤란·경련은 기다리지 않아요.', summaryJa: '38°C以上の発熱、強いぐったり、呼吸困難、けいれんは待ちません。',
-    actionsKo: ['생후 3개월 미만에서 38°C 이상이거나, 신생아 체온이 35.5°C 미만이거나, 먹지 못하고 깨우기 어렵거나, 끙끙거리며 숨쉬거나 가슴이 심하게 들어가면 즉시 의료기관에 연락해요.', '창백·청색 피부, 눌러도 사라지지 않는 발진, 경련, 초록색 담즙성 구토가 보이면 119 등 응급 도움을 요청해요.'],
-    actionsJa: ['生後3か月未満で38°C以上、新生児の体温が35.5°C未満、飲めない、起こしにくい、うなり呼吸、胸が強くへこむ時は直ちに医療機関へ連絡してください。', '青白い・青い皮膚、押しても消えない発疹、けいれん、緑色の胆汁性嘔吐があれば119など救急へ連絡してください。'],
+    actionsKo: ['생후 3개월 미만에서 38°C 이상이거나, 신생아 체온이 36°C 미만이거나, 먹지 못하고 깨우기 어렵거나, 끙끙거리며 숨쉬거나 가슴이 심하게 들어가면 즉시 의료기관에 연락해요.', '창백·청색 피부, 눌러도 사라지지 않는 발진, 경련, 초록색 담즙성 구토가 보이면 즉시 지역 응급 도움을 요청해요.'],
+    actionsJa: ['生後3か月未満で38°C以上、新生児の体温が36°C未満、飲めない、起こしにくい、うなり呼吸、胸が強くへこむ時は直ちに医療機関へ連絡してください。', '青白い・青い皮膚、押しても消えない発疹、けいれん、緑色の胆汁性嘔吐があれば直ちに地域の救急へ連絡してください。'],
     sourceIds: ['nice-fever-ng143', 'nice-newborn-red-flags-ng194'],
   },
   {
@@ -280,22 +293,22 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     summaryKo: '정해진 간격이나 양을 강요하지 않고 배고픔·배부름 신호에 반응해요.', summaryJa: '決まった間隔や量を強いず、空腹・満腹のサインに応じます。',
     actionsKo: ['모유와 분유 모두 아기의 신호에 따라 먹이고, 잘 먹지 못하거나 성장·수분 상태가 걱정되면 의료진과 상의해요.'],
     actionsJa: ['母乳もミルクも子どものサインに合わせ、飲めない、成長や水分状態が心配な時は医療者に相談してください。'],
-    sourceIds: ['who-infant-feeding', 'cdc-responsive-feeding', 'cdc-formula-feeding', 'cdc-hunger-fullness-cues'],
+    sourceIds: ['who-infant-feeding', 'cdc-breastfeeding-frequency', 'cdc-formula-feeding', 'cdc-hunger-fullness-cues'],
   },
   {
     id: 'young-infant-safe-sleep', stageId: 'young-infant', category: 'safe-sleep', priority: 2, urgency: 'important',
     titleKo: '안전 수면 원칙을 계속 지켜요', titleJa: '安全な睡眠を続ける',
     summaryKo: '등으로 눕히고, 단단하고 평평한 별도 침대를 비워 둬요.', summaryJa: 'あおむけ、硬く平らな別の寝床を何も置かず使います。',
     actionsKo: ['같은 방의 별도 침대를 사용하고 침대 공유는 피하며, 뒤집기 시도 즉시 속싸개를 중단해요.', '양방향으로 스스로 뒤집기 전에는 자세를 바로잡고, 가능해진 뒤에는 스스로 취한 자세를 둘 수 있어요.'],
-    actionsJa: ['同室の別の寝床を使い、添い寝を避け、寝返りを試みたらおくるみをやめます。', '両方向に自分で寝返りできるまでは姿勢を戻し、できるようになれば自分でとった姿勢はそのままでかまいません。'],
+    actionsJa: ['同室の別の寝床を使い、同じ寝床（ベッドシェア）を避け、寝返りを試みたらおくるみをやめます。', '両方向に自分で寝返りできるまでは姿勢を戻し、できるようになれば自分でとった姿勢はそのままでかまいません。'],
     sourceIds: ['aap-safe-sleep-2022', 'nichd-safe-sleep', 'cfa-safe-sleep'],
   },
   {
     id: 'young-infant-fever', stageId: 'young-infant', category: 'urgent-care', priority: 3, urgency: 'urgent',
     titleKo: '3개월 미만 38°C 이상은 즉시 연락', titleJa: '3か月未満で38°C以上は直ちに連絡',
-    summaryKo: '겉보기에 괜찮아도 지금 의료기관에 연락해 평가받아요.', summaryJa: '元気そうに見えても、今すぐ医療機関へ連絡し評価を受けます。',
-    actionsKo: ['생후 3개월 미만에서 기록 체온이 38°C 이상이면 측정 부위를 단정하지 말고 즉시 의료기관에 연락해요.', '호흡곤란·청색 피부·심한 처짐·경련이 있으면 119 등 응급 도움을 요청해요.'],
-    actionsJa: ['生後3か月未満で記録した体温が38°C以上なら測定部位を決めつけず、直ちに医療機関へ連絡してください。', '呼吸困難・青い皮膚・強いぐったり・けいれんがあれば119など救急へ連絡してください。'],
+    summaryKo: '겉보기에 괜찮아도 지금 의료기관에 연락해 진료받아요.', summaryJa: '元気そうに見えても、今すぐ医療機関へ連絡し診察を受けます。',
+    actionsKo: ['생후 3개월 미만에서 기록 체온이 38°C 이상이면 측정 부위를 단정하지 말고 즉시 의료기관에 연락해요.', '호흡곤란·청색 피부·심한 처짐·경련이 있으면 즉시 지역 응급 도움을 요청해요.'],
+    actionsJa: ['生後3か月未満で記録した体温が38°C以上なら測定部位を決めつけず、直ちに医療機関へ連絡してください。', '呼吸困難・青い皮膚・強いぐったり・けいれんがあれば直ちに地域の救急へ連絡してください。'],
     sourceIds: ['nice-fever-ng143'],
   },
   {
@@ -309,7 +322,7 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   {
     id: 'young-infant-development', stageId: 'young-infant', category: 'development', priority: 5, urgency: 'routine',
     titleKo: '2개월 체크포인트를 편안히 관찰해요', titleJa: '2か月の目安を無理なく観察',
-    summaryKo: '발달 이정표는 합격표가 아니며 앱이 지연을 진단하지 않아요.', summaryJa: '発達の目安は合否表ではなく、アプリは遅れを診断しません。',
+    summaryKo: '발달 이정표는 합격표나 지연을 진단하는 도구가 아니에요.', summaryJa: '発達の目安は合否表や遅れを診断する道具ではありません。',
     actionsKo: ['현재 개월의 체크포인트를 놀이 중 관찰하고, 기술을 잃었거나 걱정되면 바로 의료진과 상의해요.'],
     actionsJa: ['今の月齢の目安を遊びの中で見守り、できていたことを失った、または心配なら早めに医療者へ相談してください。'],
     sourceIds: ['cdc-developmental-milestones', 'cdc-developmental-screening'],
@@ -317,7 +330,7 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   {
     id: 'three-five-safe-sleep', stageId: 'three-to-five-months', category: 'safe-sleep', priority: 1, urgency: 'important',
     titleKo: '돌 전까지 모든 잠은 등으로 시작해요', titleJa: '1歳までは毎回あおむけで寝かせる',
-    summaryKo: '단단하고 평평한 별도 수면 공간을 비워 두고 침대 공유를 피해요.', summaryJa: '硬く平らな別の寝床を空にし、添い寝を避けます。',
+    summaryKo: '단단하고 평평한 별도 수면 공간을 비워 두고 침대 공유를 피해요.', summaryJa: '硬く平らな別の寝床を空にし、同じ寝床（ベッドシェア）を避けます。',
     actionsKo: ['뒤집으려는 시도 즉시 속싸개를 중단하고, 양방향으로 스스로 뒤집을 수 있을 때만 아기가 취한 자세를 그대로 둬요.'],
     actionsJa: ['寝返りを試みたらおくるみをやめ、両方向に自分で寝返りできる時だけ自分でとった姿勢をそのままにします。'],
     sourceIds: ['aap-safe-sleep-2022', 'nichd-safe-sleep', 'cfa-safe-sleep'],
@@ -345,6 +358,14 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     actionsKo: ['이정표는 진단표가 아니며, 기술을 잃었거나 보호자가 걱정하면 다음 검진을 기다리지 않아요.'],
     actionsJa: ['発達の目安は診断表ではありません。できていたことを失った、または心配なら次の健診を待ちません。'],
     sourceIds: ['cdc-developmental-milestones'],
+  },
+  {
+    id: 'three-five-fever', stageId: 'three-to-five-months', category: 'urgent-care', priority: 5, urgency: 'urgent',
+    titleKo: '3~5개월 발열은 일찍 의료진과 상의해요', titleJa: '3〜5か月の発熱は早めに医療者へ相談',
+    summaryKo: '생후 3~6개월은 낮은 발열도 전신 상태와 함께 신중히 확인해요.', summaryJa: '生後3〜6か月は低めの発熱でも全身状態とともに慎重に確認します。',
+    actionsKo: ['기록 체온이 38.3°C 이상이면 의료진에게 연락해 상담하고, 39.0°C 이상이면 더 신속히 진료받아요.', '호흡곤란·청색 피부·깨워도 반응이 없거나 경련이 있으면 체온과 관계없이 즉시 지역 응급 도움을 요청해요.'],
+    actionsJa: ['記録した体温が38.3°C以上なら医療者へ連絡して相談し、39.0°C以上ならより速やかに診察を受けてください。', '呼吸困難・青い皮膚・起こしても反応がない・けいれんがある時は体温にかかわらず直ちに地域の救急へ連絡してください。'],
+    sourceIds: ['nice-fever-ng143'],
   },
   {
     id: 'six-eight-responsive-meals', stageId: 'six-to-eight-months', category: 'feeding', priority: 1, urgency: 'important',
@@ -390,8 +411,8 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     id: 'nine-eleven-meals-texture', stageId: 'nine-to-eleven-months', category: 'feeding', priority: 1, urgency: 'important',
     titleKo: '3~4회 식사와 다양한 질감', titleJa: '3〜4回の食事と多様な食感',
     summaryKo: '필요하면 1~2회 간식을 더하고, 손으로 집어 먹는 경험을 안전하게 넓혀요.', summaryJa: '必要に応じ1〜2回の間食を加え、手づかみ食べを安全に広げます。',
-    actionsKo: ['모유나 영아용 분유를 계속하면서 철분이 풍부한 식품과 가족 음식의 다양한 맛·질감을 연령에 맞게 제공해요.', '식사 횟수는 강제 할당량이 아니며 배고픔·배부름 신호를 따라요.'],
-    actionsJa: ['母乳または乳児用ミルクを続け、鉄を含む食品と家族の食事の味・食感を月齢に合わせて広げます。', '回数は強制する割当量ではなく、空腹・満腹のサインに従います。'],
+    actionsKo: ['모유나 영아용 분유를 계속하면서 철분이 풍부한 식품과 가족 음식의 다양한 맛·질감을 연령에 맞게 제공해요.', '식사 횟수는 아이마다 다를 수 있으므로 배고픔·배부름 신호를 따라요.'],
+    actionsJa: ['母乳または乳児用ミルクを続け、鉄を含む食品と家族の食事の味・食感を月齢に合わせて広げます。', '食事回数には個人差があるため、空腹・満腹のサインに合わせます。'],
     sourceIds: ['who-infant-feeding', 'who-complementary-feeding', 'cdc-iron'],
   },
   {
@@ -496,14 +517,14 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     summaryKo: '신호에 맞춰 다양한 음식을 주고 단 음료를 줄이며 치과 관리를 이어가요.', summaryJa: 'サインに合わせ多様な食品を出し、甘い飲み物を減らし歯科ケアを続けます。',
     actionsKo: ['먹는 양을 강요하지 않고 물을 기본 음료로 제공해요.'],
     actionsJa: ['食べる量を強要せず、水を基本の飲み物にします。'],
-    sourceIds: ['who-complementary-feeding', 'cdc-hunger-fullness-cues', 'cdc-child-oral-health'],
+    sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
   },
   {
     id: 'three-four-development', stageId: 'three-to-four-years', category: 'development', priority: 1, urgency: 'routine',
     titleKo: '3·4세 발달 체크포인트', titleJa: '3・4歳の発達の目安',
     summaryKo: '언어·놀이·움직임을 일상에서 관찰하고 기술 손실이나 걱정은 일찍 상의해요.', summaryJa: '言語・遊び・動きを日常で見守り、できていたことの喪失や心配は早めに相談します。',
-    actionsKo: ['앱은 발달을 판정하지 않으며 현재 체크포인트는 의료진과 대화를 돕는 자료예요.'],
-    actionsJa: ['アプリは発達を判定せず、現在の目安は医療者との対話を助ける資料です。'],
+    actionsKo: ['현재 체크포인트는 발달을 판정하는 진단표가 아니라 의료진과 대화를 돕는 관찰 자료예요.'],
+    actionsJa: ['現在の目安は発達を判定する診断表ではなく、医療者との対話を助ける観察資料です。'],
     sourceIds: ['cdc-developmental-milestones'],
   },
   {
@@ -511,7 +532,7 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     titleKo: '180분 활동 중 60분은 활기차게', titleJa: '180分の活動のうち60分は活発に',
     summaryKo: '화면은 1시간 이하로 줄이고 10~13시간 수면을 참고해요.', summaryJa: '画面は1時間以下に抑え、睡眠10〜13時間を参考にします。',
     actionsKo: ['활동·수면 시간은 목표 점수가 아니며 하루 전체에 나누어 즐겁게 실천해요.'],
-    actionsJa: ['活動・睡眠時間は達成点ではありません。一日を通して楽しく分けて行います。'],
+    actionsJa: ['活動・睡眠時間は合否を決める数値ではありません。一日を通して楽しく分けて行います。'],
     sourceIds: ['who-under-five-activity'],
   },
   {
@@ -523,12 +544,60 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
     sourceIds: ['cfa-accident-prevention'],
   },
   {
-    id: 'five-plus-general-care', stageId: 'five-plus', category: 'general', priority: 1, urgency: 'routine',
-    titleKo: '영아·유아 안내가 종료됐어요', titleJa: '乳幼児向け案内は終了しました',
-    summaryKo: '영아 수유·수면 지침을 더 이상 연장하지 않고 현재 연령의 검진·소아 지침을 확인해요.', summaryJa: '乳児の授乳・睡眠情報を延長せず、現在の年齢の健診・小児向け案内を確認します。',
-    actionsKo: ['성장·발달·건강 걱정은 현재 연령에 맞는 의료진과 상의하고, 기술을 잃었다면 일찍 도움을 요청해요.'],
-    actionsJa: ['成長・発達・健康の心配は現在の年齢に合う医療者へ相談し、できていたことを失った時は早めに助けを求めてください。'],
-    sourceIds: ['cdc-developmental-milestones', 'kdca-infant-checkups', 'cfa-infant-checkups'],
+    id: 'three-four-nutrition-oral', stageId: 'three-to-four-years', category: 'oral-health', priority: 4, urgency: 'routine',
+    titleKo: '다양한 식사와 구강 관리를 이어가요', titleJa: '多様な食事と口腔ケアを続ける',
+    summaryKo: '가족과 균형 있게 먹고 편식을 강압 없이 다루며 매일 이를 닦아요.', summaryJa: '家族とバランスよく食べ、好き嫌いに無理なく対応し、毎日歯をみがきます。',
+    actionsKo: ['여러 식품군을 반복해 편안히 제공하고 물을 기본 음료로 삼으며, 먹는 양을 강요하지 않아요.', '보호자가 양치를 돕고 정기 치과 검진을 이어가요.'],
+    actionsJa: ['さまざまな食品群を繰り返し気楽に出し、水を基本の飲み物にし、食べる量を強要しません。', '保護者が歯みがきを助け、定期的な歯科受診を続けます。'],
+    sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
+  },
+  {
+    id: 'five-years-development', stageId: 'five-years', category: 'development', priority: 1, urgency: 'routine',
+    titleKo: '5세 발달 체크포인트를 관찰해요', titleJa: '5歳の発達の目安を見守る',
+    summaryKo: '놀이·언어·움직임을 일상에서 보고 기술 손실이나 걱정은 일찍 상의해요.', summaryJa: '遊び・言語・動きを日常で見守り、できていたことの喪失や心配は早めに相談します。',
+    actionsKo: ['60개월 체크포인트는 진단표가 아니에요. 아직 못 하는 항목이 있거나 하던 기술을 잃었거나 걱정되면 의료진과 상의해요.'],
+    actionsJa: ['60か月の目安は診断表ではありません。まだできていない項目がある、できていたことを失った、または心配な場合は医療者に相談してください。'],
+    sourceIds: ['cdc-developmental-milestones'],
+  },
+  {
+    id: 'five-years-safety', stageId: 'five-years', category: 'general', priority: 2, urgency: 'important',
+    titleKo: '활동 반경에 맞춰 사고를 예방해요', titleJa: '行動範囲に合わせて事故を予防',
+    summaryKo: '도로·물·창문·가구·화상 위험을 새 활동과 생활 환경에 맞춰 점검해요.', summaryJa: '道路・水・窓・家具・やけどの危険を新しい活動と生活環境に合わせて点検します。',
+    actionsKo: ['도로와 물가에서는 가까이 감독하고, 자전거·놀이기구의 보호 장비와 집 안 추락·화상 위험을 확인해요.'],
+    actionsJa: ['道路や水辺では近くで見守り、自転車・遊具の保護具と家庭内の転落・やけどの危険を確認します。'],
+    sourceIds: ['cfa-accident-prevention'],
+  },
+  {
+    id: 'five-years-nutrition-oral', stageId: 'five-years', category: 'oral-health', priority: 3, urgency: 'routine',
+    titleKo: '균형 있는 식사와 매일 양치', titleJa: 'バランスのよい食事と毎日の歯みがき',
+    summaryKo: '다양한 가족 식사를 제공하고 편식을 강압 없이 다루며 치과 관리를 이어가요.', summaryJa: '多様な家族の食事を出し、好き嫌いに無理なく対応し、歯科ケアを続けます。',
+    actionsKo: ['여러 식품군과 물을 기본으로 제공하고 먹는 양을 강요하지 않아요.', '보호자가 양치 상태를 확인하고 정기 치과 검진을 이어가요.'],
+    actionsJa: ['さまざまな食品群と水を基本にし、食べる量を強要しません。', '保護者が歯みがきの状態を確認し、定期的な歯科受診を続けます。'],
+    sourceIds: ['who-healthy-diet', 'cdc-picky-eaters', 'cdc-child-oral-health'],
+  },
+  {
+    id: 'older-child-general-care', stageId: 'older-child-fallback', category: 'general', priority: 1, urgency: 'routine',
+    titleKo: '현재 연령의 건강 계획을 확인해요', titleJa: '現在の年齢に合う健康計画を確認',
+    summaryKo: '영아 지침을 연장하지 않고 현재 연령·건강 상태에 맞는 검진과 의료진 안내를 우선해요.', summaryJa: '乳児向け情報を延長せず、現在の年齢・健康状態に合う健診と医療者の案内を優先します。',
+    actionsKo: ['성장·발달·건강 걱정이나 하던 기술의 손실이 있으면 현재 연령을 진료하는 의료진과 상의해요.'],
+    actionsJa: ['成長・発達・健康の心配や、できていたことの喪失があれば、現在の年齢を診る医療者へ相談してください。'],
+    sourceIds: ['kdca-infant-checkups', 'cfa-infant-checkups'],
+  },
+  {
+    id: 'older-child-emergency', stageId: 'older-child-fallback', category: 'urgent-care', priority: 2, urgency: 'urgent',
+    titleKo: '생명을 위협하는 위험 신호는 즉시 도움을 요청해요', titleJa: '命に関わる危険サインは直ちに救急へ',
+    summaryKo: '호흡곤란·청색 피부·반응 없음·경련·눌러도 사라지지 않는 발진은 기다리지 않아요.', summaryJa: '呼吸困難、青い皮膚、反応がない、けいれん、押しても消えない発疹は待ちません。',
+    actionsKo: ['한국에서는 119, 일본에서는 119로 즉시 신고하고 지역 응급 안내를 따라요.'],
+    actionsJa: ['韓国では119、日本では119へ直ちに通報し、地域の救急案内に従ってください。'],
+    sourceIds: ['kr-nfa-119', 'jp-fdma-119'],
+  },
+  {
+    id: 'older-child-local-guidance', stageId: 'older-child-fallback', category: 'checkup-vaccination', priority: 3, urgency: 'routine',
+    titleKo: '지역의 공식 검진·예방접종을 확인해요', titleJa: '地域の公式健診・予防接種を確認',
+    summaryKo: '일정과 대상은 국가·지역·이력에 따라 달라질 수 있어 공식 안내를 확인해요.', summaryJa: '日程と対象は国・地域・接種歴で異なるため、公式案内を確認します。',
+    actionsKo: ['한국은 질병관리청, 일본은 어린이가정청·후생노동성의 최신 안내와 의료진의 계획을 확인해요.'],
+    actionsJa: ['韓国は疾病管理庁、日本はこども家庭庁・厚生労働省の最新案内と医療者の計画を確認してください。'],
+    sourceIds: ['kdca-infant-checkups', 'kdca-vaccination', 'cfa-infant-checkups', 'mhlw-vaccination'],
   },
   {
     id: 'six-eight-safe-sleep', stageId: 'six-to-eight-months', category: 'safe-sleep', priority: 6, urgency: 'important',
@@ -580,7 +649,7 @@ const itemDefinitions: readonly AgeGuidanceItem[] = [
   },
 ]
 
-const underFiveStageIds: readonly AgeStageId[] = [
+const commonUrgentStageIds: readonly AgeStageId[] = [
   'young-infant',
   'three-to-five-months',
   'six-to-eight-months',
@@ -589,9 +658,10 @@ const underFiveStageIds: readonly AgeStageId[] = [
   'eighteen-to-twenty-three-months',
   'two-years',
   'three-to-four-years',
+  'five-years',
 ]
 
-const sharedUrgentDefinitions: readonly AgeGuidanceItem[] = underFiveStageIds.map(stageId => ({
+const sharedUrgentDefinitions: readonly AgeGuidanceItem[] = commonUrgentStageIds.map(stageId => ({
   id: `${stageId}-urgent-care`,
   stageId,
   category: 'urgent-care',
@@ -601,21 +671,32 @@ const sharedUrgentDefinitions: readonly AgeGuidanceItem[] = underFiveStageIds.ma
   titleJa: '救急の危険サイン',
   summaryKo: '호흡곤란·청색 피부·심한 처짐·경련·눌러도 안 사라지는 발진은 바로 도움을 요청해요.',
   summaryJa: '呼吸困難、青い皮膚、強いぐったり、けいれん、押しても消えない発疹はすぐ助けを求めます。',
-  actionsKo: ['심한 탈수, 목 경직·대천문 팽창, 초록색 담즙성 또는 분출성 구토도 119 등 응급 도움을 요청해요.'],
-  actionsJa: ['重い脱水、首のこわばり・大泉門の膨らみ、緑色の胆汁性または噴水状の嘔吐も119など救急へ連絡してください。'],
+  actionsKo: ['깨워도 반응이 없거나 초록색 담즙성 구토가 있으면 즉시 지역 응급 도움을 요청해요.'],
+  actionsJa: ['起こしても反応がない、または緑色の胆汁性嘔吐がある時は直ちに地域の救急へ連絡してください。'],
   sourceIds: ['nice-fever-ng143', 'nice-newborn-red-flags-ng194'],
 }))
 
+const infantSpecificUrgentDefinitions: readonly AgeGuidanceItem[] = [
+  {
+    id: 'young-infant-specific-urgent-care', stageId: 'young-infant', category: 'urgent-care', priority: 9, urgency: 'urgent',
+    titleKo: '어린 영아에게 특히 중요한 위험 신호', titleJa: '低月齢児で特に重要な危険サイン',
+    summaryKo: '어린 영아의 대천문 팽창이나 반복되는 분출성 구토는 바로 확인해요.', summaryJa: '低月齢児の大泉門の膨らみや繰り返す噴水状の嘔吐はすぐ確認します。',
+    actionsKo: ['대천문이 불룩하거나 목이 뻣뻣하고, 반복되는 분출성 구토가 있으면 즉시 의료기관에 연락해요.'],
+    actionsJa: ['大泉門が膨らむ、首が硬い、繰り返す噴水状の嘔吐がある時は直ちに医療機関へ連絡してください。'],
+    sourceIds: ['nice-newborn-red-flags-ng194'],
+  },
+]
+
 const localCareDefinitions: readonly AgeGuidanceItem[] = AGE_STAGES.flatMap(stage => {
-  const priority = stage.id === 'five-plus' ? 2 : 7
+  const priority = 7
   return [
     {
       id: `${stage.id}-local-care-kr`, stageId: stage.id, category: 'checkup-vaccination' as const, priority, urgency: 'routine' as const,
       titleKo: '한국 공식 검진·예방접종', titleJa: '韓国の公式健診・予防接種',
       summaryKo: '질병관리청의 최신 일정과 대상 조건을 확인해요.', summaryJa: '韓国疾病管理庁の最新日程と対象条件を確認します。',
-      actionsKo: ['일정은 변경되거나 지연 접종에 따라 달라질 수 있으므로 앱에 복사된 표 대신 공식 페이지와 의료진을 확인해요.'],
-      actionsJa: ['日程は変更や接種の遅れで異なるため、アプリ内の固定表ではなく公式ページと医療者へ確認してください。'],
-      sourceIds: ['kdca-infant-checkups', 'kdca-vaccination'] as readonly HealthEvidenceSourceId[], country: 'KR' as const, linkPurpose: 'checkup' as const,
+      actionsKo: ['일정은 변경되거나 지연 접종에 따라 달라질 수 있으므로 공식 페이지와 의료진을 확인해요.'],
+      actionsJa: ['日程は変更や接種の遅れで異なるため、公式ページと医療者へ確認してください。'],
+      sourceIds: ['kdca-infant-checkups', 'kdca-vaccination'] as readonly HealthEvidenceSourceId[], country: 'KR' as const, linkPurpose: 'checkup-vaccination' as const,
     },
     {
       id: `${stage.id}-local-care-jp`, stageId: stage.id, category: 'checkup-vaccination' as const, priority, urgency: 'routine' as const,
@@ -623,13 +704,38 @@ const localCareDefinitions: readonly AgeGuidanceItem[] = AGE_STAGES.flatMap(stag
       summaryKo: '어린이가정청·후생노동성의 최신 지역 일정을 확인해요.', summaryJa: 'こども家庭庁・厚生労働省の最新の地域日程を確認します。',
       actionsKo: ['지자체별 검진과 접종 조건이 다를 수 있으므로 거주 지역 안내와 의료진을 확인해요.'],
       actionsJa: ['自治体ごとに健診・接種条件が異なるため、居住地域の案内と医療者へ確認してください。'],
-      sourceIds: ['cfa-infant-checkups', 'mhlw-vaccination'] as readonly HealthEvidenceSourceId[], country: 'JP' as const, linkPurpose: 'checkup' as const,
+      sourceIds: ['cfa-infant-checkups', 'mhlw-vaccination'] as readonly HealthEvidenceSourceId[], country: 'JP' as const, linkPurpose: 'checkup-vaccination' as const,
     },
   ]
 })
 
+const countryEmergencyDefinitions: readonly AgeGuidanceItem[] = AGE_STAGES.flatMap(stage => [
+  {
+    id: `${stage.id}-emergency-kr`, stageId: stage.id, category: 'urgent-care' as const, priority: 10, urgency: 'urgent' as const,
+    titleKo: '한국 응급 신고 119', titleJa: '韓国の救急通報は119',
+    summaryKo: '생명을 위협하는 위험 신호가 있으면 대한민국 소방청 119에 즉시 신고해요.', summaryJa: '命に関わる危険サインがあれば韓国消防庁の119へ直ちに通報します。',
+    actionsKo: ['119에 전화해 위치와 증상을 알리고 상담원의 안내를 따라요.'],
+    actionsJa: ['119へ電話し、場所と症状を伝えて指令員の案内に従ってください。'],
+    sourceIds: ['kr-nfa-119'] as readonly HealthEvidenceSourceId[], country: 'KR' as const, linkPurpose: 'emergency' as const,
+  },
+  {
+    id: `${stage.id}-emergency-jp`, stageId: stage.id, category: 'urgent-care' as const, priority: 10, urgency: 'urgent' as const,
+    titleKo: '일본 응급 신고 119', titleJa: '日本の救急通報は119',
+    summaryKo: '생명을 위협하는 위험 신호가 있으면 일본 총무성 소방청 안내에 따라 119에 즉시 신고해요.', summaryJa: '命に関わる危険サインがあれば総務省消防庁の案内に従い119へ直ちに通報します。',
+    actionsKo: ['119에 전화해 구급 요청, 위치와 증상을 알리고 상담원의 안내를 따라요.'],
+    actionsJa: ['119へ電話し、救急であること、場所と症状を伝えて指令員の案内に従ってください。'],
+    sourceIds: ['jp-fdma-119'] as readonly HealthEvidenceSourceId[], country: 'JP' as const, linkPurpose: 'emergency' as const,
+  },
+])
+
 export const AGE_GUIDANCE_ITEMS: readonly AgeGuidanceItem[] = Object.freeze(
-  [...itemDefinitions, ...sharedUrgentDefinitions, ...localCareDefinitions].map(item => Object.freeze({
+  [
+    ...itemDefinitions,
+    ...sharedUrgentDefinitions,
+    ...infantSpecificUrgentDefinitions,
+    ...localCareDefinitions,
+    ...countryEmergencyDefinitions,
+  ].map(item => Object.freeze({
     ...item,
     actionsKo: Object.freeze([...item.actionsKo]),
     actionsJa: Object.freeze([...item.actionsJa]),

@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { HEALTH_EVIDENCE_SOURCES } from '../src/lib/healthEvidence'
 import {
@@ -24,7 +26,8 @@ describe('getAgeStage', () => {
     ['2027-07-15', 'eighteen-to-twenty-three-months'],
     ['2028-01-15', 'two-years'],
     ['2029-01-15', 'three-to-four-years'],
-    ['2031-01-15', 'five-plus'],
+    ['2031-01-15', 'five-years'],
+    ['2032-01-15', 'older-child-fallback'],
   ] as const
 
   it('uses exact days only for the 0–27 day newborn boundary', () => {
@@ -57,10 +60,15 @@ describe('getAgeStage', () => {
       'eighteen-to-twenty-three-months',
       'two-years',
       'three-to-four-years',
-      'five-plus',
+      'five-years',
+      'older-child-fallback',
     ])
     expect(AGE_STAGES[0].maxCompletedDays).toBe(27)
-    expect(AGE_STAGES.at(-1)?.minCompletedMonths).toBe(60)
+    expect(AGE_STAGES.find(stage => stage.id === 'five-years')).toMatchObject({
+      minCompletedMonths: 60,
+      maxCompletedMonths: 71,
+    })
+    expect(AGE_STAGES.at(-1)?.minCompletedMonths).toBe(72)
   })
 })
 
@@ -87,6 +95,31 @@ describe('age calculation', () => {
     expect(calculateCompletedCalendarMonths('2026-03-08', new Date(2026, 5, 7, 23, 59))).toBe(2)
     expect(calculateCompletedCalendarMonths('2026-03-08', new Date(2026, 5, 8, 0, 1))).toBe(3)
     expect(calculateAgeInCompletedDays('2026-03-08', new Date(2026, 2, 9, 0, 1))).toBe(1)
+  })
+
+  it('counts local-midnight days in an isolated real DST zone', () => {
+    const root = process.cwd()
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(root, 'node_modules', 'vite-node', 'vite-node.mjs'),
+        join(root, 'tests', 'fixtures', 'ageGuidanceDstProbe.ts'),
+      ],
+      {
+        cwd: root,
+        env: { ...process.env, TZ: 'America/New_York' },
+        encoding: 'utf8',
+      }
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      timeZone: 'America/New_York',
+      springHours: 23,
+      fallHours: 25,
+      springDays: 1,
+      fallDays: 1,
+    })
   })
 
   it('proves six months is a calendar boundary, not day 182', () => {
@@ -170,6 +203,13 @@ describe('AGE_GUIDANCE_ITEMS', () => {
       'nemours',
       'kellymom',
       'mamanoko',
+      '강제할당량',
+      '앱은',
+      'アプリは',
+      '添い寝',
+      '評価を受けてください',
+      '達成点',
+      'cdcresponsivefeeding',
     ]) {
       expect(normalized, forbidden).not.toContain(forbidden)
     }
@@ -195,14 +235,75 @@ describe('AGE_GUIDANCE_ITEMS', () => {
 
   it('keeps newborn hypothermia and young-infant fever in the top urgent guidance', () => {
     const newborn = AGE_GUIDANCE_ITEMS.find(item => item.id === 'newborn-urgent-signs')!
-    expect(newborn.actionsKo.join(' ')).toContain('35.5°C 미만')
-    expect(newborn.actionsJa.join(' ')).toContain('35.5°C未満')
+    expect(newborn.actionsKo.join(' ')).toContain('36°C 미만')
+    expect(newborn.actionsJa.join(' ')).toContain('36°C未満')
+
+    const feeding = AGE_GUIDANCE_ITEMS.find(item => item.id === 'newborn-responsive-feeding')!
+    expect(feeding.actionsKo.join(' ')).toContain('즉시 의료진과 상의')
+    expect(feeding.actionsJa.join(' ')).toContain('直ちに医療者へ相談')
 
     const young = AGE_GUIDANCE_ITEMS.find(item => item.id === 'young-infant-fever')!
     expect(young.priority).toBeLessThanOrEqual(3)
     expect(young.urgency).toBe('urgent')
     expect(young.actionsKo.join(' ')).toContain('38°C 이상')
     expect(young.actionsJa.join(' ')).toContain('38°C以上')
+  })
+
+  it('shows the 3–5 month fever thresholds without mixing them into older stages', () => {
+    const fever = AGE_GUIDANCE_ITEMS.find(item => item.id === 'three-five-fever')!
+    expect(fever.actionsKo.join(' ')).toContain('38.3°C 이상')
+    expect(fever.actionsKo.join(' ')).toContain('39.0°C 이상')
+    expect(fever.actionsJa.join(' ')).toContain('38.3°C以上')
+    expect(fever.actionsJa.join(' ')).toContain('39.0°C以上')
+    expect(fever.sourceIds).toContain('nice-fever-ng143')
+  })
+
+  it('separates common red flags from young-infant-only signs', () => {
+    const preschool = AGE_GUIDANCE_ITEMS.find(item => item.id === 'three-to-four-years-urgent-care')!
+    const preschoolText = `${preschool.summaryKo} ${preschool.actionsKo.join(' ')}`
+    expect(preschoolText).toContain('초록색 담즙성 구토')
+    expect(preschoolText).not.toContain('대천문')
+    expect(preschoolText).not.toContain('분출성')
+
+    const infantOnly = AGE_GUIDANCE_ITEMS.find(item => item.id === 'young-infant-specific-urgent-care')!
+    expect(infantOnly.actionsKo.join(' ')).toContain('대천문')
+    expect(infantOnly.actionsJa.join(' ')).toContain('大泉門')
+    expect(infantOnly.sourceIds).toContain('nice-newborn-red-flags-ng194')
+  })
+
+  it('maps Korean and Japanese 119 guidance to each country authority', () => {
+    const kr = AGE_GUIDANCE_ITEMS.find(item => item.id === 'newborn-emergency-kr')!
+    const jp = AGE_GUIDANCE_ITEMS.find(item => item.id === 'newborn-emergency-jp')!
+    expect(kr).toMatchObject({ country: 'KR', linkPurpose: 'emergency' })
+    expect(kr.sourceIds).toEqual(['kr-nfa-119'])
+    expect(jp).toMatchObject({ country: 'JP', linkPurpose: 'emergency' })
+    expect(jp.sourceIds).toEqual(['jp-fdma-119'])
+  })
+
+  it('uses age-scoped nutrition sources from 24 through 71 months', () => {
+    for (const id of ['two-years-family-food-oral', 'three-four-nutrition-oral', 'five-years-nutrition-oral']) {
+      const item = AGE_GUIDANCE_ITEMS.find(candidate => candidate.id === id)!
+      expect(item.sourceIds, id).toContain('who-healthy-diet')
+      expect(item.sourceIds, id).toContain('cdc-picky-eaters')
+      expect(item.sourceIds, id).toContain('cdc-child-oral-health')
+      expect(item.sourceIds, id).not.toContain('who-complementary-feeding')
+    }
+  })
+
+  it('keeps key Korean and Japanese safety actions semantically paired', () => {
+    const sleep = AGE_GUIDANCE_ITEMS.find(item => item.id === 'infant-safe-sleep')!
+    expect(`${sleep.summaryKo} ${sleep.actionsKo.join(' ')}`).toMatch(/등을 대고|등으로/)
+    expect(`${sleep.summaryJa} ${sleep.actionsJa.join(' ')}`).toContain('あおむけ')
+    expect(sleep.actionsKo.join(' ')).toContain('단단')
+    expect(sleep.actionsJa.join(' ')).toContain('硬')
+
+    const food = AGE_GUIDANCE_ITEMS.find(item => item.id === 'six-eight-responsive-meals')!
+    expect(`${food.summaryKo} ${food.actionsKo.join(' ')}`).toContain('철분')
+    expect(`${food.summaryJa} ${food.actionsJa.join(' ')}`).toContain('鉄')
+
+    const urgent = AGE_GUIDANCE_ITEMS.find(item => item.id === 'three-to-four-years-urgent-care')!
+    expect(urgent.summaryKo).toMatch(/호흡곤란.*청색.*경련/)
+    expect(urgent.summaryJa).toMatch(/呼吸困難.*青い.*けいれん/)
   })
 
   it('keeps safe sleep through 11 months and age-specific accident prevention', () => {
@@ -269,6 +370,21 @@ describe('development checkpoint selector', () => {
       expect(item.sourceIds).toContain('cdc-developmental-screening')
     }
   })
+
+  it('makes every checkpoint an observation prompt with a not-yet trigger and no diagnosis', () => {
+    for (const item of DEVELOPMENT_CHECKPOINTS) {
+      expect(item.actionsKo.join(' '), `${item.completedMonth}m ko`).toContain('아직 못 하는 항목')
+      expect(item.actionsJa.join(' '), `${item.completedMonth}m ja`).toContain('まだできていない項目')
+      expect(item.actionsKo.join(' '), `${item.completedMonth}m ko`).toContain('진단이 아니')
+      expect(item.actionsJa.join(' '), `${item.completedMonth}m ja`).toContain('診断ではありませ')
+    }
+  })
+
+  it('shows the 60-month checkpoint only through 71 months and retires it at 72 months', () => {
+    expect(getDevelopmentCheckpointForDate('2026-01-15', '2031-12-15')?.completedMonth).toBe(60)
+    expect(getDevelopmentCheckpointForDate('2026-01-15', '2032-01-15')).toBeNull()
+    expect(getDevelopmentCheckpointForDate('2020-02-29', '2026-02-28')).toBeNull()
+  })
 })
 
 describe('age guidance selectors', () => {
@@ -277,33 +393,40 @@ describe('age guidance selectors', () => {
     expect(getAgeGuidanceForDate('2026-07-14', '2026-07-13')).toEqual([])
   })
 
-  it('returns at most three current priorities before disclosure for every stage', () => {
+  it('returns the exact first three IDs and categories for every stage', () => {
     const examples = [
-      ['2026-01-15', '2026-01-20', 'newborn'],
-      ['2026-01-15', '2026-02-15', 'young-infant'],
-      ['2026-01-15', '2026-04-15', 'three-to-five-months'],
-      ['2026-01-15', '2026-07-15', 'six-to-eight-months'],
-      ['2026-01-15', '2026-10-15', 'nine-to-eleven-months'],
-      ['2026-01-15', '2027-01-15', 'twelve-to-seventeen-months'],
-      ['2026-01-15', '2027-07-15', 'eighteen-to-twenty-three-months'],
-      ['2026-01-15', '2028-01-15', 'two-years'],
-      ['2026-01-15', '2029-01-15', 'three-to-four-years'],
-      ['2026-01-15', '2031-01-15', 'five-plus'],
+      ['2026-01-20', 'newborn', ['newborn-responsive-feeding', 'infant-safe-sleep', 'newborn-urgent-signs'], ['feeding', 'safe-sleep', 'urgent-care']],
+      ['2026-02-15', 'young-infant', ['young-infant-responsive-feeding', 'young-infant-safe-sleep', 'young-infant-fever'], ['feeding', 'safe-sleep', 'urgent-care']],
+      ['2026-04-15', 'three-to-five-months', ['three-five-safe-sleep', 'three-five-floor-play', 'three-five-solids-readiness'], ['safe-sleep', 'activity-sleep', 'feeding']],
+      ['2026-07-15', 'six-to-eight-months', ['six-eight-responsive-meals', 'six-eight-allergen-choking', 'six-eight-foods-to-avoid'], ['feeding', 'food-safety', 'food-safety']],
+      ['2026-10-15', 'nine-to-eleven-months', ['nine-eleven-meals-texture', 'nine-eleven-choking', 'nine-eleven-development'], ['feeding', 'food-safety', 'development']],
+      ['2027-01-15', 'twelve-to-seventeen-months', ['twelve-seventeen-family-foods', 'twelve-seventeen-activity-sleep', 'twelve-seventeen-oral-care'], ['feeding', 'activity-sleep', 'oral-health']],
+      ['2027-07-15', 'eighteen-to-twenty-three-months', ['eighteen-twenty-three-development', 'eighteen-twenty-three-activity', 'eighteen-twenty-three-family-care'], ['development', 'activity-sleep', 'feeding']],
+      ['2028-01-15', 'two-years', ['two-years-development', 'two-years-activity-sleep', 'two-years-family-food-oral'], ['development', 'activity-sleep', 'oral-health']],
+      ['2029-01-15', 'three-to-four-years', ['three-four-development', 'three-four-activity-sleep', 'three-four-injury-prevention'], ['development', 'activity-sleep', 'general']],
+      ['2031-01-15', 'five-years', ['five-years-development', 'five-years-safety', 'five-years-nutrition-oral'], ['development', 'general', 'oral-health']],
+      ['2032-01-15', 'older-child-fallback', ['older-child-general-care', 'older-child-emergency', 'older-child-local-guidance'], ['general', 'urgent-care', 'checkup-vaccination']],
     ] as const
 
-    for (const [birthdate, asOf, stageId] of examples) {
+    for (const [asOf, stageId, ids, categories] of examples) {
+      const birthdate = '2026-01-15'
       const priorities = getPriorityAgeGuidanceForDate(birthdate, asOf)
-      expect(priorities.length, stageId).toBeGreaterThan(0)
-      expect(priorities.length, stageId).toBeLessThanOrEqual(3)
+      expect(priorities.map(item => item.id), stageId).toEqual(ids)
+      expect(priorities.map(item => item.category), stageId).toEqual(categories)
       expect(priorities.every(item => item.stageId === stageId)).toBe(true)
     }
   })
 
-  it('retires infant advice at 5 years instead of extrapolating it', () => {
-    const items = getAgeGuidanceForDate('2021-07-13', '2026-07-13')
+  it('uses a dedicated 60–71 month stage and a general 72+ fallback', () => {
+    const five = getAgeGuidanceForDate('2021-07-13', '2026-07-13')
+    expect(five.every(item => item.stageId === 'five-years')).toBe(true)
+    expect(five.some(item => item.id === 'five-years-development')).toBe(true)
+
+    const items = getAgeGuidanceForDate('2020-07-13', '2026-07-13')
     expect(items.length).toBeGreaterThan(0)
-    expect(items.every(item => item.stageId === 'five-plus')).toBe(true)
-    expect(items.some(item => item.id === 'five-plus-local-care-kr')).toBe(true)
+    expect(items.every(item => item.stageId === 'older-child-fallback')).toBe(true)
+    expect(items.some(item => item.id === 'older-child-fallback-local-care-kr')).toBe(true)
+    expect(items.some(item => item.category === 'urgent-care')).toBe(true)
     expect(items.some(item => item.category === 'feeding')).toBe(false)
     expect(items.some(item => item.category === 'safe-sleep')).toBe(false)
   })
@@ -337,5 +460,12 @@ describe('age guidance selectors', () => {
     expect(ja.country).toBe('KR')
     expect(Object.isFrozen(ko)).toBe(true)
     expect(Object.isFrozen(ko.actions)).toBe(true)
+  })
+
+  it('marks local official links as check-up and vaccination resources', () => {
+    const local = getAgeGuidanceForDate('2026-01-15', '2026-05-15')
+      .filter(item => item.country)
+    expect(local.length).toBeGreaterThan(0)
+    expect(local.every(item => item.linkPurpose === 'checkup-vaccination' || item.linkPurpose === 'emergency')).toBe(true)
   })
 })

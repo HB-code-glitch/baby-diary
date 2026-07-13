@@ -2,7 +2,11 @@
  * Temporary compatibility surface for views that have not yet migrated to
  * ageGuidance.ts. Fixed-day feeding/calendar claims are deliberately retired.
  */
-import { HEALTH_EVIDENCE_SOURCES } from './healthEvidence'
+import {
+  HEALTH_EVIDENCE_SOURCES,
+  getEvidenceSources,
+  type HealthEvidenceSourceId,
+} from './healthEvidence'
 
 export interface GuidanceMarker {
   id: string
@@ -13,6 +17,7 @@ export interface GuidanceMarker {
   bodyJa: string
   quoteKo?: string
   quoteJa?: string
+  readonly sourceIds: readonly HealthEvidenceSourceId[]
   sourceLabel: string
   evidenceLevel: 'guideline-consensus' | 'RCT'
 }
@@ -45,17 +50,19 @@ export interface GuidanceSource {
  * FeverModal still consumes these three IDs. Task 2 replaces the prose parser
  * with structured red-flag arrays; no other legacy marker remains visible.
  */
-export const GUIDANCE_MARKERS: GuidanceMarker[] = [
+type GuidanceMarkerDefinition = Omit<GuidanceMarker, 'sourceLabel'>
+
+const markerDefinitions: readonly GuidanceMarkerDefinition[] = [
   {
     id: 'fever_under_3mo_emergency',
     startDay: 0,
     titleKo: '3개월 미만 발열은 즉시 의료기관에 연락',
     titleJa: '生後3か月未満の発熱は直ちに医療機関へ連絡',
-    bodyKo: '생후 3개월 미만에서 기록 체온이 38.0°C 이상이면 겉보기에 괜찮아도 지금 의료기관에 연락해 평가받아요. 앱은 체온 측정 부위를 저장하지 않으므로 측정 방법을 의료진에게 함께 알려 주세요.',
-    bodyJa: '生後3か月未満で記録した体温が38.0°C以上なら、元気そうに見えても今すぐ医療機関へ連絡し評価を受けてください。アプリは測定部位を保存しないため、測定方法も医療者へ伝えてください。',
+    bodyKo: '생후 3개월 미만에서 기록 체온이 38.0°C 이상이면 겉보기에 괜찮아도 지금 의료기관에 연락해 진료받아요. 체온 측정 방법도 의료진에게 함께 알려 주세요.',
+    bodyJa: '生後3か月未満で記録した体温が38.0°C以上なら、元気そうに見えても今すぐ医療機関へ連絡し診察を受けてください。体温の測定方法も医療者へ伝えてください。',
     quoteKo: '생후 3개월 미만에서 기록 체온이 38.0°C 이상이면 지금 의료기관에 연락해요.',
     quoteJa: '生後3か月未満で記録した体温が38.0°C以上なら、今すぐ医療機関へ連絡してください。',
-    sourceLabel: 'NICE NG143',
+    sourceIds: ['nice-fever-ng143'],
     evidenceLevel: 'guideline-consensus',
   },
   {
@@ -65,7 +72,7 @@ export const GUIDANCE_MARKERS: GuidanceMarker[] = [
     titleJa: '直ちに助けを求める危険サイン',
     bodyKo: '체온과 무관하게 즉시 응급 도움을 요청해요: 피부가 창백·얼룩·청색, 숨쉬기 힘듦 또는 끙끙거림, 깨우기 어렵거나 반응이 매우 떨어짐, 눌러도 사라지지 않는 발진, 경련, 목 경직 또는 대천문 팽창, 심한 탈수, 초록색 담즙성 또는 분출성 구토.',
     bodyJa: '体温に関係なく直ちに救急へ連絡してください: 青白い・まだら・青い皮膚, 呼吸困難またはうなり呼吸, 起こしにくい・反応が非常に弱い, 押しても消えない発疹, けいれん, 首のこわばりまたは大泉門の膨らみ, 重い脱水, 緑色の胆汁性または噴水状の嘔吐。',
-    sourceLabel: 'NICE NG143 · NICE NG194',
+    sourceIds: ['nice-fever-ng143', 'nice-newborn-red-flags-ng194'],
     evidenceLevel: 'guideline-consensus',
   },
   {
@@ -73,14 +80,25 @@ export const GUIDANCE_MARKERS: GuidanceMarker[] = [
     startDay: 0,
     titleKo: '해열제는 불편함을 줄이기 위해 사용',
     titleJa: '解熱薬はつらさを和らげるために使用',
-    bodyKo: '해열제는 체온 숫자만 낮추기 위해 쓰지 않고 아이가 힘들어할 때 제품 표시와 의료진·약사의 조언에 따라 사용해요. 앱은 용량을 안내하지 않아요. 3개월 미만 아기는 먼저 즉시 평가받고, 두 종류를 동시에 사용하지 않아요.',
-    bodyJa: '解熱薬は体温の数字だけを下げる目的ではなく、子どもがつらい時に製品表示と医療者・薬剤師の助言に従って使います。アプリは用量を案内しません。3か月未満はまず直ちに評価を受け、2種類を同時に使いません。',
+    bodyKo: '해열제는 체온 숫자만 낮추기 위해 쓰지 않고 아이가 힘들어할 때 제품 표시와 의료진·약사의 조언에 따라 사용해요. 용량은 제품 표시와 전문가의 안내를 확인해요. 3개월 미만 아기는 먼저 즉시 진료받고, 두 종류를 동시에 사용하지 않아요.',
+    bodyJa: '解熱薬は体温の数字だけを下げる目的ではなく、子どもがつらい時に製品表示と医療者・薬剤師の助言に従って使います。用量は製品表示と専門家の案内を確認します。3か月未満はまず直ちに診察を受け、2種類を同時に使いません。',
     quoteKo: '해열제는 체온 숫자만 낮추기 위해 쓰지 않아요.',
     quoteJa: '解熱薬は体温の数字だけを下げる目的では使いません。',
-    sourceLabel: 'NICE NG143',
+    sourceIds: ['nice-fever-ng143'],
     evidenceLevel: 'guideline-consensus',
   },
 ]
+
+export const GUIDANCE_MARKERS: GuidanceMarker[] = markerDefinitions.map(marker => {
+  const sourceIds = Object.freeze([...marker.sourceIds])
+  return {
+    ...marker,
+    sourceIds,
+    sourceLabel: getEvidenceSources(sourceIds, 'ko')
+      .map(source => source.organization)
+      .join(' · '),
+  }
+})
 
 export const GUIDANCE_DISCLAIMER: GuidanceDisclaimer = {
   ko: '이 안내는 일반적인 공중보건 지침이며 진단·처방이나 아이의 진료 계획을 대신하지 않아요. 미숙아는 의료진이 정한 교정 연령과 진료 계획을 우선하고, 건강·수유·성장·발달이 걱정되면 담당 의료진과 상의하세요.',
@@ -126,8 +144,8 @@ export function getGuidanceForDay(_ageInDays: number): GuidanceItem[] {
 }
 
 /**
- * Kept only so the current popup compiles. Numeric quota bands are retired;
- * Task 2 replaces the popup with responsive feeding cues.
+ * Kept only so the current popup compiles. Fixed feeding bands are retired;
+ * the popup now relies on responsive feeding cues.
  */
 export interface FeedingBand {
   id: 'formula_0_1mo' | 'formula_1_2mo' | 'formula_2_3mo' | 'formula_3_6mo'
