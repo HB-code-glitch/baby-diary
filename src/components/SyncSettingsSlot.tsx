@@ -189,17 +189,23 @@ function SignedOutView() {
           required
           autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
         />
-        <div style={{
-          background: 'var(--cream-100)',
-          border: '1px solid var(--stone-200)',
-          borderRadius: 10,
-          padding: '10px 12px',
-        }}>
-          <label style={{
+        <label
+          data-sync-keep-logged-in-hit-target
+          style={{
+            display: 'block',
+            minHeight: 40,
+            boxSizing: 'border-box',
+            background: 'var(--cream-100)',
+            border: '1px solid var(--stone-200)',
+            borderRadius: 10,
+            padding: '10px 12px',
+            cursor: 'pointer',
+          }}
+        >
+          <span style={{
             display: 'flex',
             alignItems: 'center',
             gap: 9,
-            cursor: 'pointer',
             color: 'var(--stone-700)',
             fontSize: 12,
             fontWeight: 600,
@@ -210,6 +216,7 @@ function SignedOutView() {
               name="keepLoggedIn"
               checked={keepLoggedIn}
               onChange={e => setKeepLoggedIn(e.target.checked)}
+              aria-labelledby="sync-keep-logged-in-label"
               aria-describedby="sync-keep-logged-in-help"
               style={{
                 width: 16,
@@ -219,11 +226,12 @@ function SignedOutView() {
                 accentColor: 'var(--peach-500)',
               }}
             />
-            <span>{t('sync.keepLoggedIn')}</span>
-          </label>
-          <p
+            <span id="sync-keep-logged-in-label">{t('sync.keepLoggedIn')}</span>
+          </span>
+          <span
             id="sync-keep-logged-in-help"
             style={{
+              display: 'block',
               margin: '4px 0 0 25px',
               color: 'var(--stone-500)',
               fontSize: 11,
@@ -231,8 +239,8 @@ function SignedOutView() {
             }}
           >
             {t('sync.keepLoggedInHelp')}
-          </p>
-        </div>
+          </span>
+        </label>
         {error && (
           <div style={{ fontSize: 12, color: 'var(--rose-500)', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
             <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />

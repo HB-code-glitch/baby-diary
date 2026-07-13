@@ -92,6 +92,23 @@ describe('keep logged in UI', () => {
     expect(document.getElementById(helpId!)?.textContent?.trim()).toBeTruthy()
   })
 
+  it('makes the full help card a connected 40px checkbox hit target', async () => {
+    await act(async () => root.render(<SyncSettingsSlot />))
+
+    const hitTarget = container.querySelector<HTMLLabelElement>('[data-sync-keep-logged-in-hit-target]')
+    const checkbox = container.querySelector<HTMLInputElement>('input[name="keepLoggedIn"]')!
+    const help = container.querySelector<HTMLElement>('#sync-keep-logged-in-help')!
+
+    expect(hitTarget?.tagName).toBe('LABEL')
+    expect(hitTarget?.contains(checkbox)).toBe(true)
+    expect(hitTarget?.contains(help)).toBe(true)
+    expect(hitTarget?.querySelector('label')).toBeNull()
+    expect(Number.parseFloat(hitTarget?.style.minHeight ?? '0')).toBeGreaterThanOrEqual(40)
+
+    await act(async () => help.click())
+    expect(checkbox.checked).toBe(false)
+  })
+
   it('passes the unchecked choice to sign-in', async () => {
     await act(async () => root.render(<SyncSettingsSlot />))
     const email = container.querySelector<HTMLInputElement>('input[type="email"]')!

@@ -69,8 +69,6 @@ export async function initFirebase(
   } = await import('firebase/firestore')
   const {
     getAuth,
-    setPersistence,
-    browserLocalPersistence,
     connectAuthEmulator,
   } = await import('firebase/auth')
 
@@ -93,8 +91,9 @@ export async function initFirebase(
   const auth = getAuth(app)
 
   // Emulator connectors must run before any Auth/Firestore operation. Keep
-  // connector and persistence setup in one atomic block so a failure cannot
-  // leave a cached half-initialized app behind.
+  // setup atomic so a connector failure cannot leave a cached half-initialized
+  // app behind. Auth persistence is selected only immediately before a new
+  // sign-in/sign-up, preserving any session Firebase restored here.
   try {
     if (emulator?.enabled) {
       connectAuthEmulator(
@@ -108,9 +107,6 @@ export async function initFirebase(
         emulator.firestorePort,
       )
     }
-
-    // Make session restoration deterministic across macOS and Windows.
-    await setPersistence(auth, browserLocalPersistence)
   } catch (error) {
     await deleteApp(app).catch(() => undefined)
     throw error

@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const firebase = vi.hoisted(() => {
   const app = { name: 'baby-diary' }
-  const auth = { name: 'auth' }
+  const auth: { name: string; currentUser: { uid: string } | null } = {
+    name: 'auth',
+    currentUser: null,
+  }
   const db = { name: 'db' }
   const local = { type: 'LOCAL' }
   const session = { type: 'SESSION' }
@@ -65,45 +68,53 @@ describe('Firebase auth persistence', () => {
     vi.resetModules()
     vi.clearAllMocks()
     firebase.getApps.mockReturnValue([])
+    firebase.auth.currentUser = null
     firebase.setPersistence.mockResolvedValue(undefined)
     firebase.signInWithEmailAndPassword.mockResolvedValue({ user: { uid: 'login-user' } })
     firebase.createUserWithEmailAndPassword.mockResolvedValue({ user: { uid: 'signup-user' } })
   })
 
-  it('initializes restored sessions with explicit local persistence', async () => {
+  it('preserves a restored session choice during renderer reload', async () => {
     const { initFirebase } = await import('../src/sync/firebase')
+    firebase.auth.currentUser = { uid: 'session-user' }
 
     await expect(initFirebase(config)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
 
-    expect(firebase.setPersistence).toHaveBeenCalledOnce()
-    expect(firebase.setPersistence).toHaveBeenCalledWith(firebase.auth, firebase.local)
+    expect(firebase.getAuth).toHaveBeenCalledWith(firebase.app)
+    expect(firebase.auth.currentUser).toEqual({ uid: 'session-user' })
+    expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
-  it('does not reinitialize a cached instance, but restores the local default after teardown', async () => {
+  it('does not choose persistence while initializing or reinitializing Firebase', async () => {
     const { initFirebase, teardownFirebase } = await import('../src/sync/firebase')
 
     await initFirebase(config)
     await initFirebase(config)
     expect(firebase.initializeApp).toHaveBeenCalledOnce()
-    expect(firebase.setPersistence).toHaveBeenCalledOnce()
+    expect(firebase.setPersistence).not.toHaveBeenCalled()
 
     await teardownFirebase()
     await initFirebase(config)
     expect(firebase.initializeApp).toHaveBeenCalledTimes(2)
-    expect(firebase.setPersistence).toHaveBeenCalledTimes(2)
-    expect(firebase.setPersistence).toHaveBeenLastCalledWith(firebase.auth, firebase.local)
+    expect(firebase.setPersistence).not.toHaveBeenCalled()
   })
 
-  it('does not cache a partially initialized auth instance when the local default fails', async () => {
-    const { initFirebase } = await import('../src/sync/firebase')
-    firebase.setPersistence.mockRejectedValueOnce(new Error('persistence unavailable'))
+  it('keeps omitted keepLoggedIn as a local-persistence sign-in', async () => {
+    const { fbSignIn } = await import('../src/sync/firebase')
 
-    await expect(initFirebase(config)).rejects.toThrow('persistence unavailable')
-    await expect(initFirebase(config)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
+    await fbSignIn(firebase.auth as never, 'parent@example.test', 'secret1')
 
-    expect(firebase.initializeApp).toHaveBeenCalledTimes(2)
-    expect(firebase.deleteApp).toHaveBeenCalledWith(firebase.app)
-    expect(firebase.setPersistence).toHaveBeenCalledTimes(2)
+    expect(firebase.setPersistence).toHaveBeenCalledWith(firebase.auth, firebase.local)
+    expect(firebase.signInWithEmailAndPassword).toHaveBeenCalledOnce()
+  })
+
+  it('keeps omitted keepLoggedIn as a local-persistence sign-up', async () => {
+    const { fbSignUp } = await import('../src/sync/firebase')
+
+    await fbSignUp(firebase.auth as never, 'parent@example.test', 'secret1')
+
+    expect(firebase.setPersistence).toHaveBeenCalledWith(firebase.auth, firebase.local)
+    expect(firebase.createUserWithEmailAndPassword).toHaveBeenCalledOnce()
   })
 
   it.each([
