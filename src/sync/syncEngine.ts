@@ -1603,11 +1603,22 @@ async function reconcile(context: SyncContext): Promise<void> {
   // a local mutation is skipped only when its OWN identity is already remote, or
   // when the exact durable upload derivative this account would produce for it is
   // already remote. Anything else — including an upload-ready derivative from a
-  // crashed prior run that never reached the cloud, or one durably appended under
-  // a different previously-signed-in account — is re-enqueued for upload without
-  // ever rewriting the local original.
+  // crashed prior run that never reached the cloud — is re-enqueued for upload
+  // without ever rewriting the local original.
+  //
+  // A mutation that already carries `migration` (a derivative durably appended
+  // under a *previously* signed-in account, e.g. a crash between derive and
+  // upload followed by an account switch) is never itself a re-derivation
+  // candidate: deriving it again would rebind a derivative onto a second writer,
+  // chaining a derivative-of-a-derivative at a distinct content id and uploading
+  // an extra cloud document for the same logical event. It is excluded here
+  // without any loss — its untouched original event is always present in
+  // `localEvents` too (append-only local log), is processed by this same filter,
+  // and deterministically re-derives the exact correct derivative for the
+  // current account.
   const toUpload = localEvents.filter(e => {
     if (remoteDocIds.has(makeDocId(e))) return false
+    if (e.migration !== undefined) return false
     try {
       const prospective = deriveUploadReadyEvent(e, user.uid)
       if (remoteDocIds.has(makeCloudEventDocId(prospective))) return false

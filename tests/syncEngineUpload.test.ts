@@ -621,5 +621,50 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       })
       expect(engine.getStatus().status).toBe('online')
     })
+
+    it('never re-derives a prior account\'s un-uploaded durable derivative into a second cloud document after switching accounts', async () => {
+      const familyId = 'family-switch'
+      const uidA = 'account-a'
+      const uidB = 'account-b'
+      seedFamily(familyId, uidA)
+
+      // Simulate: while signed in as A, a previous run derived+durably appended A's
+      // derivative to the local EventLog, then crashed before the Firestore write
+      // ever happened. The untouched original event is also on disk (append-only
+      // local log never rewrites or removes it).
+      const source = makeEvent()
+      const derivativeA = deriveUploadReadyEvent(source, uidA)
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      harness.mutations.set(getEventStorageKey(derivativeA), structuredClone(derivativeA))
+
+      // App restarts signed in as a different account B, sharing the same physical
+      // local disk and the same cloud family.
+      seedFamily(familyId, uidB)
+      const engineB = await connect(uidB, 'b@example.test', familyId)
+      await vi.waitFor(() => {
+        const status = engineB.getStatus().status
+        expect(status === 'online' || status === 'error').toBe(true)
+      })
+
+      const expectedDerivativeB = deriveUploadReadyEvent(source, uidB)
+      await vi.waitFor(() => {
+        expect(harness.store.get(eventDocPath(familyId, expectedDerivativeB))).toEqual({ event: expectedDerivativeB })
+      })
+
+      // Exactly one cloud document exists for this logical event: the untouched
+      // original re-derived for the current writer. Re-deriving account A's already
+      // -migrated derivative (which has its own distinct content id) must never
+      // produce and upload a second, different derivative-of-derivative document.
+      const eventDocPrefix = `families/${familyId}/events/`
+      const uploadedEventDocs = Array.from(harness.store.keys()).filter(path => path.startsWith(eventDocPrefix))
+      expect(uploadedEventDocs).toEqual([eventDocPath(familyId, expectedDerivativeB)])
+
+      // No data was lost by excluding the prior derivative from re-derivation: the
+      // untouched original (and A's now-superseded derivative) both remain intact
+      // in the durable local log, and the logical event reached the cloud exactly
+      // once, correctly bound to the current account.
+      expect(harness.mutations.get(getEventStorageKey(source))).toEqual(source)
+      expect(harness.mutations.get(getEventStorageKey(derivativeA))).toEqual(derivativeA)
+    })
   })
 })

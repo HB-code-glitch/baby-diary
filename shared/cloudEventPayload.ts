@@ -65,6 +65,7 @@ export function deriveUploadReadyEvent(source: DiaryEvent, writerUid: string): D
   assertValidEvent(source)
   if (writerUid.length === 0) throw new Error('writer uid is required')
   if (isUploadReadyEvent(source, writerUid)) return source
+  if (source.migration !== undefined) throw new Error('event derivative cannot be rebound')
 
   const sourceContentId = getEventContentId(source)
   const identified = ensureEventMutationIdentity(source)

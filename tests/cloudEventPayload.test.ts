@@ -97,6 +97,22 @@ describe('cloud event transport payload', () => {
     )).toBeNull()
   })
 
+  it('refuses to rebind an already-migrated derivative onto a second writer uid', () => {
+    const source = event({
+      author: { uid: 'local-profile-placeholder', name: 'Original display name', role: 'dad' },
+    })
+    const derived = deriveUploadReadyEvent(source, WRITER_UID)
+
+    // Idempotent for the same writer uid: no rebinding needed, no throw.
+    expect(deriveUploadReadyEvent(derived, WRITER_UID)).toBe(derived)
+
+    // A derivative already carries its own migration provenance; deriving it again
+    // for a *different* writer uid would silently chain a derivative-of-derivative
+    // (a distinct content id, and thus a distinct cloud document) instead of the
+    // untouched original re-deriving the correct one. Fail closed instead.
+    expect(() => deriveUploadReadyEvent(derived, 'another-writer-uid')).toThrow(/rebound/)
+  })
+
   it('rejects timestamp-shadow tampering, far-future writes, and invalid typed data', () => {
     const native = event()
     const ready = { ...native, sync: createEventSyncMetadata(native) }
