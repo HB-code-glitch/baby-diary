@@ -173,13 +173,15 @@ jobs:
           fi
       - name: Download and hard-verify the exact historical v0.3.8 release assets by asset ID
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p upgrade-baseline-v0.3.8
           release_id=352876543
           expected_tag='v0.3.8'
           expected_published='2026-07-13T00:17:33Z'
-          release_json="$(curl -fsSL "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/${release_id}")"
+          release_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/${release_id}")"
           actual_tag="$(node -e 'console.log(JSON.parse(process.argv[1]).tag_name)' "${release_json}")"
           actual_published="$(node -e 'console.log(JSON.parse(process.argv[1]).published_at)' "${release_json}")"
           if [ "${actual_tag}" != "${expected_tag}" ] || [ "${actual_published}" != "${expected_published}" ]; then
@@ -188,7 +190,7 @@ jobs:
           fi
           verify_asset() {
             local asset_id="$1" name="$2" size="$3" sha256="$4" out="$5"
-            curl -fsSL -H 'Accept: application/octet-stream' \
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/octet-stream' \
               "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/assets/${asset_id}" \
               -o "${out}"
             local actual_size actual_sha256
@@ -205,8 +207,11 @@ jobs:
           verify_asset 474869787 Baby-Diary-0.3.8-universal.dmg 351533375 \
             2793e91c0dc49b436451f150ba0c8dc625cfd1a988841823a114d597e2f60974 \
             upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg
-      # This job never receives a signing or release-write secret; the assets above are
-      # the immutable public bytes already trusted by every v0.3.8 user.
+      # This job authenticates GitHub API reads with the workflow-scoped github.token only
+      # (never a signing or release-write secret) so the shared runner IP does not trip the
+      # unauthenticated 60 req/hr rate limit and fail this gate closed; the assets above are
+      # still the immutable public bytes already trusted by every v0.3.8 user, and are hard
+      # -verified below by exact size/SHA-256 regardless of how they were authenticated.
       - uses: actions/upload-artifact@v4
         with:
           name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}

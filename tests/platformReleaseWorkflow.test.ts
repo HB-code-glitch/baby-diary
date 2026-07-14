@@ -283,6 +283,14 @@ function workflowErrors(candidate: Workflow): string[] {
     ]) {
       if (!runText.includes(fragment)) errors.push(`${baselineJob} must pin exact baseline identity ${fragment}`)
     }
+    const downloadStep = namedStep(baseline, 'Download and hard-verify the exact historical v0.3.8 release assets by asset ID')
+    if (downloadStep?.env?.GH_TOKEN !== '${{ github.token }}') {
+      errors.push(`${baselineJob} must authenticate GitHub API requests with github.token, not a secret`)
+    }
+    const curlLines = runText.split('\n').filter(line => line.includes('curl '))
+    if (curlLines.length === 0 || curlLines.some(line => !line.includes('Authorization: Bearer'))) {
+      errors.push(`${baselineJob} must send an Authorization header on every GitHub API curl request to avoid the shared-runner unauthenticated rate limit`)
+    }
     const upload = stepByUse(baseline, 'actions/upload-artifact@v4')[0]
     if (upload?.with?.['retention-days'] !== 1 || upload?.with?.['if-no-files-found'] !== 'error') {
       errors.push(`${baselineJob} artifact must be short-lived and fail when missing`)
