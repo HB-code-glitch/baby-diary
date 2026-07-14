@@ -1,129 +1,223 @@
-import React, { useState, useMemo } from 'react'
-import { IconChevronLeft, IconChevronRight, IconStar, IconInfo } from '../components/icons'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  format, addDays, subDays, addWeeks, subWeeks, addMonths, subMonths,
-  startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
-  isToday, isSameDay, isSameMonth, getDay, parseISO, differenceInDays,
+  addDays,
+  addMonths,
+  addWeeks,
+  addYears,
+  differenceInDays,
+  eachDayOfInterval,
+  endOfMonth,
+  endOfWeek,
+  format,
+  getDay,
+  isSameDay,
+  isSameMonth,
+  isToday,
+  parseISO,
+  startOfMonth,
+  startOfWeek,
+  subDays,
+  subMonths,
+  subWeeks,
+  subYears,
 } from 'date-fns'
-import { ko } from 'date-fns/locale'
-import { ja } from 'date-fns/locale'
-import { useAppStore, getDDay } from '../store/useAppStore'
-import { EventTimeline } from '../components/EventTimeline'
-import { EventType, DiaryEvent, FormulaData, SleepData } from '../../shared/types'
+import { ja, ko } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
-import { getMilestones, Milestone } from '../lib/milestones'
-import { GUIDANCE_ITEMS, GuidanceItem, GUIDANCE_DISCLAIMER_KO, GUIDANCE_DISCLAIMER_JA } from '../lib/guidance'
+import { IconChevronLeft, IconChevronRight, IconInfo, IconStar } from '../components/icons'
+import { EventTimeline } from '../components/EventTimeline'
+import { GUIDANCE_DISCLAIMER_JA, GUIDANCE_DISCLAIMER_KO, GUIDANCE_ITEMS, type GuidanceItem } from '../lib/guidance'
+import { getMilestones, type Milestone } from '../lib/milestones'
+import { useAppStore } from '../store/useAppStore'
+import type { DiaryEvent, EventType } from '../../shared/types'
+import { compareEventsNewestFirst, eventTimestampMs } from '../lib/eventTime'
+import { useProgressiveList } from '../lib/useProgressiveList'
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 type CalendarView = 'month' | 'week' | 'day'
+type Translate = ReturnType<typeof useTranslation>['t']
 
-// ---------------------------------------------------------------------------
-// Day cell indicators for month view
-// ---------------------------------------------------------------------------
-interface DayIndicators {
-  diaperCount: number
-  feedingCount: number
-  formulaMl: number
-  hasHighTemp: boolean
-  hasDiaryOrMessage: boolean
-  sleepCount: number
-  sleepMinutes: number
-  growthCount: number
+const EVENT_TYPE_OPTIONS: { type: EventType; labelKey: string; summaryLabelKey?: string }[] = [
+  { type: 'pee', labelKey: 'event.pee' },
+  { type: 'poop', labelKey: 'event.poop' },
+  { type: 'temp', labelKey: 'event.temp', summaryLabelKey: 'history.tempIndicator' },
+  { type: 'breast', labelKey: 'event.breast' },
+  { type: 'formula', labelKey: 'event.formula' },
+  { type: 'diary', labelKey: 'event.diary' },
+  { type: 'message', labelKey: 'event.message' },
+  { type: 'sleep', labelKey: 'event.sleep' },
+  { type: 'growth', labelKey: 'event.growth' },
+]
+
+const WEEKDAY_KEYS = [
+  'weekdaySun',
+  'weekdayMon',
+  'weekdayTue',
+  'weekdayWed',
+  'weekdayThu',
+  'weekdayFri',
+  'weekdaySat',
+] as const
+
+type EventsByLocalDay = ReadonlyMap<string, readonly DiaryEvent[]>
+
+const EMPTY_DAY_EVENTS: readonly DiaryEvent[] = []
+
+// History follows the device-local day boundary used throughout the app. Build
+// one immutable lookup per store snapshot so month/week/day consumers never
+// rescan and reparse the full event list for every rendered calendar cell.
+export function groupEventsByLocalDay(events: readonly DiaryEvent[]): EventsByLocalDay {
+  const grouped = new Map<string, DiaryEvent[]>()
+
+  events.forEach(event => {
+    if (event.deleted) return
+    const epoch = eventTimestampMs(event.at)
+    if (epoch === null) return
+    const dayKey = format(new Date(epoch), 'yyyy-MM-dd')
+    const bucket = grouped.get(dayKey)
+    if (bucket) bucket.push(event)
+    else grouped.set(dayKey, [event])
+  })
+
+  grouped.forEach(bucket => bucket.sort(compareEventsNewestFirst))
+  return grouped
 }
 
-// Timezone note (P23): isSameDay uses device-local time.  Consistent for
-// this family (dad=KST UTC+9, mom=JST UTC+9, no DST).  See useAppStore.ts.
-function useDayIndicators(events: DiaryEvent[], date: Date): DayIndicators {
-  return useMemo(() => {
-    const dayEvents = events.filter(e => !e.deleted && isSameDay(parseISO(e.at), date))
-    const diaperCount = dayEvents.filter(e => e.type === 'pee' || e.type === 'poop').length
-    const feedingCount = dayEvents.filter(e => e.type === 'breast' || e.type === 'formula').length
-    const formulaMl = dayEvents
-      .filter(e => e.type === 'formula')
-      .reduce((s, e) => s + ((e.data as FormulaData).ml ?? 0), 0)
-    const hasHighTemp = dayEvents.some(e => e.type === 'temp' && (e.data as { celsius: number }).celsius >= 37.5)
-    const hasDiaryOrMessage = dayEvents.some(e => e.type === 'diary' || e.type === 'message')
-    const sleepEvts = dayEvents.filter(e => e.type === 'sleep')
-    const sleepCount = sleepEvts.length
-    const sleepMinutes = sleepEvts.reduce((s, e) => s + ((e.data as SleepData).minutes ?? 0), 0)
-    const growthCount = dayEvents.filter(e => e.type === 'growth').length
-    return { diaperCount, feedingCount, formulaMl, hasHighTemp, hasDiaryOrMessage, sleepCount, sleepMinutes, growthCount }
-  }, [events, date])
+function eventsForDay(eventsByDay: EventsByLocalDay, date: Date): readonly DiaryEvent[] {
+  return eventsByDay.get(format(date, 'yyyy-MM-dd')) ?? EMPTY_DAY_EVENTS
 }
 
-// ---------------------------------------------------------------------------
-// Month View
-// ---------------------------------------------------------------------------
+function eventCounts(events: readonly DiaryEvent[]): Record<EventType, number> {
+  const counts: Record<EventType, number> = {
+    pee: 0,
+    poop: 0,
+    temp: 0,
+    breast: 0,
+    formula: 0,
+    diary: 0,
+    message: 0,
+    sleep: 0,
+    growth: 0,
+  }
+  events.forEach(event => { counts[event.type] += 1 })
+  return counts
+}
+
+function categorySummaryParts(events: readonly DiaryEvent[], t: Translate): string[] {
+  const counts = eventCounts(events)
+  return EVENT_TYPE_OPTIONS
+    .filter(({ type }) => counts[type] > 0)
+    .map(({ type, labelKey, summaryLabelKey }) => `${t(summaryLabelKey ?? labelKey)} ${counts[type]}`)
+}
+
+function categorySummary(events: readonly DiaryEvent[], t: Translate): string {
+  return categorySummaryParts(events, t).join(' · ')
+}
+
+function conciseCategorySummary(events: readonly DiaryEvent[], t: Translate): string {
+  const parts = categorySummaryParts(events, t)
+  if (parts.length <= 3) return parts.join(' · ')
+  return `${parts.slice(0, 3).join(' · ')} · ${t('history.moreCategories', { count: parts.length - 3 })}`
+}
+
 interface MonthViewProps {
   selectedDate: Date
   displayMonth: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   onSelectDay: (date: Date) => void
-  onPrevMonth: () => void
-  onNextMonth: () => void
   milestones: Milestone[]
   guidanceItems: GuidanceItem[]
   birthdate?: string
 }
 
-function MonthView({ selectedDate, displayMonth, allEvents, onSelectDay, onPrevMonth, onNextMonth, milestones, guidanceItems, birthdate }: MonthViewProps) {
+function MonthView({
+  selectedDate,
+  displayMonth,
+  eventsByDay,
+  onSelectDay,
+  milestones,
+  guidanceItems,
+  birthdate,
+}: MonthViewProps) {
   const { t } = useTranslation()
-
-  const year = displayMonth.getFullYear()
-  const month = displayMonth.getMonth() + 1
-
+  const dayRefs = useRef(new Map<string, HTMLButtonElement>())
+  const pendingFocusDate = useRef<string | null>(null)
   const monthStart = startOfMonth(displayMonth)
   const monthEnd = endOfMonth(displayMonth)
-  // Week starts on Sunday (0)
-  const gridStart = startOfWeek(monthStart, { weekStartsOn: 0 })
-  const gridEnd = endOfWeek(monthEnd, { weekStartsOn: 0 })
-  const days = eachDayOfInterval({ start: gridStart, end: gridEnd })
+  const days = eachDayOfInterval({
+    start: startOfWeek(monthStart, { weekStartsOn: 0 }),
+    end: endOfWeek(monthEnd, { weekStartsOn: 0 }),
+  })
 
-  const WEEKDAY_KEYS = ['weekdaySun', 'weekdayMon', 'weekdayTue', 'weekdayWed', 'weekdayThu', 'weekdayFri', 'weekdaySat'] as const
+  useEffect(() => {
+    const date = pendingFocusDate.current
+    if (!date) return
+    dayRefs.current.get(date)?.focus()
+    pendingFocusDate.current = null
+  }, [displayMonth, selectedDate])
+
+  const moveSelection = (event: React.KeyboardEvent<HTMLButtonElement>, day: Date) => {
+    let nextDate: Date | null = null
+    switch (event.key) {
+      case 'ArrowLeft': nextDate = subDays(day, 1); break
+      case 'ArrowRight': nextDate = addDays(day, 1); break
+      case 'ArrowUp': nextDate = subDays(day, 7); break
+      case 'ArrowDown': nextDate = addDays(day, 7); break
+      case 'Home': nextDate = startOfWeek(day, { weekStartsOn: 0 }); break
+      case 'End': nextDate = endOfWeek(day, { weekStartsOn: 0 }); break
+      case 'PageUp': nextDate = event.shiftKey ? subYears(day, 1) : subMonths(day, 1); break
+      case 'PageDown': nextDate = event.shiftKey ? addYears(day, 1) : addMonths(day, 1); break
+      default: return
+    }
+    event.preventDefault()
+    pendingFocusDate.current = format(nextDate, 'yyyy-MM-dd')
+    onSelectDay(nextDate)
+  }
 
   return (
     <div className="card cal-month">
-      {/* Month navigation */}
-      <div className="cal-nav">
-        <button className="btn-secondary cal-nav-arrow" onClick={onPrevMonth} aria-label="prev month">
-          <IconChevronLeft size={16} color="var(--stone-600)" />
-        </button>
-        <div className="cal-nav-title">
-          {t('history.monthTitle', { year, month })}
-        </div>
-        <button className="btn-secondary cal-nav-arrow" onClick={onNextMonth} aria-label="next month">
-          <IconChevronRight size={16} color="var(--stone-600)" />
-        </button>
-      </div>
-
-      {/* Weekday headers */}
-      <div className="cal-grid-7">
-        {WEEKDAY_KEYS.map((key, i) => (
+      <div className="cal-grid-7" aria-hidden="true">
+        {WEEKDAY_KEYS.map((key, index) => (
           <div
             key={key}
-            className={`cal-weekday-header${i === 0 ? ' cal-sunday' : i === 6 ? ' cal-saturday' : ''}`}
+            className={`cal-weekday-header${index === 0 ? ' cal-sunday' : index === 6 ? ' cal-saturday' : ''}`}
           >
             {t(`history.${key}`)}
           </div>
         ))}
       </div>
 
-      {/* Day cells */}
-      <div className="cal-grid-7">
-        {days.map(day => (
-          <MonthDayCell
-            key={day.toISOString()}
-            day={day}
-            displayMonth={displayMonth}
-            selectedDate={selectedDate}
-            allEvents={allEvents}
-            onSelect={onSelectDay}
-            milestones={milestones}
-            guidanceItems={guidanceItems}
-            birthdate={birthdate}
-          />
+      <div
+        className="cal-grid-7 cal-month-grid"
+        role="grid"
+        aria-label={t('history.monthGridLabel', {
+          month: t('history.monthTitle', {
+            year: displayMonth.getFullYear(),
+            month: displayMonth.getMonth() + 1,
+          }),
+        })}
+        data-history-month-grid
+      >
+        {Array.from({ length: Math.ceil(days.length / 7) }, (_, weekIndex) => (
+          <div className="cal-month-row" role="row" key={weekIndex}>
+            {days.slice(weekIndex * 7, weekIndex * 7 + 7).map(day => (
+              <MonthDayCell
+                key={day.toISOString()}
+                day={day}
+                displayMonth={displayMonth}
+                selectedDate={selectedDate}
+                eventsByDay={eventsByDay}
+                onSelect={onSelectDay}
+                milestones={milestones}
+                guidanceItems={guidanceItems}
+                birthdate={birthdate}
+                buttonRef={button => {
+                  const date = format(day, 'yyyy-MM-dd')
+                  if (button) dayRefs.current.set(date, button)
+                  else dayRefs.current.delete(date)
+                }}
+                onKeyDown={event => moveSelection(event, day)}
+              />
+            ))}
+          </div>
         ))}
       </div>
     </div>
@@ -134,239 +228,162 @@ interface MonthDayCellProps {
   day: Date
   displayMonth: Date
   selectedDate: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   onSelect: (date: Date) => void
   milestones: Milestone[]
   guidanceItems: GuidanceItem[]
   birthdate?: string
+  buttonRef: (button: HTMLButtonElement | null) => void
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void
 }
 
-function MonthDayCell({ day, displayMonth, selectedDate, allEvents, onSelect, milestones, guidanceItems, birthdate }: MonthDayCellProps) {
-  const indicators = useDayIndicators(allEvents, day)
-  const { i18n: i18nInstance } = useTranslation()
-  const isCurrentMonth = isSameMonth(day, displayMonth)
-  const isTodayDay = isToday(day)
-  const isSelected = isSameDay(day, selectedDate)
-  const dayNum = getDay(day) // 0=Sun, 6=Sat
-  const lang = i18nInstance.language
-
-  const hasContent = indicators.diaperCount > 0 || indicators.feedingCount > 0 || indicators.hasHighTemp || indicators.hasDiaryOrMessage || indicators.sleepCount > 0 || indicators.growthCount > 0
-
-  const dayStr = format(day, 'yyyy-MM-dd')
-  const dayMilestones = milestones.filter(m => m.date === dayStr)
-
-  // Guidance items relevant for this day (calendar items only — exclude pinToSettings)
-  const dayGuidance = birthdate ? guidanceItems.filter(g => {
-    if (g.pinToSettings) return false
-    const birth = parseISO(birthdate)
-    const ageInDays = differenceInDays(day, birth)
-    return ageInDays >= 0 && g.startDay === ageInDays
-  }) : []
+function MonthDayCell({
+  day,
+  displayMonth,
+  selectedDate,
+  eventsByDay,
+  onSelect,
+  milestones,
+  guidanceItems,
+  birthdate,
+  buttonRef,
+  onKeyDown,
+}: MonthDayCellProps) {
+  const { t, i18n } = useTranslation()
+  const dayEvents = eventsForDay(eventsByDay, day)
+  const summary = categorySummary(dayEvents, t)
+  const dayString = format(day, 'yyyy-MM-dd')
+  const dayMilestones = milestones.filter(milestone => milestone.date === dayString)
+  const dayGuidance = birthdate
+    ? guidanceItems.filter(item => {
+        if (item.pinToSettings) return false
+        return item.startDay === differenceInDays(day, parseISO(birthdate))
+      })
+    : []
+  const milestoneName = dayMilestones[0]
+    ? (i18n.language === 'ja' ? dayMilestones[0].nameJa : dayMilestones[0].nameKo)
+    : ''
+  const guidanceTitle = dayGuidance[0]
+    ? (i18n.language === 'ja' ? dayGuidance[0].titleJa : dayGuidance[0].titleKo)
+    : ''
+  const accessibleSummary = dayEvents.length > 0
+    ? `${t('history.eventCount', { count: dayEvents.length })}, ${summary}`
+    : t('history.noRecords')
+  const dateFnsLocale = i18n.language === 'ja' ? ja : ko
+  const fullDate = format(day, t('date.formatFull'), { locale: dateFnsLocale })
+  const ariaLabel = [fullDate, isToday(day) ? t('history.today') : '', accessibleSummary, milestoneName, guidanceTitle]
+    .filter(Boolean)
+    .join(', ')
+  const dayNumber = getDay(day)
+  const selected = isSameDay(day, selectedDate)
 
   return (
     <button
+      type="button"
+      ref={buttonRef}
+      role="gridcell"
       className={[
         'cal-day-cell',
-        !isCurrentMonth ? 'cal-day-other-month' : '',
-        isTodayDay ? 'cal-day-today' : '',
-        isSelected ? 'cal-day-selected' : '',
-        dayNum === 0 ? 'cal-sunday' : dayNum === 6 ? 'cal-saturday' : '',
+        !isSameMonth(day, displayMonth) ? 'cal-day-other-month' : '',
+        isToday(day) ? 'cal-day-today' : '',
+        selected ? 'cal-day-selected' : '',
+        dayNumber === 0 ? 'cal-sunday' : dayNumber === 6 ? 'cal-saturday' : '',
       ].filter(Boolean).join(' ')}
+      data-history-date={dayString}
       onClick={() => onSelect(day)}
-      aria-label={format(day, 'yyyy-MM-dd')}
+      onKeyDown={onKeyDown}
+      aria-label={ariaLabel}
+      aria-selected={selected}
+      aria-current={isToday(day) ? 'date' : undefined}
+      tabIndex={selected ? 0 : -1}
     >
       <span className="cal-day-num">{day.getDate()}</span>
-      {isCurrentMonth && (
-        <div className="cal-day-indicators">
-          {hasContent && (
-            <>
-              {indicators.diaperCount > 0 && (
-                <span className="cal-indicator cal-indicator-sage">
-                  {indicators.diaperCount}
-                </span>
-              )}
-              {indicators.feedingCount > 0 && (
-                <span className="cal-indicator cal-indicator-peach">
-                  {indicators.formulaMl > 0 ? `${indicators.formulaMl}ml` : indicators.feedingCount}
-                </span>
-              )}
-              {indicators.hasHighTemp && (
-                <span className="cal-indicator cal-indicator-red">↑</span>
-              )}
-              {indicators.hasDiaryOrMessage && (
-                <span className="cal-indicator cal-indicator-rose">●</span>
-              )}
-              {indicators.sleepCount > 0 && (
-                <span className="cal-chip-sleep" style={{ fontSize: 9, padding: '1px 4px', borderRadius: 4 }}>
-                  {indicators.sleepMinutes}
-                </span>
-              )}
-              {indicators.growthCount > 0 && (
-                <span className="cal-chip-growth" style={{ fontSize: 9, padding: '1px 4px', borderRadius: 4 }}>
-                  {indicators.growthCount}
-                </span>
-              )}
-            </>
-          )}
+      {dayEvents.length > 0 && (
+        <span className="cal-day-event-count">{t('history.eventCount', { count: dayEvents.length })}</span>
+      )}
+      {(dayMilestones.length > 0 || dayGuidance.length > 0) && (
+        <span className="cal-day-markers" aria-hidden="true">
           {dayMilestones.length > 0 && (
-            <span className="cal-indicator cal-indicator-festive" title={lang === 'ja' ? dayMilestones[0].nameJa : dayMilestones[0].nameKo}>
-              <IconStar size={8} color="currentColor" />
+            <span className="cal-indicator cal-indicator-festive" title={milestoneName}>
+              <IconStar size={9} color="currentColor" />
             </span>
           )}
           {dayGuidance.length > 0 && (
-            <span className="cal-indicator cal-indicator-sky" title={lang === 'ja' ? dayGuidance[0].titleJa : dayGuidance[0].titleKo}>
-              <IconInfo size={8} color="currentColor" />
+            <span className="cal-indicator cal-indicator-sky" title={guidanceTitle}>
+              <IconInfo size={9} color="currentColor" />
             </span>
           )}
-        </div>
+        </span>
       )}
     </button>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Week View
-// ---------------------------------------------------------------------------
 interface WeekViewProps {
   selectedDate: Date
   displayWeek: Date
-  allEvents: DiaryEvent[]
-  settings: ReturnType<typeof useAppStore.getState>['settings']
+  eventsByDay: EventsByLocalDay
+  birthdate?: string
   onSelectDay: (date: Date) => void
-  onPrevWeek: () => void
-  onNextWeek: () => void
 }
 
-function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay, onPrevWeek, onNextWeek }: WeekViewProps) {
-  const { t } = useTranslation()
-
+function WeekView({ selectedDate, displayWeek, eventsByDay, birthdate, onSelectDay }: WeekViewProps) {
+  const { t, i18n } = useTranslation()
+  const dateFnsLocale = i18n.language === 'ja' ? ja : ko
   const weekStart = startOfWeek(displayWeek, { weekStartsOn: 0 })
-  const weekEnd = endOfWeek(displayWeek, { weekStartsOn: 0 })
-  const days = eachDayOfInterval({ start: weekStart, end: weekEnd })
-
-  const m1 = weekStart.getMonth() + 1
-  const d1 = weekStart.getDate()
-  const m2 = weekEnd.getMonth() + 1
-  const d2 = weekEnd.getDate()
-
-  const titleKey = m1 === m2 ? 'history.weekTitleSameMonth' : 'history.weekTitle'
-  const titleParams = m1 === m2
-    ? { month: m1, d1, d2 }
-    : { m1, d1, m2, d2 }
-
-  const birthdate = settings?.baby?.birthdate
+  const days = eachDayOfInterval({
+    start: weekStart,
+    end: endOfWeek(displayWeek, { weekStartsOn: 0 }),
+  })
 
   return (
     <div className="card cal-week">
-      {/* Week navigation */}
-      <div className="cal-nav">
-        <button className="btn-secondary cal-nav-arrow" onClick={onPrevWeek} aria-label="prev week">
-          <IconChevronLeft size={16} color="var(--stone-600)" />
-        </button>
-        <div className="cal-nav-title">
-          {t(titleKey, titleParams)}
-        </div>
-        <button className="btn-secondary cal-nav-arrow" onClick={onNextWeek} aria-label="next week">
-          <IconChevronRight size={16} color="var(--stone-600)" />
-        </button>
-      </div>
-
-      {/* Day rows */}
       <div className="cal-week-rows">
         {days.map(day => {
-          const indicators = allEvents.filter(e => !e.deleted && isSameDay(parseISO(e.at), day))
-          // P36: Removed dead `dday` variable (added getDDay twice, was never rendered)
-          // compute D+N for this specific day
-          let ddayForDay: number | null = null
-          if (birthdate) {
-            const birth = parseISO(birthdate)
-            const diffMs = day.getTime() - birth.getTime()
-            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
-            if (diffDays >= 0) ddayForDay = diffDays + 1
-          }
-          const isSelected = isSameDay(day, selectedDate)
-          const isTodayDay = isToday(day)
-          const dayNum = getDay(day)
-
-          // Build per-type summary
-          const peeCount = indicators.filter(e => e.type === 'pee').length
-          const poopCount = indicators.filter(e => e.type === 'poop').length
-          const breastCount = indicators.filter(e => e.type === 'breast').length
-          const formulaCount = indicators.filter(e => e.type === 'formula').length
-          const formulaMl = indicators.filter(e => e.type === 'formula').reduce((s, e) => s + ((e.data as FormulaData).ml ?? 0), 0)
-          const hasHighTemp = indicators.some(e => e.type === 'temp' && (e.data as { celsius: number }).celsius >= 37.5)
-          const sleepEvts = indicators.filter(e => e.type === 'sleep')
-          const sleepCount = sleepEvts.length
-          const sleepMinutes = sleepEvts.reduce((s, e) => s + ((e.data as SleepData).minutes ?? 0), 0)
-          const growthCount = indicators.filter(e => e.type === 'growth').length
-
-          // First few event times
-          const timePreview = indicators
-            .sort((a, b) => a.at.localeCompare(b.at))
-            .slice(0, 3)
-            .map(e => format(parseISO(e.at), 'HH:mm'))
+          const dayEvents = eventsForDay(eventsByDay, day)
+          const summary = categorySummary(dayEvents, t)
+          const conciseSummary = conciseCategorySummary(dayEvents, t)
+          const selected = isSameDay(day, selectedDate)
+          const dayNumber = getDay(day)
+          const dateLabel = format(day, t('date.formatShort'), { locale: dateFnsLocale })
+          const dateString = format(day, 'yyyy-MM-dd')
+          const dday = birthdate ? differenceInDays(day, parseISO(birthdate)) + 1 : null
+          const hasDday = dday != null && dday > 0
+          const recordLabel = dayEvents.length > 0
+            ? `${summary}, ${t('history.eventCount', { count: dayEvents.length })}`
+            : t('history.noRecords')
 
           return (
             <button
+              type="button"
               key={day.toISOString()}
               className={[
                 'cal-week-row',
-                isSelected ? 'cal-week-row-selected' : '',
-                isTodayDay ? 'cal-week-row-today' : '',
+                selected ? 'cal-week-row-selected' : '',
+                isToday(day) ? 'cal-week-row-today' : '',
               ].filter(Boolean).join(' ')}
+              data-history-date={dateString}
               onClick={() => onSelectDay(day)}
+              aria-label={`${dateLabel}, ${recordLabel}`}
+              aria-pressed={selected}
             >
-              {/* Date header */}
-              <div className="cal-week-row-date">
+              <span className="cal-week-row-date">
                 <span className={[
                   'cal-week-day-num',
-                  dayNum === 0 ? 'cal-sunday' : dayNum === 6 ? 'cal-saturday' : '',
+                  dayNumber === 0 ? 'cal-sunday' : dayNumber === 6 ? 'cal-saturday' : '',
                 ].filter(Boolean).join(' ')}>
-                  {format(day, 'M/d')}
+                  {dateLabel}
                 </span>
-                {ddayForDay != null && (
-                  <span className="cal-week-dday">D+{ddayForDay}</span>
-                )}
-                {isTodayDay && <span className="cal-week-today-badge">{t('history.today')}</span>}
-              </div>
-
-              {/* Summary chips */}
-              <div className="cal-week-chips">
-                {(peeCount > 0 || poopCount > 0) && (
-                  <span className="cal-chip cal-chip-sage">
-                    {peeCount > 0 && `${t('event.pee')} ${peeCount}`}
-                    {peeCount > 0 && poopCount > 0 && ' · '}
-                    {poopCount > 0 && `${t('event.poop')} ${poopCount}`}
-                  </span>
-                )}
-                {(breastCount > 0 || formulaCount > 0) && (
-                  <span className="cal-chip cal-chip-peach">
-                    {breastCount > 0 && `${t('event.breast')} ${breastCount}`}
-                    {breastCount > 0 && formulaCount > 0 && ' · '}
-                    {formulaCount > 0 && (formulaMl > 0 ? `${t('event.formula')} ${formulaMl}ml` : `${t('event.formula')} ${formulaCount}`)}
-                  </span>
-                )}
-                {hasHighTemp && (
-                  <span className="cal-chip cal-chip-red">{t('history.tempHighIndicator')}</span>
-                )}
-                {sleepCount > 0 && (
-                  <span className="cal-chip cal-chip-sleep">
-                    {t('summary.sleep', { count: sleepCount, totalMin: sleepMinutes })}
-                  </span>
-                )}
-                {growthCount > 0 && (
-                  <span className="cal-chip cal-chip-growth">
-                    {t('summary.growth', { count: growthCount })}
-                  </span>
-                )}
-              </div>
-
-              {/* Time preview */}
-              {timePreview.length > 0 && (
-                <div className="cal-week-times">
-                  {timePreview.join(' · ')}
-                  {indicators.length > 3 && ` +${indicators.length - 3}`}
-                </div>
+                <span className="cal-week-date-meta">
+                  {hasDday && <span className="cal-week-dday">D+{dday}</span>}
+                  {isToday(day) && <span className="cal-week-today-badge">{t('history.today')}</span>}
+                </span>
+              </span>
+              <span className={`cal-week-summary${dayEvents.length === 0 ? ' cal-week-summary-empty' : ''}`}>
+                {dayEvents.length > 0 ? conciseSummary : t('history.noRecords')}
+              </span>
+              {dayEvents.length > 0 && (
+                <span className="cal-week-total">{t('history.eventCount', { count: dayEvents.length })}</span>
               )}
             </button>
           )
@@ -376,307 +393,506 @@ function WeekView({ selectedDate, displayWeek, allEvents, settings, onSelectDay,
   )
 }
 
-// ---------------------------------------------------------------------------
-// Day View (existing timeline wrapped)
-// ---------------------------------------------------------------------------
+interface SelectedDayPreviewProps {
+  selectedDate: Date
+  eventsByDay: EventsByLocalDay
+  onOpenDay: () => void
+}
+
+function SelectedDayPreview({ selectedDate, eventsByDay, onOpenDay }: SelectedDayPreviewProps) {
+  const { t, i18n } = useTranslation()
+  const dateFnsLocale = i18n.language === 'ja' ? ja : ko
+  const selectedEvents = eventsForDay(eventsByDay, selectedDate)
+  const latestEvents = selectedEvents.slice(0, 3)
+
+  return (
+    <aside className="card history-day-preview" data-history-preview aria-labelledby="history-preview-title">
+      <div className="history-preview-heading">
+        <div>
+          <h2 id="history-preview-title">{t('history.selectedDayRecords')}</h2>
+          <div className="history-preview-date">
+            {format(selectedDate, t('date.formatFull'), { locale: dateFnsLocale })}
+          </div>
+        </div>
+        <span className="history-preview-total">
+          {t('history.totalCount', { count: selectedEvents.length })}
+        </span>
+      </div>
+
+      <div className="history-preview-timeline">
+        <EventTimeline
+          events={latestEvents}
+          showAuthor={false}
+          editable={false}
+          compact
+          emptyTitle={t('history.previewEmptyTitle')}
+          emptySub={t('history.previewEmptySub')}
+        />
+      </div>
+
+      {selectedEvents.length > 0 && (
+        <button
+          type="button"
+          className="btn-secondary history-preview-action"
+          data-history-preview-action
+          onClick={onOpenDay}
+        >
+          {t('history.viewAllRecords')}
+          <IconChevronRight size={15} color="currentColor" />
+        </button>
+      )}
+    </aside>
+  )
+}
+
 interface DayViewProps {
   selectedDate: Date
-  allEvents: DiaryEvent[]
+  eventsByDay: EventsByLocalDay
   filterType: EventType | null
-  onFilterChange: (t: EventType | null) => void
-  onPrevDay: () => void
-  onNextDay: () => void
-  onGoToday: () => void
+  onFilterChange: (type: EventType | null) => void
   milestones: Milestone[]
   guidanceItems: GuidanceItem[]
   birthdate?: string
 }
 
-function DayView({ selectedDate, allEvents, filterType, onFilterChange, onPrevDay, onNextDay, onGoToday, milestones, guidanceItems, birthdate }: DayViewProps) {
-  const { t, i18n: i18nInstance } = useTranslation()
-  const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
-  const lang = i18nInstance.language
+interface ProgressiveDayTimelineProps {
+  events: readonly DiaryEvent[]
+  emptyTitle: string
+  emptySub: string
+}
 
-  const TYPES: { type: EventType; labelKey: string }[] = [
-    { type: 'pee',     labelKey: 'event.pee' },
-    { type: 'poop',    labelKey: 'event.poop' },
-    { type: 'temp',    labelKey: 'event.temp' },
-    { type: 'breast',  labelKey: 'event.breast' },
-    { type: 'formula', labelKey: 'event.formula' },
-    { type: 'diary',   labelKey: 'event.diary' },
-    { type: 'message', labelKey: 'event.message' },
-  ]
+function ProgressiveDayTimeline({ events, emptyTitle, emptySub }: ProgressiveDayTimelineProps) {
+  const timelineCardRef = useRef<HTMLDivElement | null>(null)
+  const loadMoreFocusTarget = useRef<string | null>(null)
+  const {
+    visibleItems,
+    remainingCount,
+    canLoadMore,
+    nextBatchCount,
+    loadMore,
+  } = useProgressiveList(events)
+  const { t } = useTranslation()
 
-  const dayEvents = allEvents.filter(e => !e.deleted && isSameDay(parseISO(e.at), selectedDate))
-    .sort((a, b) => b.at.localeCompare(a.at))
-  const filtered = filterType ? dayEvents.filter(e => e.type === filterType) : dayEvents
+  useLayoutEffect(() => {
+    const targetId = loadMoreFocusTarget.current
+    if (!targetId) return
+    loadMoreFocusTarget.current = null
+    const targetItem = Array.from(
+      timelineCardRef.current?.querySelectorAll<HTMLElement>('.timeline-item[data-event-id]') ?? [],
+    ).find(item => item.dataset.eventId === targetId)
+    const target = targetItem?.querySelector<HTMLElement>('[data-event-action="edit"]')
+      ?? timelineCardRef.current?.querySelector<HTMLElement>('[data-timeline-region]')
+    if (!target) return
 
-  const dayNum = getDay(selectedDate)
-  const dayStr = format(selectedDate, 'yyyy-MM-dd')
-  const dayMilestones = milestones.filter(m => m.date === dayStr)
+    // The newly revealed row must not remain opacity:0 while keyboard focus is
+    // already inside it. useLayoutEffect runs before paint, so disabling only
+    // this row's entrance animation makes the focus destination immediately
+    // perceivable without removing motion from the rest of the batch.
+    if (targetItem) targetItem.style.animation = 'none'
 
-  // Age-specific guidance items for this day
+    const rect = target.getBoundingClientRect()
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth
+    const isFullyVisible = rect.top >= 0
+      && rect.left >= 0
+      && rect.bottom <= viewportHeight
+      && rect.right <= viewportWidth
+
+    if (isFullyVisible) {
+      target.focus({ preventScroll: true })
+      return
+    }
+
+    target.focus()
+    target.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'auto' })
+  }, [visibleItems.length])
+
+  const handleLoadMore = () => {
+    loadMoreFocusTarget.current = events[visibleItems.length]?.id ?? null
+    loadMore()
+  }
+
+  return (
+    <div ref={timelineCardRef} className="card history-day-timeline-card">
+      <EventTimeline
+        events={visibleItems}
+        showAuthor
+        editable
+        emptyTitle={emptyTitle}
+        emptySub={emptySub}
+      />
+      {canLoadMore && (
+        <div className="progressive-list-footer">
+          <button
+            type="button"
+            className="btn-secondary progressive-load-more"
+            data-list-load-more="history-day"
+            data-list-remaining={remainingCount}
+            onClick={handleLoadMore}
+          >
+            {t('history.loadMore', { count: nextBatchCount })}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DayView({
+  selectedDate,
+  eventsByDay,
+  filterType,
+  onFilterChange,
+  milestones,
+  guidanceItems,
+  birthdate,
+}: DayViewProps) {
+  const { t, i18n } = useTranslation()
+  const language = i18n.language
+  const dayEvents = eventsForDay(eventsByDay, selectedDate)
+  const counts = eventCounts(dayEvents)
+  const availableTypes = EVENT_TYPE_OPTIONS.filter(({ type }) => counts[type] > 0)
+  const activeFilter = filterType && counts[filterType] > 0 ? filterType : null
+  const filteredEvents = activeFilter
+    ? dayEvents.filter(event => event.type === activeFilter)
+    : dayEvents
+  const dayString = format(selectedDate, 'yyyy-MM-dd')
+  const dayMilestones = milestones.filter(milestone => milestone.date === dayString)
   const dayGuidance = useMemo(() => {
-    if (!birthdate) return [] as GuidanceItem[]
-    const birth = parseISO(birthdate)
-    const ageInDays = differenceInDays(selectedDate, birth)
-    if (ageInDays < 0) return [] as GuidanceItem[]
-    // On birth day (day 0) include safety pinToSettings items
-    return guidanceItems.filter(g => {
-      if (ageInDays === 0) return g.startDay === 0
-      return !g.pinToSettings && g.startDay === ageInDays
+    if (!birthdate) return []
+    const ageInDays = differenceInDays(selectedDate, parseISO(birthdate))
+    if (ageInDays < 0) return []
+    return guidanceItems.filter(item => {
+      if (ageInDays === 0) return item.startDay === 0
+      return !item.pinToSettings && item.startDay === ageInDays
     })
-  }, [selectedDate, birthdate, guidanceItems])
-
-  const disclaimer = lang === 'ja' ? GUIDANCE_DISCLAIMER_JA : GUIDANCE_DISCLAIMER_KO
+  }, [birthdate, guidanceItems, selectedDate])
+  const disclaimer = language === 'ja' ? GUIDANCE_DISCLAIMER_JA : GUIDANCE_DISCLAIMER_KO
 
   return (
     <div className="cal-day">
-      {/* Day navigation */}
-      <div className="cal-nav">
-        <button className="btn-secondary cal-nav-arrow" onClick={onPrevDay} aria-label="prev day">
-          <IconChevronLeft size={16} color="var(--stone-600)" />
-        </button>
-        <div className={[
-          'cal-nav-title',
-          dayNum === 0 ? 'cal-sunday' : dayNum === 6 ? 'cal-saturday' : '',
-        ].filter(Boolean).join(' ')}>
-          {format(selectedDate, t('date.formatLong'), { locale: dateFnsLocale })}
-        </div>
-        <button className="btn-secondary cal-nav-arrow" onClick={onNextDay} aria-label="next day">
-          <IconChevronRight size={16} color="var(--stone-600)" />
-        </button>
-        {!isToday(selectedDate) && (
-          <button className="btn-secondary" style={{ marginLeft: 4 }} onClick={onGoToday}>
-            {t('history.today')}
-          </button>
-        )}
-      </div>
-
-      {/* Milestone banner cards */}
-      {dayMilestones.map(m => (
-        <div key={m.id} className="day-banner-festive" style={{ marginBottom: 10 }}>
+      {dayMilestones.map(milestone => (
+        <div key={milestone.id} className="day-banner-festive">
           <div className="day-banner-festive-header">
             <IconStar size={14} color="var(--rose-500)" />
             <span className="day-banner-festive-name">
-              {lang === 'ja' ? m.nameJa : m.nameKo}
+              {language === 'ja' ? milestone.nameJa : milestone.nameKo}
             </span>
           </div>
           <div className="day-banner-festive-desc">
-            {lang === 'ja' ? m.descJa : m.descKo}
+            {language === 'ja' ? milestone.descJa : milestone.descKo}
           </div>
         </div>
       ))}
 
-      {/* Guidance info cards */}
-      {dayGuidance.map(g => (
-        <div key={g.id} className="day-banner-info" style={{ marginBottom: 10 }}>
+      {dayGuidance.map(item => (
+        <div key={item.id} className="day-banner-info">
           <div className="day-banner-info-header">
             <IconInfo size={14} color="var(--sky-text)" />
             <span className="day-banner-info-title">
-              {lang === 'ja' ? g.titleJa : g.titleKo}
+              {language === 'ja' ? item.titleJa : item.titleKo}
             </span>
           </div>
           <div className="day-banner-info-body">
-            {lang === 'ja' ? g.bodyJa : g.bodyKo}
+            {language === 'ja' ? item.bodyJa : item.bodyKo}
           </div>
           <div className="day-banner-info-meta">
-            <span>{g.source}</span>
+            <span>{item.source}</span>
             <span className="day-banner-info-disclaimer">{disclaimer}</span>
           </div>
         </div>
       ))}
 
-      {/* Filter chips */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
-        <button
-          className={`filter-chip${filterType === null ? ' active' : ''}`}
-          onClick={() => onFilterChange(null)}
+      {availableTypes.length > 1 && (
+        <div
+          className="history-filter-row"
+          role="group"
+          aria-label={t('history.filterLabel')}
+          data-history-filters
         >
-          {t('history.filterAll')}
-        </button>
-        {TYPES.map(({ type, labelKey }) => (
           <button
-            key={type}
-            className={`filter-chip${filterType === type ? ' active' : ''}`}
-            onClick={() => onFilterChange(filterType === type ? null : type)}
+            type="button"
+            className={`filter-chip${activeFilter === null ? ' active' : ''}`}
+            data-history-filter="all"
+            aria-pressed={activeFilter === null}
+            onClick={() => onFilterChange(null)}
           >
-            {t(labelKey)}
+            {t('history.filterAll')} {dayEvents.length}
           </button>
-        ))}
-      </div>
+          {availableTypes.map(({ type, labelKey }) => (
+            <button
+              type="button"
+              key={type}
+              className={`filter-chip${activeFilter === type ? ' active' : ''}`}
+              data-history-filter={type}
+              aria-pressed={activeFilter === type}
+              onClick={() => onFilterChange(activeFilter === type ? null : type)}
+            >
+              {t(labelKey)} {counts[type]}
+            </button>
+          ))}
+        </div>
+      )}
 
-      {/* Timeline */}
-      <div className="card">
-        <EventTimeline events={filtered} showAuthor editable />
-      </div>
+      <ProgressiveDayTimeline
+        key={`${dayString}:${activeFilter ?? 'all'}`}
+        events={filteredEvents}
+        emptyTitle={t('history.dayEmptyTitle')}
+        emptySub={t('history.dayEmptySub')}
+      />
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// HistoryPage (top-level with mode switcher + breadcrumb)
-// ---------------------------------------------------------------------------
 export function HistoryPage() {
-  const events = useAppStore(s => s.events)
-  const settings = useAppStore(s => s.settings)
+  const events = useAppStore(state => state.events)
+  const settings = useAppStore(state => state.settings)
   const [view, setView] = useState<CalendarView>('month')
-  const [selectedDate, setSelectedDate] = useState(new Date())
-  const [displayMonth, setDisplayMonth] = useState(new Date())
-  const [displayWeek, setDisplayWeek] = useState(new Date())
+  const [selectedDate, setSelectedDate] = useState(() => new Date())
+  const [displayMonth, setDisplayMonth] = useState(() => new Date())
+  const [displayWeek, setDisplayWeek] = useState(() => new Date())
   const [filterType, setFilterType] = useState<EventType | null>(null)
-  const { t } = useTranslation()
+  const tabRefs = useRef<Record<CalendarView, HTMLButtonElement | null>>({ month: null, week: null, day: null })
+  const { t, i18n } = useTranslation()
+  const dateFnsLocale = i18n.language === 'ja' ? ja : ko
 
-  const allEvents = useMemo(() =>
-    events.filter(e => !e.deleted),
-    [events]
-  )
-
+  const eventsByDay = useMemo(() => groupEventsByLocalDay(events), [events])
   const birthdate = settings?.baby?.birthdate
-  const gender = settings?.baby?.gender
-
   const milestones = useMemo(
-    () => birthdate ? getMilestones(birthdate, gender) : [],
-    [birthdate, gender]
+    () => birthdate ? getMilestones(birthdate, settings?.baby?.gender) : [],
+    [birthdate, settings?.baby?.gender],
   )
-
   const guidanceItems = useMemo(() => GUIDANCE_ITEMS, [])
 
-  // Navigate to month view keeping selected month
-  const goToView = (v: CalendarView, date?: Date) => {
-    const d = date ?? selectedDate
-    setSelectedDate(d)
-    setDisplayMonth(d)
-    setDisplayWeek(d)
-    setView(v)
+  const setHistoryView = (nextView: CalendarView) => {
+    setView(nextView)
+    setDisplayMonth(selectedDate)
+    setDisplayWeek(selectedDate)
+    setFilterType(null)
   }
 
-  // Month view handlers
-  const handleMonthDaySelect = (date: Date) => {
-    setSelectedDate(date)
-    setDisplayWeek(date)
-    setView('week')
-  }
-
-  // Week view handlers
-  const handleWeekDaySelect = (date: Date) => {
-    setSelectedDate(date)
+  const openSelectedDay = () => {
     setView('day')
+    setDisplayMonth(selectedDate)
+    setDisplayWeek(selectedDate)
+    setFilterType(null)
   }
 
-  // Day view handlers
-  const handleDayPrev = () => {
-    const d = subDays(selectedDate, 1)
-    setSelectedDate(d)
-    setDisplayWeek(d)
-  }
-  const handleDayNext = () => {
-    const d = addDays(selectedDate, 1)
-    setSelectedDate(d)
-    setDisplayWeek(d)
-  }
-  const handleDayGoToday = () => {
-    const d = new Date()
-    setSelectedDate(d)
-    setDisplayMonth(d)
-    setDisplayWeek(d)
+  const goToday = () => {
+    const today = new Date()
+    setSelectedDate(today)
+    setDisplayMonth(today)
+    setDisplayWeek(today)
+    setFilterType(null)
   }
 
-  const VIEW_OPTIONS: { v: CalendarView; label: string }[] = [
-    { v: 'month', label: t('history.viewMonth') },
-    { v: 'week',  label: t('history.viewWeek') },
-    { v: 'day',   label: t('history.viewDay') },
+  const navigatePeriod = (direction: -1 | 1) => {
+    if (view === 'month') {
+      const nextDate = direction < 0 ? subMonths(selectedDate, 1) : addMonths(selectedDate, 1)
+      setSelectedDate(nextDate)
+      setDisplayMonth(nextDate)
+      setDisplayWeek(nextDate)
+      setFilterType(null)
+      return
+    }
+    if (view === 'week') {
+      const nextDate = direction < 0 ? subWeeks(selectedDate, 1) : addWeeks(selectedDate, 1)
+      setSelectedDate(nextDate)
+      setDisplayMonth(nextDate)
+      setDisplayWeek(nextDate)
+      setFilterType(null)
+      return
+    }
+    const nextDate = direction < 0 ? subDays(selectedDate, 1) : addDays(selectedDate, 1)
+    setSelectedDate(nextDate)
+    setDisplayMonth(nextDate)
+    setDisplayWeek(nextDate)
+    setFilterType(null)
+  }
+
+  const selectMonthDate = (date: Date) => {
+    setSelectedDate(date)
+    setDisplayMonth(date)
+    setDisplayWeek(date)
+    setFilterType(null)
+  }
+
+  const selectWeekDate = (date: Date) => {
+    setSelectedDate(date)
+    setDisplayMonth(date)
+    setDisplayWeek(date)
+    setFilterType(null)
+  }
+
+  const periodTitle = useMemo(() => {
+    if (view === 'month') {
+      return t('history.monthTitle', {
+        year: displayMonth.getFullYear(),
+        month: displayMonth.getMonth() + 1,
+      })
+    }
+    if (view === 'week') {
+      const weekStart = startOfWeek(displayWeek, { weekStartsOn: 0 })
+      const weekEnd = endOfWeek(displayWeek, { weekStartsOn: 0 })
+      const firstMonth = weekStart.getMonth() + 1
+      const secondMonth = weekEnd.getMonth() + 1
+      const firstYear = weekStart.getFullYear()
+      const secondYear = weekEnd.getFullYear()
+      if (firstYear !== secondYear) {
+        return t('history.weekTitleAcrossYears', {
+          y1: firstYear,
+          m1: firstMonth,
+          d1: weekStart.getDate(),
+          y2: secondYear,
+          m2: secondMonth,
+          d2: weekEnd.getDate(),
+        })
+      }
+      return firstMonth === secondMonth
+        ? t('history.weekTitleSameMonth', {
+            year: firstYear,
+            month: firstMonth,
+            d1: weekStart.getDate(),
+            d2: weekEnd.getDate(),
+          })
+        : t('history.weekTitle', {
+            year: firstYear,
+            m1: firstMonth,
+            d1: weekStart.getDate(),
+            m2: secondMonth,
+            d2: weekEnd.getDate(),
+          })
+    }
+    return format(selectedDate, t('date.formatFull'), { locale: dateFnsLocale })
+  }, [dateFnsLocale, displayMonth, displayWeek, selectedDate, t, view])
+
+  const previousLabel = t(`history.previous${view[0].toUpperCase()}${view.slice(1)}`)
+  const nextLabel = t(`history.next${view[0].toUpperCase()}${view.slice(1)}`)
+  const viewOptions: { view: CalendarView; label: string }[] = [
+    { view: 'month', label: t('history.viewMonth') },
+    { view: 'week', label: t('history.viewWeek') },
+    { view: 'day', label: t('history.viewDay') },
   ]
 
   return (
     <div className="page-container" data-tour="calendar">
-      <div className="page-header" style={{ marginBottom: 12 }}>
-        <div className="page-title">{t('history.title')}</div>
+      <div className="page-header history-page-header">
+        <h1 className="page-title">{t('history.title')}</h1>
       </div>
 
-      {/* View switcher pills */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div className="cal-view-switcher">
-          {VIEW_OPTIONS.map(({ v, label }) => (
+      <div className="history-toolbar" aria-label={t('history.toolbarLabel')}>
+        <div
+          className="cal-view-switcher"
+          role="tablist"
+          aria-label={t('history.viewSelectorLabel')}
+          aria-orientation="horizontal"
+        >
+          {viewOptions.map(({ view: option, label }, index) => (
             <button
-              key={v}
-              className={`cal-view-btn${view === v ? ' active' : ''}`}
-              onClick={() => goToView(v)}
+              key={option}
+              ref={button => { tabRefs.current[option] = button }}
+              id={`history-tab-${option}`}
+              type="button"
+              role="tab"
+              className={`cal-view-btn${view === option ? ' active' : ''}`}
+              data-history-view={option}
+              aria-selected={view === option}
+              aria-controls="history-view-panel"
+              tabIndex={view === option ? 0 : -1}
+              onClick={() => setHistoryView(option)}
+              onKeyDown={keyboardEvent => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(keyboardEvent.key)) return
+                keyboardEvent.preventDefault()
+                const nextIndex = keyboardEvent.key === 'Home'
+                  ? 0
+                  : keyboardEvent.key === 'End'
+                    ? viewOptions.length - 1
+                    : (index + (keyboardEvent.key === 'ArrowRight' ? 1 : -1) + viewOptions.length) % viewOptions.length
+                const nextView = viewOptions[nextIndex].view
+                setHistoryView(nextView)
+                tabRefs.current[nextView]?.focus()
+              }}
             >
               {label}
             </button>
           ))}
         </div>
 
-        {/* Breadcrumb back buttons */}
-        {view === 'week' && (
+        <div className="history-period-nav">
           <button
-            className="btn-secondary cal-breadcrumb"
-            onClick={() => setView('month')}
+            type="button"
+            className="btn-secondary cal-nav-arrow"
+            data-history-period="previous"
+            onClick={() => navigatePeriod(-1)}
+            aria-label={previousLabel}
           >
-            <IconChevronLeft size={13} color="var(--stone-600)" />
-            {t('history.viewMonth')}
+            <IconChevronLeft size={17} color="currentColor" />
           </button>
-        )}
-        {view === 'day' && (
-          <>
-            <button
-              className="btn-secondary cal-breadcrumb"
-              onClick={() => setView('month')}
-            >
-              <IconChevronLeft size={13} color="var(--stone-600)" />
-              {t('history.viewMonth')}
-            </button>
-            <button
-              className="btn-secondary cal-breadcrumb"
-              onClick={() => setView('week')}
-            >
-              <IconChevronLeft size={13} color="var(--stone-600)" />
-              {t('history.viewWeek')}
-            </button>
-          </>
-        )}
+          <h2 className="cal-nav-title" aria-live="polite">{periodTitle}</h2>
+          <button
+            type="button"
+            className="btn-secondary history-today-button"
+            onClick={goToday}
+            aria-label={t('history.goToday')}
+          >
+            {t('history.today')}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary cal-nav-arrow"
+            data-history-period="next"
+            onClick={() => navigatePeriod(1)}
+            aria-label={nextLabel}
+          >
+            <IconChevronRight size={17} color="currentColor" />
+          </button>
+        </div>
       </div>
 
-      {/* View content */}
-      {view === 'month' && (
-        <MonthView
-          selectedDate={selectedDate}
-          displayMonth={displayMonth}
-          allEvents={allEvents}
-          onSelectDay={handleMonthDaySelect}
-          onPrevMonth={() => setDisplayMonth(m => subMonths(m, 1))}
-          onNextMonth={() => setDisplayMonth(m => addMonths(m, 1))}
-          milestones={milestones}
-          guidanceItems={guidanceItems}
-          birthdate={birthdate}
-        />
-      )}
-      {view === 'week' && (
-        <WeekView
-          selectedDate={selectedDate}
-          displayWeek={displayWeek}
-          allEvents={allEvents}
-          settings={settings}
-          onSelectDay={handleWeekDaySelect}
-          onPrevWeek={() => setDisplayWeek(w => subWeeks(w, 1))}
-          onNextWeek={() => setDisplayWeek(w => addWeeks(w, 1))}
-        />
-      )}
-      {view === 'day' && (
-        <DayView
-          selectedDate={selectedDate}
-          allEvents={allEvents}
-          filterType={filterType}
-          onFilterChange={setFilterType}
-          onPrevDay={handleDayPrev}
-          onNextDay={handleDayNext}
-          onGoToday={handleDayGoToday}
-          milestones={milestones}
-          guidanceItems={guidanceItems}
-          birthdate={birthdate}
-        />
-      )}
+      <div
+        id="history-view-panel"
+        role="tabpanel"
+        aria-labelledby={`history-tab-${view}`}
+        className="history-view-panel"
+      >
+        {view === 'month' && (
+          <div className="history-overview-grid">
+            <MonthView
+              selectedDate={selectedDate}
+              displayMonth={displayMonth}
+              eventsByDay={eventsByDay}
+              onSelectDay={selectMonthDate}
+              milestones={milestones}
+              guidanceItems={guidanceItems}
+              birthdate={birthdate}
+            />
+            <SelectedDayPreview selectedDate={selectedDate} eventsByDay={eventsByDay} onOpenDay={openSelectedDay} />
+          </div>
+        )}
+        {view === 'week' && (
+          <div className="history-overview-grid">
+            <WeekView
+              selectedDate={selectedDate}
+              displayWeek={displayWeek}
+              eventsByDay={eventsByDay}
+              birthdate={birthdate}
+              onSelectDay={selectWeekDate}
+            />
+            <SelectedDayPreview selectedDate={selectedDate} eventsByDay={eventsByDay} onOpenDay={openSelectedDay} />
+          </div>
+        )}
+        {view === 'day' && (
+          <DayView
+            selectedDate={selectedDate}
+            eventsByDay={eventsByDay}
+            filterType={filterType}
+            onFilterChange={setFilterType}
+            milestones={milestones}
+            guidanceItems={guidanceItems}
+            birthdate={birthdate}
+          />
+        )}
+      </div>
     </div>
   )
 }

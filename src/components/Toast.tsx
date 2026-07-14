@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useRef } from 'react'
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 interface ToastItem {
@@ -8,6 +8,7 @@ interface ToastItem {
   onUndo?: () => void
   onTimeEdit?: () => void
   className?: string
+  tone?: 'status' | 'error'
 }
 
 interface ToastContextValue {
@@ -23,7 +24,7 @@ export function useToast() {
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
@@ -41,12 +42,35 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     timers.current.set(id, timer)
   }, [removeToast])
 
+  const clearToasts = useCallback(() => {
+    for (const timer of timers.current.values()) clearTimeout(timer)
+    timers.current.clear()
+    setToasts(prev => prev.length === 0 ? prev : [])
+  }, [])
+
+  useEffect(() => {
+    i18n.on('languageChanged', clearToasts)
+    return () => i18n.off('languageChanged', clearToasts)
+  }, [clearToasts, i18n])
+
+  useEffect(() => () => {
+    for (const timer of timers.current.values()) clearTimeout(timer)
+    timers.current.clear()
+  }, [])
+
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
       <div className="toast-container">
-        {toasts.map(toast => (
-          <div key={toast.id} className={['toast', toast.className].filter(Boolean).join(' ')}>
+        {toasts.map(toast => {
+          const isError = toast.tone === 'error' || toast.className?.split(' ').includes('toast-error')
+          return (
+          <div
+            key={toast.id}
+            className={['toast', isError ? 'toast-error' : '', toast.className].filter(Boolean).join(' ')}
+            role={isError ? 'alert' : 'status'}
+            aria-atomic="true"
+          >
             <span>{toast.message}</span>
             {toast.onTimeEdit && (
               <button
@@ -74,11 +98,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               className="toast-btn"
               style={{ opacity: 0.6 }}
               onClick={() => removeToast(toast.id)}
+              aria-label={t('toast.dismiss')}
             >
-              ✕
+              <span aria-hidden="true">×</span>
             </button>
           </div>
-        ))}
+          )
+        })}
       </div>
     </ToastContext.Provider>
   )

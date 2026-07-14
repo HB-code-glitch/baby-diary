@@ -55,8 +55,8 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
     date: fmt(birthPlusDays(birth, 21)),
     nameKo: '삼칠일',
     nameJa: '三七日（セイレ）',
-    descKo: '출생 21일째, 아기를 처음 외부에 공개하고 건강을 기원하는 날이에요',
-    descJa: '生後21日目、赤ちゃんを初めてお披露目し健康を祈る韓国の伝統です',
+    descKo: '출생 21일째를 기념해 아기의 건강을 기원해 온 한국 전통 행사예요',
+    descJa: '生後21日目を記念し、赤ちゃんの健康を願ってきた韓国の伝統行事です',
     culture: 'ko',
   })
 
@@ -80,8 +80,8 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
     date: fmt(birthPlusDays(birth, omiyamairOffset)),
     nameKo: '오미야마이리(첫 신사 참배)',
     nameJa: 'お宮参り',
-    descKo: '생후 한 달께 신사에서 탄생을 감사하고 성장을 기원하는 첫 외출 의례예요',
-    descJa: '生後約1ヶ月、神社に参拝して誕生を報告し健やかな成長を祈る行事です',
+    descKo: '생후 한 달께 신사에서 탄생을 알리고 성장을 기원하는 일본 전통 행사예요',
+    descJa: '生後約1ヶ月、神社で誕生を報告し健やかな成長を願う日本の伝統行事です',
     culture: 'ja',
   })
 
@@ -102,8 +102,8 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
     date: fmt(birthPlusMonths(birth, 6)),
     nameKo: '하프 버스데이',
     nameJa: 'ハーフバースデー',
-    descKo: '생후 6개월 기념 — 표정이 풍부해진 아기의 성장을 기록해요',
-    descJa: '生後6ヶ月のお祝い。成長の記録にぴったりの日です',
+    descKo: '생후 6개월을 축하하고 사진이나 메모로 기념하는 날이에요',
+    descJa: '生後6か月を祝い、写真やメモで記念する日です',
     culture: 'both',
   })
 
@@ -171,8 +171,8 @@ export function getMilestones(birthdate: string, gender?: 'girl' | 'boy'): Miles
         date: fmt(nov15),
         nameKo: '시치고산',
         nameJa: '七五三',
-        descKo: '만 3·5·7세 되는 해 11월 15일께 신사에서 성장을 감사하는 행사예요',
-        descJa: '3歳・5歳・7歳の11月15日頃、神社で成長を感謝する行事です',
+        descKo: '만 3·5·7세 되는 해 11월 15일께 신사에서 성장을 감사하는 일본 전통 행사예요',
+        descJa: '3歳・5歳・7歳の11月15日頃、神社で成長を感謝する日本の伝統行事です',
         culture: 'ja',
       })
     }

@@ -19,11 +19,13 @@ import {
   stop,
   restartSync,
   updateFamilyBabyInfo,
+  persistSettingsWithBabyInfoMutation,
   updateMemberEntry,
   DETAIL_FAMILY_GONE,
 } from './syncEngine'
 import { ipc } from '../lib/ipc'
 import { DiaryEvent } from '../../shared/types'
+import { startSyncFromAuthoritativeSettings } from './syncLifecycle'
 
 export type { SyncState }
 
@@ -52,17 +54,13 @@ export function useSyncLifecycle(): void {
     // 앱 설정을 읽어 configure → start
     // settings.firebase 가 null 이면 configure 내부에서 내장 기본 설정으로 폴백.
     // 덕분에 첫 설치에서도 바로 로그인/회원가입 화면으로 진입할 수 있음.
-    ipc.getSettings().then(async settings => {
-      await configure(settings.firebase, settings.familyId)
-      start()
-    }).catch(async () => {
+    void startSyncFromAuthoritativeSettings().catch(error => {
       // 설정 읽기 실패 시에도 기본 설정으로 configure
-      await configure(null, '')
-      start()
+      console.error('[syncLifecycle] startup failed:', error)
     })
 
     return () => {
-      stop()
+      void stop()
     }
   }, [])
 }
@@ -86,6 +84,7 @@ export {
   subscribeStatus,
   restartSync,
   updateFamilyBabyInfo,
+  persistSettingsWithBabyInfoMutation,
   updateMemberEntry,
   DETAIL_FAMILY_GONE,
 }

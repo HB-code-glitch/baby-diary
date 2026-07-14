@@ -98,9 +98,13 @@ describe('softDeleteAllEvents', () => {
     // ipc.appendEvent called once per event with deleted: true and rev bumped
     expect(mockAppendEvent).toHaveBeenCalledTimes(3)
     const calls = mockAppendEvent.mock.calls
-    expect(calls[0][0]).toMatchObject({ id: 'e1', deleted: true, rev: 2 })
-    expect(calls[1][0]).toMatchObject({ id: 'e2', deleted: true, rev: 3 })
-    expect(calls[2][0]).toMatchObject({ id: 'e3', deleted: true, rev: 2 })
+    expect(calls[0][0]).toMatchObject({ id: 'e1', deleted: true })
+    expect(calls[1][0]).toMatchObject({ id: 'e2', deleted: true })
+    expect(calls[2][0]).toMatchObject({ id: 'e3', deleted: true })
+    for (const [persisted] of calls as Array<[DiaryEvent]>) {
+      expect(persisted.rev).toBe(Date.parse(persisted.updatedAt))
+      expect(persisted.sync?.updatedAtMs).toBe(Date.parse(persisted.updatedAt))
+    }
     // enqueue called for each tombstone
     expect(mockEnqueue).toHaveBeenCalledTimes(3)
   })
@@ -173,11 +177,85 @@ describe('softDeleteAllEvents', () => {
     await useAppStore.getState().softDeleteAllEvents()
 
     const tombstone = mockAppendEvent.mock.calls[0][0] as DiaryEvent
-    expect(tombstone.rev).toBe(6)
+    expect(tombstone.rev).toBe(Date.parse(tombstone.updatedAt))
+    expect(tombstone.rev).toBeGreaterThan(event.rev)
+    expect(tombstone.sync?.updatedAtMs).toBe(Date.parse(tombstone.updatedAt))
     expect(tombstone.deleted).toBe(true)
     // enqueue receives the same tombstone object
     const enqueued = mockEnqueue.mock.calls[0][0] as DiaryEvent
-    expect(enqueued.rev).toBe(6)
+    expect(enqueued.rev).toBe(tombstone.rev)
     expect(enqueued.deleted).toBe(true)
+  })
+
+  it('creates one immutable mutation identity and enqueues the exact persisted tombstone', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const event = makeEvent({
+      id: 'mutation-check',
+      mutationId: '11111111-1111-4111-8111-111111111111',
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: '22222222-2222-5222-8222-222222222222',
+      },
+    })
+    useAppStore.setState({ events: [event] })
+
+    await useAppStore.getState().softDeleteAllEvents()
+
+    const persisted = mockAppendEvent.mock.calls[0][0] as DiaryEvent
+    const enqueued = mockEnqueue.mock.calls[0][0] as DiaryEvent
+    expect(persisted.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(persisted.mutationId).not.toBe(event.mutationId)
+    expect(persisted.migration).toBeUndefined()
+    expect(enqueued).toBe(persisted)
+  })
+
+  it('assigns a mutation identity to every newly added event path', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const legacyShapedNewEvent = makeEvent({ mutationId: undefined })
+
+    const added = await useAppStore.getState().addEvent(legacyShapedNewEvent)
+
+    expect(added.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(added.rev).toBe(Date.parse(added.updatedAt))
+    expect(added.sync?.updatedAtMs).toBe(Date.parse(added.updatedAt))
+    expect(mockAppendEvent.mock.calls[0][0]).toBe(added)
+    expect(mockEnqueue.mock.calls[0][0]).toBe(added)
+  })
+
+  it('gives every edit a fresh mutation identity', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const original = makeEvent({ mutationId: '11111111-1111-4111-8111-111111111111' })
+    useAppStore.setState({ events: [original] })
+
+    const edited = await useAppStore.getState().editEvent(original, { at: '2026-07-13T09:00:00.000Z' })
+
+    expect(edited.rev).toBe(Date.parse(edited.updatedAt))
+    expect(edited.rev).toBeGreaterThan(original.rev)
+    expect(edited.sync?.updatedAtMs).toBe(Date.parse(edited.updatedAt))
+    expect(edited.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(edited.mutationId).not.toBe(original.mutationId)
+    expect(mockAppendEvent.mock.calls[0][0]).toBe(edited)
+    expect(mockEnqueue.mock.calls[0][0]).toBe(edited)
+  })
+
+  it('starts an edited derivative as a fresh local source without rebinding provenance', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const original = makeEvent({
+      mutationId: '11111111-1111-5111-8111-111111111111',
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: '22222222-2222-5222-8222-222222222222',
+      },
+    })
+    useAppStore.setState({ events: [original] })
+
+    const edited = await useAppStore.getState().editEvent(original, { at: '2026-07-13T09:00:00.000Z' })
+
+    expect(edited.migration).toBeUndefined()
+    expect(original.migration).toBeDefined()
+    expect(mockAppendEvent.mock.calls[0][0]).toBe(edited)
+    expect(mockEnqueue.mock.calls[0][0]).toBe(edited)
   })
 })

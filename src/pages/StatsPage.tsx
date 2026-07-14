@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Legend, LineChart, Line,
+  ResponsiveContainer, Legend, LineChart, Line,
   ComposedChart, Scatter,
 } from 'recharts'
 import { subDays, format, parseISO, isSameDay, differenceInMonths } from 'date-fns'
@@ -492,12 +492,6 @@ export function StatsPage() {
                   contentStyle={TOOLTIP_STYLE}
                   formatter={(v: number) => [`${v}℃`, t('stats.tempTooltip')]}
                 />
-                <ReferenceLine
-                  y={37.5}
-                  stroke="var(--peach-400)"
-                  strokeDasharray="4 4"
-                  label={{ value: '37.5℃', position: 'right', fontSize: 11, fill: 'var(--peach-400)' }}
-                />
                 <Line
                   type="monotone"
                   dataKey="avgTemp"
@@ -509,6 +503,9 @@ export function StatsPage() {
                 />
               </LineChart>
             </ResponsiveContainer>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.4 }}>
+              {t('stats.tempContextNote')}
+            </div>
           </div>
         )
     }

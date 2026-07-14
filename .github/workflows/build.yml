@@ -1,23 +1,61 @@
 name: Build
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: [master, main]
     tags: ['v*']
+  pull_request:
+    branches: [master, main]
   workflow_dispatch:
+    inputs:
+      signed_package_dry_run:
+        description: Build, verify, install-smoke, and manifest signed packages without touching a GitHub release
+        type: boolean
+        required: false
+        default: false
 
 jobs:
+  security-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm run check
+      - name: Remove and verify Firestore emulator diagnostics
+        if: always()
+        shell: bash
+        run: |
+          rm -f firestore-debug.log
+          test ! -e firestore-debug.log
+
   build-mac:
+    needs: security-check
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.18.0'
           cache: 'npm'
       - run: npm ci
-      - run: npm test
-      # electron-builder는 CI에서 자동 게시를 시도함(GH_TOKEN 필요) — 아티팩트 업로드만 쓰므로 게시 비활성화
+      # This ordinary CI artifact is unsigned and is never consumed by the release jobs.
       - run: npm run build:mac -- --publish=never
       - uses: actions/upload-artifact@v4
         with:
@@ -28,21 +66,29 @@ jobs:
           if-no-files-found: error
 
   e2e-mac:
+    needs: security-check
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.18.0'
           cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
       - run: npm ci
       - run: npm run build
-      # Launch the unpacked universal app, not the development Electron entrypoint.
+      # Normal branch/PR E2E remains unsigned-capable.
       - run: npx electron-builder --mac --dir --universal --publish never
-      # playwright electron support is built-in — no browser download required
       - run: npm run test:e2e
         env:
           BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary
+      - run: npm run test:e2e:sync
+        timeout-minutes: 12
+        env:
+          BABYDIARY_SYNC_E2E_EXECUTABLE: ${{ github.workspace }}/release/mac-universal/Baby Diary.app/Contents/MacOS/Baby Diary
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -53,20 +99,40 @@ jobs:
           if-no-files-found: warn
 
   e2e-win:
+    needs: security-check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The installed regression fixture verifies exact v0.3.8 source bytes.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.18.0'
           cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
       - run: npm ci
       - run: npm run build
-      # Launch the unpacked x64 executable, not the development Electron entrypoint.
-      - run: npx electron-builder --win --dir --x64 --publish never
+      # Normal branch/PR E2E remains unsigned-capable.
+      - run: npx electron-builder --win nsis --x64 --publish never
       - run: npm run test:e2e
         env:
           BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
+      - run: npm run test:e2e:sync
+        timeout-minutes: 12
+        env:
+          BABYDIARY_SYNC_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
+      - name: Install and verify the unsigned Windows recovery regression package
+        shell: powershell
+        run: >-
+          ./scripts/windows-installed-release-smoke.ps1
+          -SetupPath "release/Baby Diary Setup $((Get-Content -Raw package.json | ConvertFrom-Json).version).exe"
+          -SignaturePolicy AllowUnsigned
+          -EvidenceDirectory ".artifacts/installed-release-smoke"
+        timeout-minutes: 20
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -74,43 +140,823 @@ jobs:
           path: |
             screenshots/
             e2e-result.json
+            .artifacts/installed-release-smoke/**
           if-no-files-found: warn
+          include-hidden-files: true
 
-  release-win:
-    runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+  release-context:
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    outputs:
+      version: ${{ steps.context.outputs.version }}
+      tag: ${{ steps.context.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.18.0'
+      - id: context
+        name: Bind signed packaging to source version and tag
+        shell: bash
+        run: >-
+          node -e "const fs=require('node:fs'); const {version}=require('./package.json');
+          const isTag=process.env.GITHUB_REF.startsWith('refs/tags/v');
+          const tag=isTag?process.env.GITHUB_REF_NAME:'v'+version;
+          if(isTag&&tag!=='v'+version) throw new Error('Release tag '+tag+' must equal v'+version);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'version='+version+'\ntag='+tag+'\n')"
+
+  baseline-v038:
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - name: Verify the pinned v0.3.8 source tag has not moved
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse v0.3.8^{commit})"
+          expected_sha="4ad44829c0de56da33d9123c16f92e6090f0df4a"
+          if [ "${actual_sha}" != "${expected_sha}" ]; then
+            echo "v0.3.8 tag moved from ${expected_sha} to ${actual_sha}" >&2
+            exit 1
+          fi
+      - name: Download and hard-verify the exact historical v0.3.8 release assets by asset ID
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p upgrade-baseline-v0.3.8
+          release_id=352876543
+          expected_tag='v0.3.8'
+          expected_published='2026-07-13T00:17:33Z'
+          release_json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/${release_id}")"
+          actual_tag="$(node -e 'console.log(JSON.parse(process.argv[1]).tag_name)' "${release_json}")"
+          actual_published="$(node -e 'console.log(JSON.parse(process.argv[1]).published_at)' "${release_json}")"
+          if [ "${actual_tag}" != "${expected_tag}" ] || [ "${actual_published}" != "${expected_published}" ]; then
+            echo "release ${release_id} tag or published-at metadata changed" >&2
+            exit 1
+          fi
+          verify_asset() {
+            local asset_id="$1" name="$2" size="$3" sha256="$4" out="$5"
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/octet-stream' \
+              "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/assets/${asset_id}" \
+              -o "${out}"
+            local actual_size actual_sha256
+            actual_size="$(stat -c%s "${out}")"
+            actual_sha256="$(sha256sum "${out}" | cut -d' ' -f1)"
+            if [ "${actual_size}" != "${size}" ] || [ "${actual_sha256}" != "${sha256}" ]; then
+              echo "asset ${asset_id} (${name}) failed exact size/SHA-256 verification" >&2
+              exit 1
+            fi
+          }
+          verify_asset 474870034 Baby-Diary-Setup-0.3.8.exe 233249330 \
+            edb3a3e2d036f0d16dc8d75948c3f160c35adc9d1277a3dedc41d8671bd6a6de \
+            upgrade-baseline-v0.3.8/Baby-Diary-Setup-0.3.8.exe
+          verify_asset 474869787 Baby-Diary-0.3.8-universal.dmg 351533375 \
+            2793e91c0dc49b436451f150ba0c8dc625cfd1a988841823a114d597e2f60974 \
+            upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg
+      # This job authenticates GitHub API reads with the workflow-scoped github.token only
+      # (never a signing or release-write secret) so the shared runner IP does not trip the
+      # unauthenticated 60 req/hr rate limit and fail this gate closed; the assets above are
+      # still the immutable public bytes already trusted by every v0.3.8 user, and are hard
+      # -verified below by exact size/SHA-256 regardless of how they were authenticated.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8/*
+          if-no-files-found: error
+          retention-days: 1
+
+  release-preflight:
+    needs: [security-check, release-context]
+    runs-on: ubuntu-latest
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
           cache: 'npm'
       - run: npm ci
-      - run: npm test
-      # NOTE: call electron-builder directly (not build:win) to skip the
-      # PowerShell shortcut script which is not needed for CI publishing.
-      - run: npm run build && npx electron-builder --win --publish always
+      - name: Verify release tag matches package version
+        run: >-
+          node -e "const { version } = require('./package.json');
+          const expected = 'v' + version;
+          const actual = process.env.GITHUB_REF_NAME;
+          if (actual !== expected) {
+          console.error('Release tag ' + actual + ' must equal ' + expected);
+          process.exit(1) }"
+      - name: Verify release upload target is absent or a private draft
+        run: |
+          set -euo pipefail
+          mkdir -p .release-provenance
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)"
+          if [ "${remote_sha}" != "${GITHUB_SHA}" ]; then
+            echo "Source tag ${GITHUB_REF_NAME} moved from ${GITHUB_SHA} to ${remote_sha}" >&2
+            exit 1
+          fi
+          gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
+            > .release-provenance/releases.json
+          node scripts/validate-release-assets.mjs --pre-upload \
+            --input .release-provenance/releases.json \
+            --plan .release-provenance/plan.json \
+            --notes .release-provenance/notes.txt \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --version "${{ needs.release-context.outputs.version }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          action="$(node -p "require('./.release-provenance/plan.json').action")"
+          if [ "${action}" = create ]; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo HB-code-glitch/baby-diary-releases \
+              --title "${GITHUB_REF_NAME}" \
+              --draft \
+              --notes-file .release-provenance/notes.txt
+          elif [ "${action}" != resume ]; then
+            echo "Unexpected release preparation action: ${action}" >&2
+            exit 1
+          fi
+          gh api --paginate --slurp "repos/HB-code-glitch/baby-diary-releases/releases?per_page=100" \
+            > .release-provenance/prepared-releases.json
+          node scripts/validate-release-assets.mjs --pre-upload \
+            --input .release-provenance/prepared-releases.json \
+            --plan .release-provenance/prepared-plan.json \
+            --notes .release-provenance/prepared-notes.txt \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --version "${{ needs.release-context.outputs.version }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          test "$(node -p "require('./.release-provenance/prepared-plan.json').action")" = resume
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+
+  package-mac:
+    needs: [security-check, release-context]
+    runs-on: macos-15
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - run: npm ci
+      - name: Fail closed on missing Mac release credentials
+        run: node scripts/platform-release-verification.mjs --platform mac --credentials-only
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_CSC_NAME: ${{ secrets.MAC_CSC_NAME }}
+          MAC_EXPECTED_TEAM_ID: ${{ secrets.MAC_EXPECTED_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Materialize App Store Connect API key
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY_ID}.p8"
+          APPLE_API_KEY_PATH="${key_path}" node -e "const fs=require('node:fs'); const bytes=Buffer.from(process.env.APPLE_API_KEY_BASE64,'base64'); const text=bytes.toString('utf8'); if(!text.includes('BEGIN PRIVATE KEY')) throw new Error('APPLE_API_KEY must be a base64-encoded App Store Connect .p8 key'); fs.writeFileSync(process.env.APPLE_API_KEY_PATH,bytes,{mode:0o600})"
+          echo "APPLE_API_KEY=${key_path}" >> "${GITHUB_ENV}"
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      - name: Build signed and notarized Mac packages once
+        run: npm run build && npx electron-builder --config electron-builder.release.cjs --mac --publish never
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_CSC_NAME: ${{ secrets.MAC_CSC_NAME }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Notarize and staple both final DMG containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(release/*.dmg)
+          if [ "${#dmgs[@]}" -ne 2 ]; then
+            echo "Expected exactly two Mac DMGs, found ${#dmgs[@]}" >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            xcrun notarytool submit "${dmg}" \
+              --key "${APPLE_API_KEY}" \
+              --key-id "${APPLE_API_KEY_ID}" \
+              --issuer "${APPLE_API_ISSUER}" \
+              --wait
+            xcrun stapler staple "${dmg}"
+          done
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Rebuild update metadata from the final stapled DMG bytes
+        run: >-
+          node scripts/refresh-mac-update-metadata.mjs --release-dir release
+          --version "${{ needs.release-context.outputs.version }}"
+      - name: Hard-verify final signed Mac package bytes
+        run: >-
+          node scripts/platform-release-verification.mjs --platform mac
+          --release-dir release --version "${{ needs.release-context.outputs.version }}"
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_CSC_NAME: ${{ secrets.MAC_CSC_NAME }}
+          MAC_EXPECTED_TEAM_ID: ${{ secrets.MAC_EXPECTED_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  package-win:
+    needs: [security-check, release-context]
+    runs-on: windows-latest
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - run: npm ci
+      - name: Fail closed on missing Windows release credentials
+        run: node scripts/platform-release-verification.mjs --platform windows --credentials-only
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
+      - name: Build signed Windows packages once
+        run: npm run build && npx electron-builder --config electron-builder.release.cjs --win --publish never
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+      - name: Hard-verify final signed Windows package bytes
+        run: >-
+          node scripts/platform-release-verification.mjs --platform windows
+          --release-dir release --version "${{ needs.release-context.outputs.version }}"
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+            release/win-unpacked/**
+          if-no-files-found: error
+          retention-days: 1
+
+  upgrade-win:
+    needs: [release-context, package-win, baseline-v038]
+    runs-on: windows-latest
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8
+      - name: Bind the signed candidate Setup to its release-asset identity and provenance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ needs.release-context.outputs.version }}'
+          $raw = "release/Baby Diary Setup $version.exe"
+          $candidateDir = 'upgrade-baseline-v0.3.8/candidate'
+          New-Item -ItemType Directory -Force -Path $candidateDir | Out-Null
+          $candidatePath = Join-Path $candidateDir "Baby-Diary-Setup-$version.exe"
+          Copy-Item -LiteralPath $raw -Destination $candidatePath
+          $sha256 = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $provenance = [ordered]@{
+            schemaVersion = 1
+            repository = '${{ github.repository }}'
+            workflowRunId = '${{ github.run_id }}'
+            sourceSha = '${{ github.sha }}'
+            releaseTag = '${{ needs.release-context.outputs.tag }}'
+            appVersion = $version
+            platform = 'windows-x64'
+            artifactName = "Baby-Diary-Setup-$version.exe"
+            artifactSha256 = $sha256
+          }
+          $provenancePath = (Resolve-Path 'upgrade-baseline-v0.3.8').Path + '\candidate-provenance.json'
+          ($provenance | ConvertTo-Json) | Set-Content -LiteralPath $provenancePath -Encoding utf8
+          "CANDIDATE_SETUP_PATH=$((Resolve-Path $candidatePath).Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_PACKAGE_SHA256=$sha256" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_PROVENANCE_PATH=$provenancePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prepare the exact v0.3.8 Firestore rules workspace for this run
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runId = [guid]::NewGuid().ToString('N')
+          $rulesRoot = Join-Path $env:RUNNER_TEMP "baby-diary-upgrade-rules-$runId"
+          New-Item -ItemType Directory -Force -Path $rulesRoot | Out-Null
+          node scripts/upgrade-firestore-rules.mjs prepare --root $rulesRoot --run-id $runId --candidate-source-sha '${{ github.sha }}'
+          "BABYDIARY_UPGRADE_RULES_ROOT=$rulesRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BABYDIARY_UPGRADE_RULES_RUN_ID=$runId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run the signed Windows in-place upgrade gate inside one Auth/Firestore emulator process
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inner = 'powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows-in-place-upgrade-smoke.ps1' `
+            + " -BaselineSetupPath upgrade-baseline-v0.3.8/Baby-Diary-Setup-0.3.8.exe" `
+            + " -CandidateSetupPath `"$env:CANDIDATE_SETUP_PATH`"" `
+            + " -ExpectedPublisher `"$env:WIN_EXPECTED_PUBLISHER`"" `
+            + " -ExpectedCertificateSha256 $env:WIN_EXPECTED_CERT_SHA256" `
+            + " -CandidateSourceSha ${{ github.sha }}" `
+            + " -CandidatePackageSha256 $env:CANDIDATE_PACKAGE_SHA256" `
+            + " -CandidateProvenancePath `"$env:CANDIDATE_PROVENANCE_PATH`"" `
+            + " -ExpectedRepository ${{ github.repository }}" `
+            + " -ExpectedWorkflowRunId ${{ github.run_id }}"
+          npx --no-install firebase-tools emulators:exec --project demo-baby-diary --only auth,firestore $inner
+        env:
+          WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
+          BABYDIARY_UPGRADE_FIREBASE_EMULATOR: '1'
+          BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID: demo-baby-diary
+
+  upgrade-mac-arm64:
+    needs: [release-context, package-mac, baseline-v038]
+    runs-on: macos-15
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8
+      - name: Bind the signed candidate DMG to its release-asset identity and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.release-context.outputs.version }}'
+          mkdir -p upgrade-baseline-v0.3.8/candidate
+          candidate_path="upgrade-baseline-v0.3.8/candidate/Baby-Diary-${version}-universal.dmg"
+          cp "release/Baby Diary-${version}-universal.dmg" "${candidate_path}"
+          sha256="$(shasum -a 256 "${candidate_path}" | cut -d' ' -f1)"
+          provenance_path="$(pwd)/upgrade-baseline-v0.3.8/candidate-provenance.json"
+          node -e "const fs=require('node:fs');fs.writeFileSync(process.argv[1], JSON.stringify({schemaVersion:1,repository:process.argv[2],workflowRunId:process.argv[3],sourceSha:process.argv[4],releaseTag:process.argv[5],appVersion:process.argv[6],platform:'mac-universal',artifactName:process.argv[7],artifactSha256:process.argv[8]}))" \
+            "${provenance_path}" "${{ github.repository }}" "${{ github.run_id }}" "${{ github.sha }}" \
+            "${{ needs.release-context.outputs.tag }}" "${version}" "Baby-Diary-${version}-universal.dmg" "${sha256}"
+          {
+            echo "CANDIDATE_DMG_PATH=$(pwd)/${candidate_path}"
+            echo "CANDIDATE_PACKAGE_SHA256=${sha256}"
+            echo "CANDIDATE_PROVENANCE_PATH=${provenance_path}"
+          } >> "$GITHUB_ENV"
+      - name: Prepare the exact v0.3.8 Firestore rules workspace for this run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+          rules_root="${RUNNER_TEMP}/baby-diary-upgrade-rules-${run_id}"
+          mkdir -p "${rules_root}"
+          node scripts/upgrade-firestore-rules.mjs prepare --root "${rules_root}" --run-id "${run_id}" --candidate-source-sha "${{ github.sha }}"
+          {
+            echo "BABYDIARY_UPGRADE_RULES_ROOT=${rules_root}"
+            echo "BABYDIARY_UPGRADE_RULES_RUN_ID=${run_id}"
+          } >> "$GITHUB_ENV"
+      - name: Run the signed Apple Silicon in-place upgrade gate inside one Auth/Firestore emulator process
+        shell: bash
+        run: |
+          set -euo pipefail
+          inner="bash ./scripts/mac-in-place-upgrade-smoke.sh --baseline-dmg upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg --candidate-dmg \"${CANDIDATE_DMG_PATH}\" --expected-host-arch arm64 --expected-team-id \"${MAC_EXPECTED_TEAM_ID}\" --candidate-source-sha ${{ github.sha }} --candidate-package-sha256 ${CANDIDATE_PACKAGE_SHA256} --candidate-provenance \"${CANDIDATE_PROVENANCE_PATH}\" --expected-repository ${{ github.repository }} --expected-workflow-run-id ${{ github.run_id }}"
+          npx --no-install firebase-tools emulators:exec --project demo-baby-diary --only auth,firestore "${inner}"
+        env:
+          MAC_EXPECTED_TEAM_ID: ${{ secrets.MAC_EXPECTED_TEAM_ID }}
+          BABYDIARY_UPGRADE_FIREBASE_EMULATOR: '1'
+          BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID: demo-baby-diary
+
+  upgrade-mac-intel:
+    needs: [release-context, package-mac, baseline-v038]
+    runs-on: macos-15-intel
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8
+      - name: Bind the signed candidate DMG to its release-asset identity and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.release-context.outputs.version }}'
+          mkdir -p upgrade-baseline-v0.3.8/candidate
+          candidate_path="upgrade-baseline-v0.3.8/candidate/Baby-Diary-${version}-universal.dmg"
+          cp "release/Baby Diary-${version}-universal.dmg" "${candidate_path}"
+          sha256="$(shasum -a 256 "${candidate_path}" | cut -d' ' -f1)"
+          provenance_path="$(pwd)/upgrade-baseline-v0.3.8/candidate-provenance.json"
+          node -e "const fs=require('node:fs');fs.writeFileSync(process.argv[1], JSON.stringify({schemaVersion:1,repository:process.argv[2],workflowRunId:process.argv[3],sourceSha:process.argv[4],releaseTag:process.argv[5],appVersion:process.argv[6],platform:'mac-universal',artifactName:process.argv[7],artifactSha256:process.argv[8]}))" \
+            "${provenance_path}" "${{ github.repository }}" "${{ github.run_id }}" "${{ github.sha }}" \
+            "${{ needs.release-context.outputs.tag }}" "${version}" "Baby-Diary-${version}-universal.dmg" "${sha256}"
+          {
+            echo "CANDIDATE_DMG_PATH=$(pwd)/${candidate_path}"
+            echo "CANDIDATE_PACKAGE_SHA256=${sha256}"
+            echo "CANDIDATE_PROVENANCE_PATH=${provenance_path}"
+          } >> "$GITHUB_ENV"
+      - name: Prepare the exact v0.3.8 Firestore rules workspace for this run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+          rules_root="${RUNNER_TEMP}/baby-diary-upgrade-rules-${run_id}"
+          mkdir -p "${rules_root}"
+          node scripts/upgrade-firestore-rules.mjs prepare --root "${rules_root}" --run-id "${run_id}" --candidate-source-sha "${{ github.sha }}"
+          {
+            echo "BABYDIARY_UPGRADE_RULES_ROOT=${rules_root}"
+            echo "BABYDIARY_UPGRADE_RULES_RUN_ID=${run_id}"
+          } >> "$GITHUB_ENV"
+      - name: Run the signed Intel in-place upgrade gate inside one Auth/Firestore emulator process
+        shell: bash
+        run: |
+          set -euo pipefail
+          inner="bash ./scripts/mac-in-place-upgrade-smoke.sh --baseline-dmg upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg --candidate-dmg \"${CANDIDATE_DMG_PATH}\" --expected-host-arch x86_64 --expected-team-id \"${MAC_EXPECTED_TEAM_ID}\" --candidate-source-sha ${{ github.sha }} --candidate-package-sha256 ${CANDIDATE_PACKAGE_SHA256} --candidate-provenance \"${CANDIDATE_PROVENANCE_PATH}\" --expected-repository ${{ github.repository }} --expected-workflow-run-id ${{ github.run_id }}"
+          npx --no-install firebase-tools emulators:exec --project demo-baby-diary --only auth,firestore "${inner}"
+        env:
+          MAC_EXPECTED_TEAM_ID: ${{ secrets.MAC_EXPECTED_TEAM_ID }}
+          BABYDIARY_UPGRADE_FIREBASE_EMULATOR: '1'
+          BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID: demo-baby-diary
+
+  smoke-mac-arm64:
+    needs: [release-context, package-mac]
+    runs-on: macos-15
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Install and exercise the universal DMG on Apple Silicon
+        run: >-
+          bash scripts/mac-installed-release-smoke.sh
+          "release/Baby Diary-${{ needs.release-context.outputs.version }}-universal.dmg"
+          arm64
+        timeout-minutes: 20
+
+  smoke-mac-intel:
+    needs: [release-context, package-mac]
+    runs-on: macos-15-intel
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Install and exercise the universal DMG on Intel
+        run: >-
+          bash scripts/mac-installed-release-smoke.sh
+          "release/Baby Diary-${{ needs.release-context.outputs.version }}-universal.dmg"
+          x86_64
+        timeout-minutes: 20
+
+  smoke-win:
+    needs: [release-context, package-win]
+    runs-on: windows-latest
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Silent-install, exercise, and uninstall the signed Setup
+        shell: powershell
+        run: >-
+          ./scripts/windows-installed-release-smoke.ps1
+          -SetupPath "release/Baby Diary Setup ${{ needs.release-context.outputs.version }}.exe"
+          -SignaturePolicy RequireTrusted
+          -ExpectedPublisher "${env:WIN_EXPECTED_PUBLISHER}"
+          -ExpectedCertificateSha256 "${env:WIN_EXPECTED_CERT_SHA256}"
+        timeout-minutes: 20
+        env:
+          WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
+
+  manifest-mac:
+    needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win, upgrade-win, upgrade-mac-arm64, upgrade-mac-intel]
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Create the Mac manifest only after every install smoke passes
+        run: >-
+          node scripts/create-release-manifest.mjs --platform mac
+          --source-dir release --staging-dir release-upload
+          --manifest release-manifest/mac.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ needs.release-context.outputs.tag }}" --sha "${{ github.sha }}"
+          --version "${{ needs.release-context.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest/mac.json
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest-win:
+    needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win, upgrade-win, upgrade-mac-arm64, upgrade-mac-intel]
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Create the Windows manifest only after every install smoke passes
+        run: >-
+          node scripts/create-release-manifest.mjs --platform windows
+          --source-dir release --staging-dir release-upload
+          --manifest release-manifest/windows.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ needs.release-context.outputs.tag }}" --sha "${{ github.sha }}"
+          --version "${{ needs.release-context.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest/windows.json
+          if-no-files-found: error
+          retention-days: 1
 
   release-mac:
-    runs-on: macos-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - security-check
+      - release-context
+      - release-preflight
+      - e2e-mac
+      - e2e-win
+      - package-mac
+      - package-win
+      - upgrade-win
+      - upgrade-mac-arm64
+      - upgrade-mac-intel
+      - smoke-mac-arm64
+      - smoke-mac-intel
+      - smoke-win
+      - manifest-mac
+    runs-on: ubuntu-latest
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.18.0'
           cache: 'npm'
       - run: npm ci
-      - run: npm test
-      # 컴파일(dist + dist-electron) 없이 패키징하면 entry file 부재로 실패함
-      - run: npm run build && npx electron-builder --mac --publish always
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verified-manifest
+      - name: Recreate and compare the Mac manifest from the same signed package artifact
+        run: |
+          node scripts/create-release-manifest.mjs --platform mac \
+            --source-dir release --staging-dir release-upload \
+            --manifest release-manifest/mac.json \
+            --source-repository "${{ github.repository }}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${{ needs.release-context.outputs.tag }}" --sha "${{ github.sha }}" \
+            --version "${{ needs.release-context.outputs.version }}" \
+            --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+          node -e "const fs=require('node:fs'); const expected=fs.readFileSync(process.argv[1]); const actual=fs.readFileSync(process.argv[2]); if(Buffer.compare(expected,actual)!==0) throw new Error('Mac manifest changed between smoke and upload')" verified-manifest/mac.json release-manifest/mac.json
+      - name: Revalidate and upload the exact Mac set by immutable release ID
+        run: >-
+          node scripts/upload-release-assets.mjs --platform mac
+          --staging-dir release-upload --manifest release-manifest/mac.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ needs.release-context.outputs.tag }}" --sha "${{ github.sha }}"
+          --version "${{ needs.release-context.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-      # 엄마용 쉬운 이름 사본 — 고정 링크(/releases/latest/download/INSTALL-ME-BabyDiary-Mac.dmg)용
-      - run: |
-          cp release/*universal.dmg INSTALL-ME-BabyDiary-Mac.dmg
-          gh release upload "${GITHUB_REF_NAME}" INSTALL-ME-BabyDiary-Mac.dmg --repo HB-code-glitch/baby-diary-releases --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest/mac.json
+          if-no-files-found: error
+          retention-days: 1
+
+  release-win:
+    needs:
+      - security-check
+      - release-context
+      - release-preflight
+      - e2e-mac
+      - e2e-win
+      - package-mac
+      - package-win
+      - upgrade-win
+      - upgrade-mac-arm64
+      - upgrade-mac-intel
+      - smoke-mac-arm64
+      - smoke-mac-intel
+      - smoke-win
+      - manifest-win
+    runs-on: ubuntu-latest
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verified-manifest
+      - name: Recreate and compare the Windows manifest from the same signed package artifact
+        run: |
+          node scripts/create-release-manifest.mjs --platform windows \
+            --source-dir release --staging-dir release-upload \
+            --manifest release-manifest/windows.json \
+            --source-repository "${{ github.repository }}" \
+            --release-repository "HB-code-glitch/baby-diary-releases" \
+            --tag "${{ needs.release-context.outputs.tag }}" --sha "${{ github.sha }}" \
+            --version "${{ needs.release-context.outputs.version }}" \
+            --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+          node -e "const fs=require('node:fs'); const expected=fs.readFileSync(process.argv[1]); const actual=fs.readFileSync(process.argv[2]); if(Buffer.compare(expected,actual)!==0) throw new Error('Windows manifest changed between smoke and upload')" verified-manifest/windows.json release-manifest/windows.json
+      - name: Revalidate and upload the exact Windows set by immutable release ID
+        run: >-
+          node scripts/upload-release-assets.mjs --platform windows
+          --staging-dir release-upload --manifest release-manifest/windows.json
+          --source-repository "${{ github.repository }}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${{ needs.release-context.outputs.tag }}" --sha "${{ github.sha }}"
+          --version "${{ needs.release-context.outputs.version }}"
+          --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest/windows.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-release:
+    needs: [security-check, build-mac, release-win, release-mac]
+    runs-on: ubuntu-latest
+    environment: platform-release-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-manifest-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifests
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-manifest-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifests
+      - name: Validate, re-fetch, and publish the same immutable release once
+        run: >-
+          node scripts/publish-verified-release.mjs
+          --manifests-dir release-manifests
+          --source-repository "${GITHUB_REPOSITORY}"
+          --release-repository "HB-code-glitch/baby-diary-releases"
+          --tag "${GITHUB_REF_NAME}" --sha "${GITHUB_SHA}"
+          --version "$(node -p "require('./package.json').version")"
+          --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}

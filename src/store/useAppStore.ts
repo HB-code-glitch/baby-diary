@@ -1,10 +1,15 @@
 import { create } from 'zustand'
 import { DiaryEvent, AppSettings, DataInfo, EventType, BreastData, FormulaData, SleepData, GrowthData } from '../../shared/types'
 import { ipc } from '../lib/ipc'
-import { enqueue } from '../sync/syncEngine'
+import { enqueue, persistSettingsWithBabyInfoMutation } from '../sync/syncEngine'
+import type { BabyInfoPersistenceResult } from '../sync/babyInfoSync'
 import { v4 as uuidv4 } from 'uuid'
 import { format, isToday, parseISO, startOfDay, isSameDay } from 'date-fns'
 import i18n from '../i18n'
+import { isEventAtOrBefore, sortEventsNewestFirst } from '../lib/eventTime'
+import { mergeResolvedEvent } from '../../shared/eventResolver'
+import { createEventSyncMetadata } from '../../shared/cloudEventPayload'
+import { nextHybridLogicalClock } from '../../shared/hybridLogicalClock'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,10 +17,43 @@ import i18n from '../i18n'
 
 function now() { return new Date().toISOString() }
 
+let settingsBridgeUnsubscribe: (() => void) | undefined
+let settingsBridgeGeneration = 0
+let lastSettingsSequence = 0
+let settingsBroadcastEpoch = 0
+let eventBridgeUnsubscribe: (() => void) | undefined
+let eventBridgeGeneration = 0
+
+export function disposeAppStoreSettingsBridge(): void {
+  settingsBridgeGeneration += 1
+  settingsBridgeUnsubscribe?.()
+  settingsBridgeUnsubscribe = undefined
+  lastSettingsSequence = 0
+}
+
+export function disposeAppStoreEventBridge(): void {
+  eventBridgeGeneration += 1
+  eventBridgeUnsubscribe?.()
+  eventBridgeUnsubscribe = undefined
+}
+
+function installAppStoreSettingsBridge(): void {
+  disposeAppStoreSettingsBridge()
+  const generation = settingsBridgeGeneration
+  settingsBridgeUnsubscribe = ipc.onSettingsChanged(payload => {
+    if (generation !== settingsBridgeGeneration) return
+    if (!Number.isSafeInteger(payload.sequence) || payload.sequence <= lastSettingsSequence) return
+    lastSettingsSequence = payload.sequence
+    settingsBroadcastEpoch += 1
+    useAppStore.setState({ settings: payload.settings })
+  })
+}
+
 function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): DiaryEvent {
   const t = now()
-  return {
+  const event: DiaryEvent = {
     id: uuidv4(),
+    mutationId: uuidv4(),
     type,
     at: t,
     data: {} as DiaryEvent['data'],
@@ -26,9 +64,10 @@ function makeBase(settings: AppSettings | null, type: DiaryEvent['type']): Diary
     },
     createdAt: t,
     updatedAt: t,
-    rev: 1,
+    rev: nextHybridLogicalClock(0, Date.parse(t)),
     deleted: false,
   }
+  return { ...event, sync: createEventSyncMetadata(event) }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +117,8 @@ interface AppState {
   todaySleepMinutes: () => number
 
   // Settings
-  saveSettings: (s: AppSettings) => Promise<void>
+  saveSettings: (s: AppSettings) => Promise<AppSettings>
+  saveSettingsWithBabyInfoMutation: (s: AppSettings) => Promise<BabyInfoPersistenceResult>
 
   // External event merge (from sync)
   mergeExternalEvent: (event: DiaryEvent) => void
@@ -111,9 +151,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadSettings: async () => {
+    const startingEpoch = settingsBroadcastEpoch
     try {
       const settings = await ipc.getSettings()
-      set({ settings })
+      if (startingEpoch === settingsBroadcastEpoch) set({ settings })
     } catch (err) {
       set({ error: String(err) })
     }
@@ -129,19 +170,55 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   init: async () => {
-    const { loadEvents, loadSettings, loadDataInfo } = get()
-    // P13: Wait for ALL three loaders before setting isReady so birthdate-derived
-    // render sites (D+, milestone banners, InsightsPanel) never see stale/null
-    // settings while events have already resolved.
-    await Promise.all([loadEvents(), loadSettings(), loadDataInfo()])
-    set({ isReady: true })
+    installAppStoreSettingsBridge()
+    disposeAppStoreEventBridge()
+    const generation = eventBridgeGeneration
+    const bufferedEvents: DiaryEvent[] = []
+    let initializationCommitted = false
 
-    // Subscribe to external events appended by main/sync
-    if (typeof window !== 'undefined' && window.babyDiary) {
-      ipc.onEventAppended((event) => {
-        get().mergeExternalEvent(event)
-      })
+    // Subscribe first. Every append that races the initial disk read is held
+    // until the list result and the other startup state can commit atomically.
+    eventBridgeUnsubscribe = ipc.onEventAppended(event => {
+      if (generation !== eventBridgeGeneration) return
+      if (!initializationCommitted) {
+        bufferedEvents.push(event)
+        return
+      }
+      get().mergeExternalEvent(event)
+    })
+
+    const startingSettingsEpoch = settingsBroadcastEpoch
+    set({ isLoading: true, isReady: false, error: null })
+    const [eventsResult, settingsResult, dataInfoResult] = await Promise.allSettled([
+      ipc.listEvents(),
+      ipc.getSettings(),
+      ipc.getDataInfo(),
+    ])
+    if (generation !== eventBridgeGeneration) return
+
+    let events = eventsResult.status === 'fulfilled'
+      ? eventsResult.value.reduce<DiaryEvent[]>(mergeEventIntoList, [])
+      : get().events
+    for (const event of bufferedEvents) events = mergeEventIntoList(events, event)
+    bufferedEvents.length = 0
+    initializationCommitted = true
+
+    const error = eventsResult.status === 'rejected'
+      ? String(eventsResult.reason)
+      : settingsResult.status === 'rejected'
+        ? String(settingsResult.reason)
+        : null
+    const nextState: Partial<AppState> = {
+      events,
+      isLoading: false,
+      isReady: true,
+      error,
     }
+    if (settingsResult.status === 'fulfilled' && startingSettingsEpoch === settingsBroadcastEpoch) {
+      nextState.settings = settingsResult.value
+    }
+    if (dataInfoResult.status === 'fulfilled') nextState.dataInfo = dataInfoResult.value
+    set(nextState)
   },
 
   // -----------------------------------------------------------------------
@@ -157,23 +234,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   // at write time in the user's local timezone) and group by that field instead.
   // ─────────────────────────────────────────────────────────────────────────
   todayEvents: () => {
-    return get().events
-      .filter(e => !e.deleted && isToday(parseISO(e.at)))
-      .sort((a, b) => b.at.localeCompare(a.at))
+    return sortEventsNewestFirst(
+      get().events.filter(e => !e.deleted && isToday(parseISO(e.at))),
+    )
   },
 
   eventsForDay: (date: Date) => {
     const day = startOfDay(date)
-    return get().events
-      .filter(e => !e.deleted && isSameDay(parseISO(e.at), day))
-      .sort((a, b) => b.at.localeCompare(a.at))
+    return sortEventsNewestFirst(
+      get().events.filter(e => !e.deleted && isSameDay(parseISO(e.at), day)),
+    )
   },
 
   lastFeeding: () => {
-    const nowIso = new Date().toISOString()
-    const feedings = get().events
-      .filter(e => !e.deleted && (e.type === 'breast' || e.type === 'formula') && e.at <= nowIso)
-      .sort((a, b) => b.at.localeCompare(a.at))
+    const feedings = sortEventsNewestFirst(get().events.filter(e =>
+      !e.deleted
+      && (e.type === 'breast' || e.type === 'formula')
+      && isEventAtOrBefore(e.at, Date.now()),
+    ))
     return feedings[0] ?? null
   },
 
@@ -202,7 +280,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   addEvent: async (event: DiaryEvent) => {
-    const result = await ipc.appendEvent(event)
+    const identified = event.mutationId ? event : { ...event, mutationId: uuidv4() }
+    const updatedAtMs = Date.parse(identified.updatedAt)
+    const baseMutation: DiaryEvent = {
+      ...identified,
+      rev: Math.max(identified.rev, nextHybridLogicalClock(0, updatedAtMs)),
+    }
+    const mutation: DiaryEvent = {
+      ...baseMutation,
+      sync: createEventSyncMetadata(baseMutation),
+    }
+    const result = await ipc.appendEvent(mutation)
     if (result === 'error') {
       throw new Error('append_failed')
     }
@@ -210,11 +298,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     // via _seenFromRemote — no re-upload loop.
     // 'duplicate' means the event is already on disk; still merge into UI state
     // and enqueue so a previous sync gap can be filled.
-    enqueue(event)
+    enqueue(mutation)
     set(state => ({
-      events: mergeEventIntoList(state.events, event),
+      events: mergeEventIntoList(state.events, mutation),
     }))
-    return event
+    return mutation
   },
 
   editEvent: async (original: DiaryEvent, patch) => {
@@ -223,12 +311,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     // while the modal was open — prevents the edit being silently dropped by
     // mergeEventIntoList (incoming.rev not > existing.rev).
     const liveRev = get().events.find(e => e.id === original.id)?.rev ?? original.rev
-    const safeRev = Math.max(original.rev, liveRev) + 1
-    const updated: DiaryEvent = {
-      ...original,
+    const { migration: _priorMigration, ...freshSource } = original
+    const baseUpdated: DiaryEvent = {
+      ...freshSource,
       ...patch,
       updatedAt: t,
-      rev: safeRev,
+      rev: nextHybridLogicalClock(Math.max(original.rev, liveRev), Date.parse(t)),
+      mutationId: uuidv4(),
+    }
+    const updated: DiaryEvent = {
+      ...baseUpdated,
+      sync: createEventSyncMetadata(baseUpdated),
     }
     const result = await ipc.appendEvent(updated)
     if (result === 'error') {
@@ -251,22 +344,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     let count = 0
     let partial = false
     for (const event of targets) {
-      const result = await ipc.appendEvent({
-        ...event,
+      const updatedAt = now()
+      const { migration: _priorMigration, ...freshSource } = event
+      const baseTombstone: DiaryEvent = {
+        ...freshSource,
         deleted: true,
-        updatedAt: now(),
-        rev: event.rev + 1,
-      })
+        updatedAt,
+        rev: nextHybridLogicalClock(event.rev, Date.parse(updatedAt)),
+        mutationId: uuidv4(),
+      }
+      const tombstone: DiaryEvent = {
+        ...baseTombstone,
+        sync: createEventSyncMetadata(baseTombstone),
+      }
+      const result = await ipc.appendEvent(tombstone)
       if (result === 'error') {
         // P12(a): abort on first error; record partial state flag
         partial = true
         break
-      }
-      const tombstone: DiaryEvent = {
-        ...event,
-        deleted: true,
-        updatedAt: new Date().toISOString(),
-        rev: event.rev + 1,
       }
       enqueue(tombstone)
       set(state => ({
@@ -349,8 +444,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   saveSettings: async (s: AppSettings) => {
-    await ipc.saveSettings(s)
-    set({ settings: s })
+    const saved = await ipc.saveSettings(s)
+    set({ settings: saved })
+    return saved
+  },
+
+  saveSettingsWithBabyInfoMutation: async (s: AppSettings) => {
+    const result = await persistSettingsWithBabyInfoMutation(s)
+    set({ settings: result.settings })
+    return result
   },
 
   // -----------------------------------------------------------------------
@@ -365,26 +467,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 }))
 
 // ---------------------------------------------------------------------------
-// Merge helper (id+rev conflict resolution: higher rev wins)
+// Merge helper (shared deterministic mutation conflict resolution)
 // ---------------------------------------------------------------------------
 function mergeEventIntoList(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
-  const idx = list.findIndex(e => e.id === incoming.id)
-  if (idx === -1) {
-    return [...list, incoming]
-  }
-  const existing = list[idx]
-  if (incoming.rev > existing.rev) {
-    const next = [...list]
-    next[idx] = incoming
-    return next
-  }
-  // P3 defense-in-depth: at equal rev, prefer deleted:true (tombstone wins)
-  if (incoming.rev === existing.rev && incoming.deleted && !existing.deleted) {
-    const next = [...list]
-    next[idx] = incoming
-    return next
-  }
-  return list
+  return mergeResolvedEvent(list, incoming)
+}
+
+const appStoreHot = (import.meta as ImportMeta & {
+  hot?: { dispose: (callback: () => void) => void }
+}).hot
+if (appStoreHot) {
+  appStoreHot.dispose(() => {
+    disposeAppStoreEventBridge()
+    disposeAppStoreSettingsBridge()
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +520,7 @@ export function formatEventValue(e: DiaryEvent): string {
     }
     case 'formula': {
       const d = e.data as { ml: number }
-      return `${d.ml}ml`
+      return `${d.ml}mL`
     }
     case 'diary': {
       const d = e.data as { title?: string; text: string }

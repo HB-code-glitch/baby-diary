@@ -4,7 +4,13 @@ import {
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, restartSync, signIn, signUp, signOutSync, createFamily, joinFamily, DETAIL_FAMILY_GONE } from '../sync/useSync'
-import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN, ERR_PERMISSION_DENIED } from '../sync/syncEngine'
+import {
+  DETAIL_FAMILY_ACCESS_UNCERTAIN,
+  DETAIL_FAMILY_NEEDED,
+  DETAIL_FAMILY_NOT_FOUND,
+  ERR_NOT_SIGNED_IN,
+  ERR_PERMISSION_DENIED,
+} from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
@@ -115,6 +121,7 @@ function SignedOutView() {
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [keepLoggedIn, setKeepLoggedIn] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { settings, saveSettings } = useAppStore()
@@ -126,8 +133,8 @@ function SignedOutView() {
     setBusy(true)
     try {
       const user = mode === 'login'
-        ? await signIn(email, password)
-        : await signUp(email, password)
+        ? await signIn(email, password, keepLoggedIn)
+        : await signUp(email, password, keepLoggedIn)
 
       // Persist the real Firebase uid into settings.profile so that future
       // events and family membership use the authoritative uid, not the
@@ -167,8 +174,9 @@ function SignedOutView() {
         </span>
       </div>
 
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <form data-sync-auth-form={mode} onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <input
+          data-sync-email
           type="email"
           className="input-field"
           placeholder={t('sync.emailPlaceholder')}
@@ -178,6 +186,7 @@ function SignedOutView() {
           autoComplete="email"
         />
         <input
+          data-sync-password
           type="password"
           className="input-field"
           placeholder={mode === 'signup' ? t('sync.passwordSignupPlaceholder') : t('sync.passwordPlaceholder')}
@@ -186,6 +195,58 @@ function SignedOutView() {
           required
           autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
         />
+        <label
+          data-sync-keep-logged-in-hit-target
+          style={{
+            display: 'block',
+            minHeight: 40,
+            boxSizing: 'border-box',
+            background: 'var(--cream-100)',
+            border: '1px solid var(--stone-200)',
+            borderRadius: 10,
+            padding: '10px 12px',
+            cursor: 'pointer',
+          }}
+        >
+          <span style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 9,
+            color: 'var(--stone-700)',
+            fontSize: 12,
+            fontWeight: 600,
+          }}>
+            <input
+              data-sync-keep-logged-in
+              type="checkbox"
+              name="keepLoggedIn"
+              checked={keepLoggedIn}
+              onChange={e => setKeepLoggedIn(e.target.checked)}
+              aria-labelledby="sync-keep-logged-in-label"
+              aria-describedby="sync-keep-logged-in-help"
+              style={{
+                width: 16,
+                height: 16,
+                margin: 0,
+                flexShrink: 0,
+                accentColor: 'var(--peach-500)',
+              }}
+            />
+            <span id="sync-keep-logged-in-label">{t('sync.keepLoggedIn')}</span>
+          </span>
+          <span
+            id="sync-keep-logged-in-help"
+            style={{
+              display: 'block',
+              margin: '4px 0 0 25px',
+              color: 'var(--stone-500)',
+              fontSize: 11,
+              lineHeight: 1.5,
+            }}
+          >
+            {t('sync.keepLoggedInHelp')}
+          </span>
+        </label>
         {error && (
           <div style={{ fontSize: 12, color: 'var(--rose-500)', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
             <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -193,6 +254,7 @@ function SignedOutView() {
           </div>
         )}
         <button
+          data-sync-submit
           type="submit"
           className="btn-primary"
           disabled={busy}
@@ -203,6 +265,7 @@ function SignedOutView() {
       </form>
 
       <button
+        data-sync-switch-mode
         onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(null) }}
         style={{
           background: 'none', border: 'none', cursor: 'pointer',
@@ -247,12 +310,15 @@ function NoFamilyView() {
     setBusy(true)
     setError(null)
     try {
+      const trimmedName = name.trim()
       // F2: createFamily now returns { familyId, inviteCode }
       const { familyId } = await createFamily(
         {
           babyName:      settings?.baby?.name ?? '',
           babyBirthdate: settings?.baby?.birthdate ?? '',
-          familyName:    `${name}の家族`,
+          familyName:    trimmedName
+            ? t('sync.familyName', { name: trimmedName })
+            : t('sync.defaultFamilyName'),
         },
         { uid, name, role }
       )
@@ -313,6 +379,7 @@ function NoFamilyView() {
       {mode === 'none' && (
         <div style={{ display: 'flex', gap: 8 }}>
           <button
+            data-sync-family-choice="create"
             className="card"
             onClick={() => setMode('create')}
             style={{
@@ -329,6 +396,7 @@ function NoFamilyView() {
             </span>
           </button>
           <button
+            data-sync-family-choice="join"
             className="card"
             onClick={() => setMode('join')}
             style={{
@@ -360,6 +428,7 @@ function NoFamilyView() {
           )}
           <div style={{ display: 'flex', gap: 8 }}>
             <button
+              data-sync-family-submit="create"
               className="btn-primary"
               onClick={handleCreate}
               disabled={busy}
@@ -381,6 +450,7 @@ function NoFamilyView() {
       {mode === 'join' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <input
+            data-sync-invite-code-input
             type="text"
             className="input-field"
             placeholder={t('sync.inviteCodePlaceholder')}
@@ -397,6 +467,7 @@ function NoFamilyView() {
           )}
           <div style={{ display: 'flex', gap: 8 }}>
             <button
+              data-sync-family-submit="join"
               className="btn-primary"
               onClick={handleJoin}
               disabled={busy || inviteCode.trim().length !== 6}
@@ -499,7 +570,7 @@ function OnlineView({ detail }: { detail: string }) {
         }}>
           <div style={{ fontSize: 11, color: 'var(--stone-400)', fontWeight: 500 }}>{t('sync.inviteCodeLabel')}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <code style={{
+            <code data-sync-invite-code-value style={{
               fontSize: 18, fontWeight: 700, color: 'var(--stone-700)',
               letterSpacing: '0.2em', flex: 1,
             }}>
@@ -537,6 +608,9 @@ function OnlineView({ detail }: { detail: string }) {
 function ErrorView({ detail }: { detail: string }) {
   const { settings } = useAppStore()
   const { t } = useTranslation()
+  const userDetail = detail === DETAIL_FAMILY_ACCESS_UNCERTAIN
+    ? t('sync.familyAccessUncertain')
+    : t('sync.syncErrorDesc')
 
   const handleRetry = async () => {
     const cfg = settings?.firebase ?? null
@@ -556,7 +630,7 @@ function ErrorView({ detail }: { detail: string }) {
         }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--rose-500)' }}>{t('sync.syncError')}</span>
       </div>
-      <div style={{ fontSize: 12, color: 'var(--stone-500)', lineHeight: 1.6 }}>{detail}</div>
+      <div style={{ fontSize: 12, color: 'var(--stone-500)', lineHeight: 1.6 }}>{userDetail}</div>
       <button
         className="btn-secondary"
         onClick={handleRetry}
@@ -574,7 +648,7 @@ function ErrorView({ detail }: { detail: string }) {
 // ────────────────────────────────────────────────────────────
 
 export function SyncSettingsSlot() {
-  const { status, detail } = useSyncStatus()
+  const { status, detail, pendingCount } = useSyncStatus()
   const { settings } = useAppStore()
   const { t } = useTranslation()
 
@@ -615,10 +689,21 @@ export function SyncSettingsSlot() {
       break
 
     case 'connecting':
+    case 'superseded':
       content = (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--stone-500)', fontSize: 13 }}>
           <Cloud size={16} style={{ color: 'var(--stone-400)', animation: 'spin 1.2s linear infinite' }} />
           {t('sync.connecting')}
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )
+      break
+
+    case 'signing-out':
+      content = (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--stone-500)', fontSize: 13 }}>
+          <RefreshCw size={16} style={{ color: 'var(--stone-400)', animation: 'spin 1.2s linear infinite' }} />
+          {t('sync.signingOut')}
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )
@@ -637,6 +722,7 @@ export function SyncSettingsSlot() {
       break
 
     case 'off':
+    case 'detached':
     default:
       // 'off' means sync was explicitly stopped or Firebase not configured yet
       if (!settings?.firebase) {
@@ -651,6 +737,8 @@ export function SyncSettingsSlot() {
 
   return (
     <div
+      data-sync-state={status}
+      data-sync-pending-count={pendingCount}
       style={{
         background: 'var(--cream-50)',
         border: '1px solid var(--stone-200)',

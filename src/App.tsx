@@ -85,13 +85,15 @@ function applyTheme(theme: 'light' | 'dark' | 'system'): void {
 function AppInner() {
   const init = useAppStore(s => s.init)
   const settings = useAppStore(s => s.settings)
-  const saveSettings = useAppStore(s => s.saveSettings)
+  const isReady = useAppStore(s => s.isReady)
   const [currentPage, setCurrentPage] = useState<Page>('home')
   const [tourActive, setTourActive] = useState(false)
   const tourOriginPage = useRef<Page>('home')
   const tourOriginFocus = useRef<HTMLElement | null>(null)
   // null = undecided (show picker on first launch), false = hidden, true = shown
   const [showLangPicker, setShowLangPicker] = useState<boolean>(false)
+  const tutorialLaunchDecided = useRef(false)
+  const languagePickInFlight = useRef(false)
 
   const startTour = useCallback(() => {
     tourOriginPage.current = currentPage
@@ -178,45 +180,73 @@ function AppInner() {
     return () => mq.removeEventListener('change', handler)
   }, [settings?.theme])
 
-  // First-launch: show LanguagePicker if language not yet chosen,
-  // then start tutorial. If language already chosen, go straight to tutorial.
+  // Decide the first-launch flow only after settings hydration. A time-based
+  // decision can race a slow disk/IPC read and show the picker to an existing
+  // user before their persisted language arrives.
   useEffect(() => {
-    const id = setTimeout(() => {
-      if (!shouldAutoStartTutorial()) return // neither picker nor tour needed
+    if (!isReady || tutorialLaunchDecided.current) return
+    tutorialLaunchDecided.current = true
+    if (!shouldAutoStartTutorial()) return
 
+    // A persisted language is authoritative even when the old localStorage
+    // marker is absent (for example after an app-data migration).
+    if (!settings?.language) {
       if (!isLangChosen()) {
-        // Show language picker first; tutorial starts after pick (see handleLangPick)
         setShowLangPicker(true)
-      } else {
-        // Language already picked → straight to tutorial
-        tourOriginPage.current = 'home'
-        setCurrentPage('home')
-        setTourActive(true)
+        return
       }
-    }, 300)
-    return () => clearTimeout(id)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+
+      // Older builds could leave only a boolean marker when the full settings
+      // write failed. Recover that legacy state without showing the picker
+      // again, and migrate the detected active language through the merge API.
+      const legacyLanguage: Language = i18n.language === 'ja' ? 'ja' : 'ko'
+      setLanguage(legacyLanguage)
+      useAppStore.setState(state => ({
+        settings: state.settings
+          ? { ...state.settings, language: legacyLanguage }
+          : state.settings,
+      }))
+      void ipc.mergeSettings({ language: legacyLanguage }).catch(() => {
+        // Keep the local marker so another launch retries this idempotent merge.
+      })
+    }
+
+    tourOriginPage.current = 'home'
+    setCurrentPage('home')
+    setTourActive(true)
+  }, [isReady, settings?.language])
 
   const handleLangPick = useCallback(async (lang: Language) => {
+    if (languagePickInFlight.current) return
+    languagePickInFlight.current = true
+
     // 1. Apply language immediately so tour renders in chosen language
     setLanguage(lang)
 
-    // 2. Persist to settings (best-effort; works in Electron, no-op in pure web)
+    // Keep the renderer snapshot aligned immediately, while preserving every
+    // hydrated field that may have been written by family sync.
+    useAppStore.setState(state => ({
+      settings: state.settings
+        ? { ...state.settings, language: lang }
+        : state.settings,
+    }))
+
+    // 2. Persist only the field owned by this picker. The main-process merge
+    // re-reads the authoritative file, so a stale renderer cannot overwrite
+    // baby/profile/family data written during startup.
     try {
-      const current = settings ?? ({} as any)
-      await saveSettings({ ...current, language: lang })
+      await ipc.mergeSettings({ language: lang })
+      markLangChosen()
     } catch {
-      // non-fatal — language is already applied in-memory
+      // Non-fatal for this session. Do not mark the choice as durable so the
+      // picker retries persistence on the next launch.
     }
 
-    // 3. Mark as chosen so next launch skips picker
-    markLangChosen()
-
-    // 4. Hide picker and start tutorial
+    // 3. Hide picker and start tutorial even if the disk is temporarily
+    // unavailable; the in-memory language and store already agree.
     setShowLangPicker(false)
     startTour()
-  }, [settings, saveSettings, startTour])
+  }, [startTour])
 
   return (
     <div className="app-shell">

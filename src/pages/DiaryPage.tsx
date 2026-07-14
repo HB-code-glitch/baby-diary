@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { IconPlus, IconPencil, IconTrash, IconX } from '../components/icons'
 import { format, parseISO } from 'date-fns'
 import { ko } from 'date-fns/locale'
@@ -8,6 +8,9 @@ import { useToast } from '../components/Toast'
 import { DiaryEvent, DiaryData } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
+import { sortValidEventsNewestFirst } from '../lib/eventTime'
+import { getBoundedStaggerDelay, useProgressiveList } from '../lib/useProgressiveList'
+import { AccessibleFormDialog } from '../components/AccessibleFormDialog'
 
 // ---------------------------------------------------------------------------
 // Diary entry editor
@@ -24,76 +27,141 @@ function DiaryEditor({ initial, onSave, onClose }: EditorProps) {
   const [title, setTitle]  = useState(data?.title ?? '')
   const [text, setText]    = useState(data?.text  ?? '')
   const [saving, setSaving] = useState(false)
+  const [saveFailed, setSaveFailed] = useState(false)
+  const titleId = useId()
+  const titleInputId = useId()
+  const textInputId = useId()
+  const errorId = useId()
+  const textRef = useRef<HTMLTextAreaElement | null>(null)
+  const submittingRef = useRef(false)
+  const mountedRef = useRef(true)
+  const refocusAfterFailure = useRef(false)
   const { t } = useTranslation()
 
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!saving && refocusAfterFailure.current) {
+      refocusAfterFailure.current = false
+      textRef.current?.focus()
+    }
+  }, [saving])
+
   const handleSave = async () => {
-    if (!text.trim()) return
+    if (!text.trim() || submittingRef.current) return
+    submittingRef.current = true
+    setSaveFailed(false)
     setSaving(true)
-    await onSave(title.trim(), text.trim())
-    setSaving(false)
-    onClose()
+    try {
+      await onSave(title.trim(), text.trim())
+      onClose()
+    } catch {
+      refocusAfterFailure.current = true
+      setSaveFailed(true)
+    } finally {
+      submittingRef.current = false
+      if (mountedRef.current) setSaving(false)
+    }
   }
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)',
-      zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <div
-        style={{
-          background: 'var(--stone-50)', borderRadius: 16, padding: 24,
-          width: 'min(560px, 90vw)', boxShadow: '0 8px 40px rgba(0,0,0,0.12)',
-          display: 'flex', flexDirection: 'column', gap: 12,
-        }}
-        onClick={e => e.stopPropagation()}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--stone-800)' }}>
+    <AccessibleFormDialog
+      modalName="diary"
+      titleId={titleId}
+      busy={saving}
+      initialFocusRef={textRef}
+      onClose={onClose}
+      onSubmit={() => { void handleSave() }}
+    >
+        <div className="editor-modal-header">
+          <h2 id={titleId} className="editor-modal-title">
             {initial ? t('diary.editTitle') : t('diary.write')}
-          </span>
+          </h2>
           <button
+            type="button"
+            data-editor-action="close"
+            className="editor-modal-control editor-modal-close"
             onClick={onClose}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--stone-500)' }}
+            disabled={saving}
+            aria-label={t('timeEdit.close')}
           >
             <IconX size={18} color="var(--stone-500)" />
           </button>
         </div>
 
         <div>
-          <div className="label">{t('diary.titleLabel')}</div>
+          <label className="label" htmlFor={titleInputId}>{t('diary.titleLabel')}</label>
           <input
+            id={titleInputId}
+            data-editor-input="diary-title"
             type="text"
             className="input-field"
             placeholder={t('diary.titlePlaceholder')}
             value={title}
-            onChange={e => setTitle(e.target.value)}
+            onChange={e => {
+              setTitle(e.target.value)
+              setSaveFailed(false)
+            }}
+            disabled={saving}
           />
         </div>
 
         <div>
-          <div className="label">{t('diary.contentLabel')}</div>
+          <label className="label" htmlFor={textInputId}>{t('diary.contentLabel')}</label>
           <textarea
+            ref={textRef}
+            id={textInputId}
+            data-editor-input="diary-text"
             className="textarea-field"
             placeholder={t('diary.contentPlaceholder')}
             style={{ minHeight: 160 }}
             value={text}
-            onChange={e => setText(e.target.value)}
+            onChange={e => {
+              setText(e.target.value)
+              setSaveFailed(false)
+            }}
+            aria-describedby={saveFailed ? errorId : undefined}
+            disabled={saving}
           />
         </div>
 
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button className="btn-secondary" onClick={onClose}>{t('diary.cancel')}</button>
+        {saveFailed && (
+          <p
+            id={errorId}
+            className="editor-modal-error"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+          >
+            {t('toast.saveFailed')}
+          </p>
+        )}
+
+        <div className="editor-modal-actions">
           <button
-            className="btn-primary"
-            onClick={handleSave}
+            type="button"
+            className="btn-secondary editor-modal-control"
+            onClick={onClose}
+            disabled={saving}
+          >
+            {t('diary.cancel')}
+          </button>
+          <button
+            type="submit"
+            data-editor-action="save"
+            className="btn-primary editor-modal-control"
             disabled={saving || !text.trim()}
             style={{ opacity: !text.trim() ? 0.5 : 1 }}
           >
             {saving ? t('diary.saving') : t('diary.save')}
           </button>
         </div>
-      </div>
-    </div>
+    </AccessibleFormDialog>
   )
 }
 
@@ -113,13 +181,61 @@ export function DiaryPage() {
   const [editorOpen, setEditorOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<DiaryEvent | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const pageRef = useRef<HTMLDivElement | null>(null)
+  const deleteFocusTarget = useRef<string | null>(null)
+  const loadMoreFocusTarget = useRef<string | null>(null)
+  const confirmDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const diaryEvents = useMemo(() =>
-    events
-      .filter(e => !e.deleted && e.type === 'diary')
-      .sort((a, b) => b.at.localeCompare(a.at)),
+    sortValidEventsNewestFirst(events.filter(e => !e.deleted && e.type === 'diary')),
     [events]
   )
+  const {
+    visibleItems,
+    remainingCount,
+    canLoadMore,
+    nextBatchCount,
+    loadMore,
+  } = useProgressiveList(diaryEvents)
+
+  useLayoutEffect(() => {
+    const targetId = deleteFocusTarget.current
+    if (!targetId) return
+    const target = Array.from(
+      pageRef.current?.querySelectorAll<HTMLButtonElement>('[data-diary-action="edit"]') ?? [],
+    ).find(button => button.dataset.eventId === targetId)
+    if (!target) return
+    deleteFocusTarget.current = null
+    target.focus({ preventScroll: true })
+  }, [diaryEvents])
+
+  useLayoutEffect(() => {
+    const targetId = loadMoreFocusTarget.current
+    if (!targetId) return
+    const target = Array.from(
+      pageRef.current?.querySelectorAll<HTMLButtonElement>('[data-diary-action="edit"]') ?? [],
+    ).find(button => button.dataset.eventId === targetId)
+    if (!target) return
+    loadMoreFocusTarget.current = null
+    target.focus({ preventScroll: true })
+  }, [visibleItems.length])
+
+  const handleLoadMore = () => {
+    if (remainingCount <= nextBatchCount) {
+      loadMoreFocusTarget.current = diaryEvents[visibleItems.length]?.id ?? null
+    }
+    loadMore()
+  }
+
+  useEffect(() => () => {
+    if (confirmDeleteTimer.current !== null) clearTimeout(confirmDeleteTimer.current)
+    confirmDeleteTimer.current = null
+  }, [])
+
+  const clearConfirmDeleteTimer = () => {
+    if (confirmDeleteTimer.current !== null) clearTimeout(confirmDeleteTimer.current)
+    confirmDeleteTimer.current = null
+  }
 
   const handleSave = async (title: string, text: string) => {
     const time = new Date().toISOString()
@@ -130,6 +246,7 @@ export function DiaryPage() {
       } else {
         const event: DiaryEvent = {
           id: uuidv4(),
+          mutationId: uuidv4(),
           type: 'diary',
           at: time,
           data: { title, text } as DiaryData,
@@ -148,22 +265,32 @@ export function DiaryPage() {
       }
     } catch {
       showToast({ message: t('toast.saveFailed') })
+      throw new Error('diary_save_failed')
     }
   }
 
   const handleDelete = async (event: DiaryEvent) => {
     if (confirmDelete === event.id) {
+      clearConfirmDeleteTimer()
+      const index = visibleItems.findIndex(candidate => candidate.id === event.id)
+      deleteFocusTarget.current = visibleItems[index + 1]?.id ?? visibleItems[index - 1]?.id ?? null
       try {
         await softDeleteEvent(event)
-        setConfirmDelete(null)
+        setConfirmDelete(current => current === event.id ? null : current)
         showToast({ message: t('diary.toastDeleted') })
       } catch {
-        setConfirmDelete(null)
+        deleteFocusTarget.current = null
+        setConfirmDelete(current => current === event.id ? null : current)
         showToast({ message: t('toast.deleteFailed') })
       }
     } else {
+      clearConfirmDeleteTimer()
       setConfirmDelete(event.id)
-      setTimeout(() => setConfirmDelete(null), 3000)
+      const timer = setTimeout(() => {
+        if (confirmDeleteTimer.current === timer) confirmDeleteTimer.current = null
+        setConfirmDelete(current => current === event.id ? null : current)
+      }, 3000)
+      confirmDeleteTimer.current = timer
     }
   }
 
@@ -173,7 +300,7 @@ export function DiaryPage() {
   }
 
   return (
-    <div className="page-container" data-tour="diary">
+    <div ref={pageRef} className="page-container" data-tour="diary">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div className="page-title">{t('diary.title')}</div>
         <button
@@ -206,13 +333,18 @@ export function DiaryPage() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 720 }}>
-          {diaryEvents.map((event, i) => {
+          {visibleItems.map((event, i) => {
             const data = event.data as DiaryData
             return (
               <div
                 key={`${event.id}-${event.rev}`}
-                className="card stagger-mount"
-                style={{ padding: '16px 18px', '--i': i } as React.CSSProperties}
+                data-diary-entry
+                data-event-id={event.id}
+                className="card stagger-mount bounded-stagger"
+                style={{
+                  padding: '16px 18px',
+                  '--stagger-delay': getBoundedStaggerDelay(i),
+                } as React.CSSProperties}
               >
                 {/* Title row */}
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
@@ -242,18 +374,25 @@ export function DiaryPage() {
                       </span>
                     )}
                     <button
+                      type="button"
+                      data-diary-action="edit"
+                      data-event-id={event.id}
+                      className="record-icon-button"
                       onClick={() => openEditor(event)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--stone-400)', borderRadius: 5 }}
+                      aria-label={t('diary.editTitle')}
                     >
                       <IconPencil size={13} color="var(--stone-400)" />
                     </button>
                     <button
+                      type="button"
+                      data-diary-action="delete"
+                      data-event-id={event.id}
+                      className="record-icon-button"
                       onClick={() => handleDelete(event)}
+                      aria-label={confirmDelete === event.id ? t('timeline.confirmDelete') : t('timeline.delete')}
                       style={{
                         background: confirmDelete === event.id ? 'var(--rose-100)' : 'none',
-                        border: 'none', cursor: 'pointer', padding: 4,
                         color: confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)',
-                        borderRadius: 5,
                       }}
                     >
                       <IconTrash size={13} color={confirmDelete === event.id ? 'var(--rose-500)' : 'var(--stone-400)'} />
@@ -263,6 +402,19 @@ export function DiaryPage() {
               </div>
             )
           })}
+          {canLoadMore && (
+            <div className="progressive-list-footer">
+              <button
+                type="button"
+                className="btn-secondary progressive-load-more"
+                data-list-load-more="diary"
+                data-list-remaining={remainingCount}
+                onClick={handleLoadMore}
+              >
+                {t('diary.loadMore', { count: nextBatchCount })}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

@@ -51,9 +51,9 @@ describe('삼칠일 (samchil-il)', () => {
     expect(m?.culture).toBe('ko')
   })
 
-  it('desc ends with "날이에요" in Korean', () => {
+  it('describes it explicitly as a Korean traditional event', () => {
     const m = find('2026-01-01', 'samchil-il')
-    expect(m?.descKo).toMatch(/날이에요$/)
+    expect(m?.descKo).toMatch(/한국 전통 행사예요$/)
   })
 })
 

@@ -1,105 +1,211 @@
-import React, { useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { GUIDANCE_MARKERS, FEVER_CARE, FeverLevel } from '../lib/guidance'
+import {
+  FEVER_CARE,
+  FEVER_DURATION_GUIDANCE,
+  FEVER_RED_FLAGS,
+  getGuidanceSourceLabel,
+  FeverLevel,
+  FeverRedFlagId,
+} from '../lib/guidance'
 
-interface FeverModalProps {
+export interface FeverModalProps {
   celsius: number
   level: Exclude<FeverLevel, null | 'caution'>
   ageDays: number | null
+  completedMonths?: number | null
+  symptomIds?: readonly FeverRedFlagId[]
   lang: string
+  returnFocusTo?: HTMLElement | null
   onConfirm: () => void
 }
 
-export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverModalProps): React.JSX.Element {
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  '[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+interface FocusTarget {
+  focus: () => void
+}
+
+export function focusDialogAndCreateRestore(
+  dialog: FocusTarget | null,
+  previouslyFocused: FocusTarget | null,
+): () => void {
+  dialog?.focus()
+  return () => previouslyFocused?.focus()
+}
+
+export type FeverDialogKeyAction = 'close' | 'dialog' | 'first' | 'last' | null
+
+export function resolveFeverDialogKeyAction({
+  key,
+  shiftKey,
+  activeIndex,
+  focusableCount,
+}: {
+  key: string
+  shiftKey: boolean
+  /** -1 means the dialog container itself is focused. */
+  activeIndex: number
+  focusableCount: number
+}): FeverDialogKeyAction {
+  if (key === 'Escape') return 'close'
+  if (key !== 'Tab') return null
+  if (focusableCount === 0) return 'dialog'
+  if (shiftKey && activeIndex <= 0) return 'last'
+  if (!shiftKey && activeIndex === focusableCount - 1) return 'first'
+  return null
+}
+
+export function FeverModal({
+  celsius,
+  level,
+  ageDays,
+  completedMonths = null,
+  symptomIds = [],
+  lang,
+  returnFocusTo = null,
+  onConfirm,
+}: FeverModalProps): React.JSX.Element {
   const { t } = useTranslation()
-  const [redFlagsOpen, setRedFlagsOpen] = useState(level === 'danger')
+  const [redFlagsOpen, setRedFlagsOpen] = useState(level === 'emergency' || level === 'danger')
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+  const descriptionId = useId()
 
-  const emergencyMarker = GUIDANCE_MARKERS.find(m => m.id === 'fever_under_3mo_emergency')!
-  const redFlagsMarker = GUIDANCE_MARKERS.find(m => m.id === 'fever_red_flags')!
-  const antipyreticMarker = GUIDANCE_MARKERS.find(m => m.id === 'antipyretic_age_limits')!
+  useEffect(() => {
+    const activeBeforeDialog = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+    const restoreFocus = focusDialogAndCreateRestore(
+      dialogRef.current,
+      returnFocusTo ?? activeBeforeDialog,
+    )
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
 
-  const title =
-    level === 'emergency' ? t('feverModal.emergencyTitle') :
-    level === 'danger'    ? t('feverModal.dangerTitle') :
-                            t('feverModal.warningTitle')
+    return () => {
+      document.body.style.overflow = previousOverflow
+      restoreFocus()
+    }
+  }, [returnFocusTo])
+
+  const title = level === 'emergency'
+    ? t('feverModal.emergencyTitle')
+    : level === 'danger'
+      ? t('feverModal.dangerTitle')
+      : t('feverModal.warningTitle')
 
   const isRed = level === 'emergency' || level === 'danger'
+  const isNewborn = ageDays != null && ageDays >= 0 && ageDays < 28
+  const visibleRedFlags = FEVER_RED_FLAGS.filter(flag =>
+    !flag.newbornOnly
+    || isNewborn
+    || (ageDays === null && symptomIds.includes(flag.id))
+  )
+  const language = lang === 'ja' ? 'ja' : 'ko'
+  const isOlderHighTemperature = level === 'warning' && completedMonths != null && completedMonths >= 6
 
-  // Red flags as bullet list from marker body — split on colon after intro sentence
-  const redFlagsBody = lang === 'ja' ? redFlagsMarker.bodyJa : redFlagsMarker.bodyKo
-  const rfColonIdx = redFlagsBody.indexOf(':')
-  const rfItems = rfColonIdx >= 0
-    ? redFlagsBody
-        .slice(rfColonIdx + 1)
-        .split(/[,、，]/)
-        .map(s => s.trim().replace(/^\s*[·•\-]\s*/, '').trim())
-        .filter(s => s.length > 2)
-    : [redFlagsBody]
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    const focusable = dialogRef.current
+      ? Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+      : []
+    const activeIndex = document.activeElement === dialogRef.current
+      ? -1
+      : focusable.findIndex(element => element === document.activeElement)
+    const action = resolveFeverDialogKeyAction({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      activeIndex,
+      focusableCount: focusable.length,
+    })
 
-  const emergencyBody = lang === 'ja' ? emergencyMarker.bodyJa : emergencyMarker.bodyKo
-  const antipyreticBody = lang === 'ja' ? antipyreticMarker.bodyJa : antipyreticMarker.bodyKo
-
-  const feverSource = `${redFlagsMarker.sourceLabel} · ${FEVER_CARE.sourceLabel}`
+    if (action === 'close') {
+      event.preventDefault()
+      onConfirm()
+      return
+    }
+    if (action === 'dialog') {
+      event.preventDefault()
+      dialogRef.current?.focus()
+      return
+    }
+    if (action === 'last') {
+      event.preventDefault()
+      focusable[focusable.length - 1]?.focus()
+    } else if (action === 'first') {
+      event.preventDefault()
+      focusable[0]?.focus()
+    }
+  }
 
   return (
     <>
-      <div className="fever-modal-overlay" />
+      <div className="fever-modal-overlay" aria-hidden="true" />
       <div
+        ref={dialogRef}
         className={`fever-modal${isRed ? ' fever-modal-red' : ' fever-modal-amber'}`}
         role="alertdialog"
         aria-modal="true"
-        aria-label={title}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
       >
-        {/* Temp badge */}
         <div className="fever-modal-temp">{celsius.toFixed(1)}&deg;C</div>
+        <h2 id={titleId} className="fever-modal-title">{title}</h2>
 
-        <h2 className="fever-modal-title">{title}</h2>
-
-        {/* emergency: show emergency marker key sentence */}
-        {level === 'emergency' && (
-          <p className="fever-modal-body">
-            {lang === 'ja'
-              ? (emergencyMarker.quoteJa ?? emergencyBody.split(/[。]/)[0] + '。')
-              : (emergencyMarker.quoteKo ?? emergencyBody.split(/(?<=[다요])\.\s/)[0] + '.')}
+        {isRed && (
+          <p className="fever-modal-note fever-modal-note-rule">
+            {t('feverModal.urgentAction')}
           </p>
         )}
 
-        {/* Unknown age note */}
+        <p id={descriptionId} className="fever-modal-body">
+          {level === 'emergency'
+            ? t('feverModal.emergencyBody')
+            : level === 'danger'
+              ? t('feverModal.dangerBody')
+              : isOlderHighTemperature
+                ? t('feverModal.olderHighTemperatureBody')
+                : t('feverModal.warningBody')}
+        </p>
+
         {ageDays === null && (
           <p className="fever-modal-note">{t('feverModal.unknownAgeNote')}</p>
         )}
 
-        {/* Care steps */}
+        <p className="fever-modal-note fever-modal-note-rule">
+          {t('feverModal.measurementSiteNote')}
+        </p>
+
         <div className="fever-modal-section">
           <div className="fever-modal-section-title">{t('feverModal.careStepsTitle')}</div>
           <ul className="fever-modal-list">
-            {FEVER_CARE.steps.map((step, i) => (
-              <li key={i} className="fever-modal-list-item">
-                {lang === 'ja' ? step.ja : step.ko}
-              </li>
+            {FEVER_CARE.steps.map((step, index) => (
+              <li key={index} className="fever-modal-list-item">{step[language]}</li>
             ))}
           </ul>
         </div>
 
-        {/* Antipyretic note (danger + warning) */}
-        {(level === 'danger' || level === 'warning') && (
-          <p className="fever-modal-note fever-modal-note-rule">
-            {t('feverModal.antipyreticNote')}
-          </p>
-        )}
+        <p className="fever-modal-note fever-modal-note-rule">
+          {t('feverModal.medicationNote')}
+        </p>
+        <p className="fever-modal-note fever-modal-note-rule">
+          {FEVER_DURATION_GUIDANCE[language]}
+        </p>
 
-        {/* Duration note (warning) */}
-        {level === 'warning' && (
-          <p className="fever-modal-note fever-modal-note-rule">
-            {t('feverModal.durationNote')}
-          </p>
-        )}
-
-        {/* Red flags (collapsible) */}
         <div className="fever-modal-section">
+          <p className="fever-modal-note">{t('feverModal.redFlagIntro')}</p>
           <button
             className="fever-modal-collapse-btn"
-            onClick={() => setRedFlagsOpen(o => !o)}
+            onClick={() => setRedFlagsOpen(open => !open)}
             aria-expanded={redFlagsOpen}
           >
             {redFlagsOpen ? t('feverModal.redFlagCollapse') : t('feverModal.redFlagExpand')}
@@ -108,25 +214,19 @@ export function FeverModal({ celsius, level, ageDays, lang, onConfirm }: FeverMo
             <div className="fever-modal-flags">
               <div className="fever-modal-section-title">{t('feverModal.redFlagsTitle')}</div>
               <ul className="fever-modal-list">
-                {rfItems.map((item, i) => (
-                  <li key={i} className="fever-modal-list-item fever-modal-flag-item">{item}</li>
+                {visibleRedFlags.map(flag => (
+                  <li key={flag.id} className="fever-modal-list-item fever-modal-flag-item">
+                    {flag[language]}
+                  </li>
                 ))}
               </ul>
-              {/* antipyretic_age_limits first sentence for emergency */}
-              {level === 'emergency' && (
-                <p className="fever-modal-note" style={{ marginTop: 8 }}>
-                  {lang === 'ja'
-                    ? (antipyreticMarker.quoteJa ?? antipyreticBody.split(/[。]/)[0] + '。')
-                    : (antipyreticMarker.quoteKo ?? antipyreticBody.split(/(?<=[다요])\.\s/)[0] + '.')}
-                </p>
-              )}
+              <p className="fever-modal-note">{t('feverModal.redFlagAction')}</p>
             </div>
           )}
         </div>
 
-        {/* Source + disclaimer */}
         <div className="fever-modal-footer">
-          <span className="fever-modal-source">{feverSource}</span>
+          <span className="fever-modal-source">{getGuidanceSourceLabel(FEVER_CARE, language)}</span>
           <p className="fever-modal-disclaimer">{t('feverModal.disclaimer')}</p>
         </div>
 

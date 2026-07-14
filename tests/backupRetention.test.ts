@@ -1,4 +1,9 @@
-import { describe, it, expect } from 'vitest'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+import { createHash } from 'crypto'
+import { afterEach, describe, it, expect } from 'vitest'
+import * as backupModule from '../electron/store/backup'
 import { selectBackupsToPrune } from '../electron/store/backup'
 
 // Helper: create a timestamp name for a given date + hour
@@ -90,5 +95,39 @@ describe('selectBackupsToPrune', () => {
     const toPrune = selectBackupsToPrune(names, NOW)
     expect(toPrune).not.toContain('not-a-timestamp')
     expect(toPrune).not.toContain('README')
+  })
+})
+
+describe('verified snapshot retention', () => {
+  const roots: string[] = []
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  function legacySnapshot(root: string, name: string, valid = true): void {
+    const directory = path.join(root, name)
+    fs.mkdirSync(directory, { recursive: true })
+    const bytes = Buffer.from(JSON.stringify({
+      baby: { name: valid ? name : 42, birthdate: '2025-01-01' },
+      profile: { uid: 'u', name: 'p', role: 'mom' },
+      familyId: 'family-A',
+      firebase: null,
+    }))
+    fs.writeFileSync(path.join(directory, 'settings.json'), bytes)
+    createHash('sha256').update(bytes).digest('hex')
+  }
+
+  it('never lets a corrupt newest folder displace the newest verified monthly copy', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-retention-'))
+    roots.push(root)
+    legacySnapshot(root, ts(2025, 1, 1))
+    legacySnapshot(root, ts(2025, 1, 15))
+    legacySnapshot(root, ts(2025, 1, 31), false)
+
+    const selectVerified = (backupModule as unknown as {
+      selectVerifiedBackupsToPrune(root: string, now: Date): string[]
+    }).selectVerifiedBackupsToPrune
+    expect(selectVerified(root, NOW)).toEqual([ts(2025, 1, 1)])
   })
 })

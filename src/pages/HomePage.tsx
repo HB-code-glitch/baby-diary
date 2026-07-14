@@ -1,19 +1,25 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
-import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconClock, IconStar, IconGift, IconInfo, IconX, IconMoon, IconRuler } from '../components/icons'
-import { computeNextFeed, formatCountdown } from '../lib/breastfeeding'
+import { IconDrop, IconPoop, IconThermometer, IconHeart, IconBottle, IconStar, IconGift, IconX, IconMoon, IconRuler } from '../components/icons'
 import { useAppStore, formatTime, getDDay } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
 import { TimeEditModal } from '../components/TimeEditModal'
 import { DiaryEvent, BreastData, FormulaData, TempData, DataInfo } from '../../shared/types'
-import { differenceInMinutes, differenceInDays, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
+import { differenceInMinutes, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useTranslation } from 'react-i18next'
 import { getMilestones, getUpcoming, Milestone } from '../lib/milestones'
-import { getCurrentFormulaGuidance, getGuidanceForAge, GUIDANCE_MARKERS, evaluateFever, getFeedingBand, FeverLevel } from '../lib/guidance'
+import {
+  evaluateFever,
+  FEVER_RED_FLAGS,
+  getFeverAgeContext,
+  type FeverLevel,
+  type FeverRedFlagId,
+} from '../lib/guidance'
 import { FeedingTipPopup } from '../components/FeedingTipPopup'
 import { FeverModal } from '../components/FeverModal'
+import { AgeGuidancePanel } from '../components/AgeGuidancePanel'
 import { useSyncStatus } from '../sync/useSync'
 import {
   getVisibleHomeMetrics,
@@ -22,6 +28,7 @@ import {
   type HomeMetricKey,
 } from '../lib/progressiveDisclosure'
 import { isTutorialShortcutBlocked } from '../lib/tutorial'
+import { latestValidEvent } from '../lib/eventTime'
 
 // ---------------------------------------------------------------------------
 // Milestone dismiss persistence
@@ -145,26 +152,18 @@ function MilestoneAlertBanners({ birthdate, gender, lang }: MilestoneAlertBanner
 interface InsightsPanelProps {
   lastFeeding: DiaryEvent | null
   lastBreastSide: 'L' | 'R' | 'both' | null
-  lastBreastEvent: DiaryEvent | null
   todayPeeCount: number
   todayPoopCount: number
   dataInfo: DataInfo | null
-  birthdate?: string
-  ageDays: number | null
-  onNavigate?: (page: 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings') => void
   todaySleepMinutes: number
 }
 
 function InsightsPanel({
   lastFeeding,
   lastBreastSide,
-  lastBreastEvent,
   todayPeeCount,
   todayPoopCount,
   dataInfo,
-  birthdate,
-  ageDays,
-  onNavigate,
   todaySleepMinutes,
 }: InsightsPanelProps) {
   const { t, i18n: i18nInstance } = useTranslation()
@@ -193,18 +192,19 @@ function InsightsPanel({
     lastFeedingLabel = lastFeedingTime
   }
 
-  // Next recommended side
-  const nextSideLabel = lastBreastSide === 'L'
-    ? t('breast.right')
+  // Preserve what was recorded without predicting which side should be next.
+  const recordedSideLabel = lastBreastSide === 'L'
+    ? t('breast.left')
     : lastBreastSide === 'R'
-      ? t('breast.left')
-      : '–'
+      ? t('breast.right')
+      : lastBreastSide === 'both'
+        ? t('breast.both')
+        : '–'
 
   // Last temp (recent)
   const recentTemp: DiaryEvent | null = useAppStore(s => {
     const temps = s.events.filter(e => !e.deleted && e.type === 'temp')
-    if (temps.length === 0) return null
-    return temps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    return latestValidEvent(temps)
   })
 
   const tempLabel = recentTemp
@@ -217,15 +217,6 @@ function InsightsPanel({
     ? format(parseISO(dataInfo.lastBackupTime), t('date.formatBackup'), { locale: dateFnsLocale })
     : t('settings.noBackup')
 
-  // Current formula guidance (using new getGuidanceForAge — picks best formula band)
-  const formulaGuidance = useMemo(() => {
-    if (!birthdate) return null
-    const markers = getGuidanceForAge(birthdate, new Date())
-    // Pick the first formula marker (most relevant age band)
-    const formula = markers.find(m => m.id.startsWith('formula_'))
-    return formula ?? null
-  }, [birthdate])
-
   const lang = i18nInstance.language
 
   const sleepLabel = (() => {
@@ -237,65 +228,6 @@ function InsightsPanel({
     }
     return h > 0 ? (m > 0 ? `${h}시간 ${m}분` : `${h}시간`) : `${m}분`
   })()
-
-  // Breast countdown — computed from last breast event
-  const bfCountdown = useMemo(() => {
-    if (!lastBreastEvent || ageDays === null || !birthdate) return null
-    const now = new Date()
-    const bfLang = lang === 'ja' ? 'ja' : 'ko'
-    const { windowStart, windowEnd, maxStretchAt, band } = computeNextFeed(lastBreastEvent.at, ageDays)
-    const fmt = (d: Date) => d.toLocaleTimeString(lang === 'ja' ? 'ja-JP' : 'ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
-
-    const msToStart = windowStart.getTime() - now.getTime()
-    const msToEnd = windowEnd ? windowEnd.getTime() - now.getTime() : null
-    const msElapsed = now.getTime() - new Date(lastBreastEvent.at).getTime()
-    const elapsedStr = formatCountdown(msElapsed, bfLang)
-
-    // maxStretchAt exceeded — newborn warning (amber)
-    if (maxStretchAt && now >= maxStretchAt) {
-      return {
-        type: 'newborn' as const,
-        value: t('home.bfCountdownNewborn', { elapsed: elapsedStr }),
-        sub: null,
-        isAmber: true,
-      }
-    }
-
-    // Before windowStart
-    if (msToStart > 0) {
-      const countdown = formatCountdown(msToStart, bfLang)
-      const sub = windowEnd
-        ? t('home.bfCountdownBeforeSub', { from: fmt(windowStart), to: fmt(windowEnd) })
-        : t('home.bfCountdownBeforeSubNoEnd', { from: fmt(windowStart) })
-      return {
-        type: 'before' as const,
-        value: t('home.bfCountdownBefore', { countdown }),
-        sub,
-        isAmber: false,
-      }
-    }
-
-    // Inside window
-    const pastWindowEnd = msToEnd !== null && msToEnd < 0
-    const pastWindowStartPlus1h = msToEnd === null && msToStart < -60 * 60 * 1000
-    if (!pastWindowEnd && !pastWindowStartPlus1h) {
-      return {
-        type: 'window' as const,
-        value: t('home.bfCountdownWindow'),
-        sub: windowEnd ? `~ ${fmt(windowEnd)}` : null,
-        isAmber: false,
-      }
-    }
-
-    // Past window
-    return {
-      type: 'past' as const,
-      value: t('home.bfCountdownPast', { elapsed: elapsedStr }),
-      sub: null,
-      isAmber: false,
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastBreastEvent, ageDays, birthdate, lang, t])
 
   const rows = {
     lastFeeding: {
@@ -334,8 +266,8 @@ function InsightsPanel({
       Icon: IconHeart,
       bg: 'var(--sky)',
       iconColor: 'var(--sky-text)',
-      label: t('home.nextBreastLabel'),
-      value: nextSideLabel,
+      label: t('home.lastBreastSideLabel'),
+      value: recordedSideLabel,
       ago: null,
     },
   }
@@ -379,36 +311,6 @@ function InsightsPanel({
     <div className="insights-panel" data-tour="insights">
       <div className="insights-title">{t('home.insightsTitle')}</div>
 
-      {/* Breast countdown row — shown only when last feed was breast and birthdate set */}
-      {bfCountdown && (
-        <div
-          className="insight-row"
-          style={bfCountdown.isAmber ? { background: 'var(--amber, #fffbea)', borderRadius: 8, padding: '4px 0' } : undefined}
-        >
-          <div
-            className="insight-icon"
-            style={{ background: bfCountdown.isAmber ? 'var(--butter)' : 'var(--sky)' }}
-            aria-hidden="true"
-          >
-            <IconClock size={16} color={bfCountdown.isAmber ? 'var(--butter-text)' : 'var(--sky-text)'} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="insight-label">{t('home.bfCountdownLabel')}</div>
-            <div
-              className="insight-value"
-              style={bfCountdown.type === 'window' ? { color: 'var(--mint-text)', fontWeight: 600 } : bfCountdown.isAmber ? { color: 'var(--butter-text)', fontWeight: 600 } : undefined}
-            >
-              {bfCountdown.value}
-            </div>
-            {bfCountdown.sub && (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>
-                {bfCountdown.sub}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {insightPartition.primary.map(renderInsightRow)}
 
       {insightPartition.secondary.length > 0 && (
@@ -430,39 +332,6 @@ function InsightsPanel({
         <section id="home-secondary-insights" aria-labelledby="home-secondary-insights-toggle">
           {insightPartition.secondary.map(renderInsightRow)}
         </section>
-      )}
-
-      {/* Current formula / age guidance row */}
-      {formulaGuidance && (
-        <details className="insight-guidance">
-          <summary>{t('home.dailyTip')}</summary>
-          <div
-            className="insight-row"
-            role="button"
-            tabIndex={0}
-            aria-label={t('home.guidanceRowAriaLabel')}
-            style={{ cursor: 'pointer' }}
-            onClick={() => onNavigate?.('settings')}
-            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate?.('settings') } }}
-          >
-            <div
-              className="insight-icon"
-              aria-hidden="true"
-              style={{ background: 'var(--sky)' }}
-            >
-              <IconInfo size={16} color="var(--sky-text)" />
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="insight-label">
-                {lang === 'ja' ? formulaGuidance.titleJa : formulaGuidance.titleKo}
-              </div>
-              <div className="insight-value" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                {/* First sentence only */}
-                {(lang === 'ja' ? formulaGuidance.bodyJa : formulaGuidance.bodyKo).split(/[。.]\s*/)[0]}
-              </div>
-            </div>
-          </div>
-        </details>
       )}
 
       {/* Backup card */}
@@ -505,8 +374,8 @@ function StatCards() {
   // Most recent temp
   const lastTemp = React.useMemo(() => {
     const todayTemps = events.filter(e => !e.deleted && e.type === 'temp' && isToday(parseISO(e.at)))
-    if (todayTemps.length === 0) return null
-    const last = todayTemps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(todayTemps)
+    if (!last) return null
     return (last.data as TempData).celsius
   }, [events])
 
@@ -543,7 +412,7 @@ function StatCards() {
       value: (
         <>
           {formulaMl}
-          <span className="stat-card-unit" style={{ fontSize: 16, marginLeft: 3 }}>ml</span>
+          <span className="stat-card-unit" style={{ fontSize: 16, marginLeft: 3 }}>mL</span>
         </>
       ),
       delta: yFormulaMl > 0 ? <DeltaTag current={formulaMl} prev={yFormulaMl} /> : null,
@@ -737,17 +606,20 @@ function QuickMenu({ anchor, onPee, onPoop, onOpenTemp, onOpenBreast, onOpenForm
 // ---------------------------------------------------------------------------
 // Temperature popover
 // ---------------------------------------------------------------------------
-interface TempPopoverProps {
+export interface TempPopoverProps {
   anchor: DOMRect
-  onConfirm: (celsius: number) => void
+  ageDays: number | null
+  onConfirm: (celsius: number, symptomIds: readonly FeverRedFlagId[]) => void
   onClose: () => void
   defaultValue: number
 }
 
-function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverProps) {
+export function TempPopover({ anchor, ageDays, onConfirm, onClose, defaultValue }: TempPopoverProps) {
   const [value, setValue] = useState(defaultValue.toFixed(1))
+  const [riskOpen, setRiskOpen] = useState(false)
+  const [selectedRiskIds, setSelectedRiskIds] = useState<FeverRedFlagId[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   useEffect(() => {
     if (inputRef.current) {
@@ -761,8 +633,18 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
     // HTML min/max attributes are bypassed by direct input — enforce in JS too.
     const n = parseFloat(value)
     if (!isNaN(n) && isFinite(n)) {
-      onConfirm(Math.min(Math.max(n, 35.0), 42.0))
+      onConfirm(Math.min(Math.max(n, 35.0), 42.0), [...selectedRiskIds])
     }
+  }
+
+  const visibleRiskFlags = FEVER_RED_FLAGS.filter(flag =>
+    !flag.newbornOnly || ageDays === null || (ageDays >= 0 && ageDays < 28)
+  )
+
+  const toggleRisk = (id: FeverRedFlagId): void => {
+    setSelectedRiskIds(current => current.includes(id)
+      ? current.filter(item => item !== id)
+      : [...current, id])
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -775,7 +657,7 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
   const rawLeft = anchor.left - 80
   const clampedLeft = Math.min(Math.max(8, rawLeft), window.innerWidth - POPOVER_W - 8)
   // If popover would overflow bottom, open upward (approx height 140px)
-  const POPOVER_H = 160
+  const POPOVER_H = riskOpen ? 520 : 210
   const openUpward = anchor.bottom + 8 + POPOVER_H > window.innerHeight - 8
   const style: React.CSSProperties = openUpward
     ? { bottom: window.innerHeight - anchor.top + 8, left: clampedLeft }
@@ -786,7 +668,7 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
       <div className="popover-overlay" onClick={onClose} />
       <form
         className="popover"
-        style={style}
+        style={{ ...style, maxHeight: 'min(72vh, 560px)', overflowY: 'auto' }}
         onSubmit={e => { e.preventDefault(); handleSubmit() }}
       >
         <div className="label">{t('popover.tempInput')}</div>
@@ -805,6 +687,41 @@ function TempPopover({ anchor, onConfirm, onClose, defaultValue }: TempPopoverPr
           />
           <span style={{ fontSize: 14, color: 'var(--text-secondary)', fontWeight: 600 }}>℃</span>
         </div>
+        <button
+          type="button"
+          className="fever-modal-collapse-btn"
+          aria-expanded={riskOpen}
+          aria-controls="temperature-risk-flags"
+          onClick={() => setRiskOpen(open => !open)}
+          style={{ width: '100%', marginBottom: 8 }}
+        >
+          {t('popover.riskCheck')}
+        </button>
+        {riskOpen && (
+          <div id="temperature-risk-flags" style={{ marginBottom: 10 }}>
+            <p style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-secondary)', margin: '0 0 8px' }}>
+              {t('popover.riskIntro')}
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {visibleRiskFlags.map(flag => (
+                <label key={flag.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, lineHeight: 1.4 }}>
+                  <input
+                    type="checkbox"
+                    value={flag.id}
+                    checked={selectedRiskIds.includes(flag.id)}
+                    onChange={() => toggleRisk(flag.id)}
+                  />
+                  <span>{i18n.resolvedLanguage === 'ja' ? flag.ja : flag.ko}</span>
+                </label>
+              ))}
+            </div>
+            {selectedRiskIds.length > 0 && (
+              <div style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: 'var(--butter-text)' }}>
+                {t('popover.riskSelectedCount', { count: selectedRiskIds.length })}
+              </div>
+            )}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
           <button type="button" className="btn-secondary" onClick={onClose}>{t('popover.cancel')}</button>
           <button type="submit" className="btn-primary">{t('popover.record')}</button>
@@ -1138,7 +1055,7 @@ function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopove
           {/* P18: Floor at 10 so stepper never produces 0-ml formula entry */}
           <button type="button" className="stepper-btn" onClick={() => setMl(v => Math.max(10, v - 10))}>−</button>
           <div className="stepper-value">{ml}</div>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', paddingRight: 6 }}>ml</span>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', paddingRight: 6 }}>mL</span>
           <button type="button" className="stepper-btn" onClick={() => setMl(v => v + 10)}>+</button>
         </div>
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -1149,7 +1066,7 @@ function FormulaPopover({ anchor, onConfirm, onClose, defaultMl }: FormulaPopove
               className={`filter-chip${ml === v ? ' active' : ''}`}
               onClick={() => setMl(v)}
             >
-              {v}ml
+              {v}mL
             </button>
           ))}
         </div>
@@ -1412,6 +1329,24 @@ function GrowthPopover({ anchor, onConfirm, onClose }: GrowthPopoverProps) {
 
 type ActivePopover = 'temp' | 'breast' | 'formula' | 'growth' | null
 
+export async function presentTemperatureSafetyThenPersist({
+  presentSafety,
+  persist,
+  onPersistError,
+}: {
+  presentSafety: () => void
+  persist: () => Promise<void>
+  onPersistError: () => void
+}): Promise<void> {
+  // Safety guidance must never depend on local storage availability.
+  presentSafety()
+  try {
+    await persist()
+  } catch {
+    onPersistError()
+  }
+}
+
 interface HomePageProps {
   onNavigate?: (page: 'home' | 'history' | 'stats' | 'diary' | 'messages' | 'settings') => void
 }
@@ -1426,7 +1361,11 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const todaySleepMin = useAppStore(s => s.todaySleepMinutes())
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
-  const [popover, setPopover] = useState<{ type: ActivePopover; anchor: DOMRect } | null>(null)
+  const [popover, setPopover] = useState<{
+    type: ActivePopover
+    anchor: DOMRect
+    opener?: HTMLElement | null
+  } | null>(null)
   const [quickMenuAnchor, setQuickMenuAnchor] = useState<DOMRect | null>(null)
   const [timeEditEvent, setTimeEditEvent] = useState<DiaryEvent | null>(null)
   const [timerTick, setTimerTick] = useState(0)
@@ -1434,18 +1373,23 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const [sleepConfirmAnchor, setSleepConfirmAnchor] = useState<{ anchor: DOMRect; startedAt: number } | null>(null)
   const [feedingTip, setFeedingTip] = useState<{
     type: 'formula' | 'breast'
-    sourceLabel: string
     lastBreastAtISO?: string
   } | null>(null)
   const [feverModal, setFeverModal] = useState<{
     celsius: number
     level: Exclude<FeverLevel, null | 'caution'>
+    ageDays: number | null
+    completedMonths: number | null
+    symptomIds: readonly FeverRedFlagId[]
+    returnFocusTo: HTMLElement | null
   } | null>(null)
   const quickRecordRef = useRef<HTMLDivElement>(null)
+  const quickMenuOpenerRef = useRef<HTMLButtonElement>(null)
   const todayFormulaMlNow = useAppStore(s => s.todayFormulaTotalMl())
-  const todayFeedingCountNow = useAppStore(s => s.todayFeedingCount())
 
   const today = todayEvents()
+  const todayFormulaCountNow = today.filter(event => !event.deleted && event.type === 'formula').length
+  const todayBreastCountNow = today.filter(event => !event.deleted && event.type === 'breast').length
 
   const dateFnsLocale = i18nInstance.language === 'ja' ? ja : ko
   const dateStr = format(new Date(), t('date.formatLong'), { locale: dateFnsLocale })
@@ -1456,36 +1400,29 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const dday = birthdate ? getDDay(birthdate) : null
   const lang = i18nInstance.language
 
-  const ageDays = React.useMemo<number | null>(() => {
-    if (!birthdate) return null
-    return differenceInDays(new Date(), parseISO(birthdate))
-  }, [birthdate])
+  // App-level useMidnightRefresh reloads the store at local midnight. Compute
+  // on every render so the same birthdate cannot retain yesterday's memoized age.
+  const ageDays = getFeverAgeContext(birthdate ?? null, new Date())?.ageDays ?? null
 
   const lastFormulaMl = React.useMemo(() => {
     const formulas = events.filter(e => !e.deleted && e.type === 'formula')
-    if (formulas.length === 0) return 120
-    const last = formulas.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(formulas)
+    if (!last) return 120
     return (last.data as FormulaData).ml ?? 120
   }, [events])
 
   const lastTemp = React.useMemo(() => {
     const temps = events.filter(e => !e.deleted && e.type === 'temp')
-    if (temps.length === 0) return 36.5
-    const last = temps.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(temps)
+    if (!last) return 36.5
     return (last.data as { celsius: number }).celsius ?? 36.5
   }, [events])
 
   const lastBreastSide = React.useMemo((): 'L' | 'R' | 'both' | null => {
     const breasts = events.filter(e => !e.deleted && e.type === 'breast')
-    if (breasts.length === 0) return null
-    const last = breasts.sort((a, b) => b.at.localeCompare(a.at))[0]
+    const last = latestValidEvent(breasts)
+    if (!last) return null
     return (last.data as BreastData).side ?? null
-  }, [events])
-
-  const lastBreastEvent = React.useMemo((): DiaryEvent | null => {
-    const breasts = events.filter(e => !e.deleted && e.type === 'breast')
-    if (breasts.length === 0) return null
-    return breasts.sort((a, b) => b.at.localeCompare(a.at))[0]
   }, [events])
 
   const onTimerChange = useCallback(() => setTimerTick(t => t + 1), [])
@@ -1517,22 +1454,39 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const handlePoop = useCallback(() => quickRecord(() => addPoop(), t('quickBtn.poop')), [quickRecord, addPoop, t])
 
   const openPopover = (type: ActivePopover, e: React.MouseEvent) => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    setPopover({ type, anchor: rect })
+    const opener = e.currentTarget as HTMLElement
+    const rect = opener.getBoundingClientRect()
+    setPopover({ type, anchor: rect, opener })
   }
 
-  const handleTempConfirm = async (celsius: number) => {
+  const handleTempConfirm = async (
+    celsius: number,
+    symptomIds: readonly FeverRedFlagId[],
+  ) => {
+    const returnFocusTo = popover?.type === 'temp' ? popover.opener ?? null : null
     setPopover(null)
     const label = `${t('quickBtn.temp')} ${celsius.toFixed(1)}℃`
-    const level = evaluateFever(celsius, ageDays)
+    const measuredAt = new Date()
+    const ageContext = getFeverAgeContext(birthdate ?? null, measuredAt)
+    const level = evaluateFever({
+      celsius,
+      birthdate: birthdate ?? null,
+      measuredAt,
+      symptomIds,
+    })
     if (level === 'emergency' || level === 'danger' || level === 'warning') {
-      // Blocking modal — save directly (no undo available while modal is open)
-      try {
-        await addTemp(celsius)
-        setFeverModal({ celsius, level })
-      } catch {
-        showToast({ message: t('toast.saveFailed') })
-      }
+      await presentTemperatureSafetyThenPersist({
+        presentSafety: () => setFeverModal({
+          celsius,
+          level,
+          ageDays: ageContext?.ageDays ?? null,
+          completedMonths: ageContext?.completedMonths ?? null,
+          symptomIds: [...symptomIds],
+          returnFocusTo,
+        }),
+        persist: async () => { await addTemp(celsius) },
+        onPersistError: () => showToast({ message: t('toast.saveFailed') }),
+      })
     } else if (level === 'caution') {
       // Save with undo available + amber hint toast
       await quickRecord(() => addTemp(celsius), label)
@@ -1558,11 +1512,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
     // With birthdate — show feeding tip popup (replaces success toast)
     try {
       const event = await addBreast(side, minutes, startedAt)
-      const band = getFeedingBand(ageDays)
-      const marker = band
-        ? GUIDANCE_MARKERS.find(m => m.id === band.id)
-        : GUIDANCE_MARKERS.find(m => m.id === 'formula_0_1mo')
-      setFeedingTip({ type: 'breast', sourceLabel: marker?.sourceLabel ?? 'AAP', lastBreastAtISO: event.at })
+      setFeedingTip({ type: 'breast', lastBreastAtISO: event.at })
     } catch {
       showToast({ message: t('toast.saveFailed') })
     }
@@ -1570,18 +1520,14 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
   const handleFormulaConfirm = async (ml: number) => {
     setPopover(null)
-    const label = `${t('quickBtn.formula')} ${ml}ml`
+    const label = `${t('quickBtn.formula')} ${ml}mL`
     if (ageDays === null) {
       await quickRecord(() => addFormula(ml), label)
       return
     }
     try {
       await addFormula(ml)
-      const band = getFeedingBand(ageDays)
-      const marker = band
-        ? GUIDANCE_MARKERS.find(m => m.id === band.id)
-        : GUIDANCE_MARKERS.find(m => m.id === 'formula_0_1mo')
-      setFeedingTip({ type: 'formula', sourceLabel: marker?.sourceLabel ?? 'AAP' })
+      setFeedingTip({ type: 'formula' })
     } catch {
       showToast({ message: t('toast.saveFailed') })
     }
@@ -1701,13 +1647,13 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const sleepBtnLabel = sleepRunning ? t('quickBtn.sleepRunning') : t('quickBtn.sleep')
 
   const quickBtns = [
-    { cls: 'quick-btn-circle quick-btn-circle-pee',     Icon: IconDrop,        label: t('quickBtn.pee'),     badge: '1', onClick: handlePee },
-    { cls: 'quick-btn-circle quick-btn-circle-poop',    Icon: IconPoop,        label: t('quickBtn.poop'),    badge: '2', onClick: handlePoop },
-    { cls: 'quick-btn-circle quick-btn-circle-temp',    Icon: IconThermometer, label: t('quickBtn.temp'),    badge: '3', onClick: (e: React.MouseEvent) => openPopover('temp', e) },
-    { cls: 'quick-btn-circle quick-btn-circle-breast',  Icon: IconHeart,       label: t('quickBtn.breast'),  badge: '4', onClick: (e: React.MouseEvent) => openPopover('breast', e) },
-    { cls: 'quick-btn-circle quick-btn-circle-formula', Icon: IconBottle,      label: t('quickBtn.formula'), badge: '5', onClick: (e: React.MouseEvent) => openPopover('formula', e) },
+    { type: 'pee',     cls: 'quick-btn-circle quick-btn-circle-pee',     Icon: IconDrop,        label: t('quickBtn.pee'),     badge: '1', onClick: handlePee },
+    { type: 'poop',    cls: 'quick-btn-circle quick-btn-circle-poop',    Icon: IconPoop,        label: t('quickBtn.poop'),    badge: '2', onClick: handlePoop },
+    { type: 'temp',    cls: 'quick-btn-circle quick-btn-circle-temp',    Icon: IconThermometer, label: t('quickBtn.temp'),    badge: '3', onClick: (e: React.MouseEvent) => openPopover('temp', e) },
+    { type: 'breast',  cls: 'quick-btn-circle quick-btn-circle-breast',  Icon: IconHeart,       label: t('quickBtn.breast'),  badge: '4', onClick: (e: React.MouseEvent) => openPopover('breast', e) },
+    { type: 'formula', cls: 'quick-btn-circle quick-btn-circle-formula', Icon: IconBottle,      label: t('quickBtn.formula'), badge: '5', onClick: (e: React.MouseEvent) => openPopover('formula', e) },
     { cls: `quick-btn-circle quick-btn-circle-sleep${sleepRunning ? ' quick-btn-running' : ''}`,
-      Icon: IconMoon, label: sleepBtnLabel, badge: '6', onClick: handleSleepButtonClick },
+      type: 'sleep', Icon: IconMoon, label: sleepBtnLabel, badge: '6', onClick: handleSleepButtonClick },
   ]
 
   return (
@@ -1730,6 +1676,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
         {/* + Record button — opens glass quick-menu dropdown */}
         <button
+          ref={quickMenuOpenerRef}
           className="btn-add-record"
           onClick={(e) => {
             const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -1755,13 +1702,14 @@ export function HomePage({ onNavigate }: HomePageProps) {
 
       {/* ── Quick record banners ── */}
       <div className="quick-record-row" ref={quickRecordRef} id="quick-record-row" data-tour="quick-row">
-        {quickBtns.map(({ cls, Icon, label, badge, onClick }, i) => (
+        {quickBtns.map(({ type, cls, Icon, label, badge, onClick }, i) => (
           <div
             key={badge}
             className="quick-record-slot stagger-mount"
             style={{ '--i': i } as React.CSSProperties}
           >
             <button
+              data-quick-record={type}
               className={cls}
               onClick={onClick as React.MouseEventHandler}
             >
@@ -1793,19 +1741,22 @@ export function HomePage({ onNavigate }: HomePageProps) {
           </div>
         </div>
 
-        {/* RIGHT: insights rail */}
-        <InsightsPanel
-          lastFeeding={lastFeeding}
-          lastBreastSide={lastBreastSide}
-          lastBreastEvent={lastBreastEvent}
-          todayPeeCount={peeCount}
-          todayPoopCount={poopCount}
-          dataInfo={dataInfo}
-          birthdate={birthdate ?? undefined}
-          ageDays={ageDays}
-          onNavigate={onNavigate}
-          todaySleepMinutes={todaySleepMin}
-        />
+        {/* RIGHT: current-stage guidance + today's concise insights */}
+        <aside className="home-insight-stack" aria-label={t('ageGuidance.title')}>
+          <AgeGuidancePanel
+            birthdate={birthdate}
+            variant="home"
+            onRequestBirthdate={onNavigate ? () => onNavigate('settings') : undefined}
+          />
+          <InsightsPanel
+            lastFeeding={lastFeeding}
+            lastBreastSide={lastBreastSide}
+            todayPeeCount={peeCount}
+            todayPoopCount={poopCount}
+            dataInfo={dataInfo}
+            todaySleepMinutes={todaySleepMin}
+          />
+        </aside>
       </div>
 
       {/* Floating nursing timer pill */}
@@ -1836,7 +1787,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           onPoop={handlePoop}
           onOpenTemp={() => {
             const rect = quickMenuAnchor
-            setPopover({ type: 'temp', anchor: rect })
+            setPopover({ type: 'temp', anchor: rect, opener: quickMenuOpenerRef.current })
           }}
           onOpenBreast={() => {
             const rect = quickMenuAnchor
@@ -1859,6 +1810,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
       {popover?.type === 'temp' && (
         <TempPopover
           anchor={popover.anchor}
+          ageDays={ageDays}
           onConfirm={handleTempConfirm}
           onClose={() => setPopover(null)}
           defaultValue={lastTemp}
@@ -1905,8 +1857,7 @@ export function HomePage({ onNavigate }: HomePageProps) {
           ageDays={ageDays}
           lastBreastSide={lastBreastSide}
           todayFormulaTotalMl={todayFormulaMlNow}
-          todayFeedingCount={todayFeedingCountNow}
-          sourceLabel={feedingTip.sourceLabel}
+          todayFeedingCount={feedingTip.type === 'formula' ? todayFormulaCountNow : todayBreastCountNow}
           lastBreastAtISO={feedingTip.lastBreastAtISO}
           onNavigate={onNavigate}
           onDismiss={() => setFeedingTip(null)}
@@ -1918,8 +1869,11 @@ export function HomePage({ onNavigate }: HomePageProps) {
         <FeverModal
           celsius={feverModal.celsius}
           level={feverModal.level}
-          ageDays={ageDays}
+          ageDays={feverModal.ageDays}
+          completedMonths={feverModal.completedMonths}
+          symptomIds={feverModal.symptomIds}
           lang={lang}
+          returnFocusTo={feverModal.returnFocusTo}
           onConfirm={() => setFeverModal(null)}
         />
       )}

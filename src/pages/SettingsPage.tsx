@@ -1,7 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { IconFolderOpen, IconDownload, IconInfo } from '../components/icons'
 import { GUIDANCE_MARKERS, GUIDANCE_DISCLAIMER } from '../lib/guidance'
-import { BREASTFEEDING_BANDS, BF_DISCLAIMER, BF_CLUSTER_NOTE, BF_NEWBORN_RULE } from '../lib/breastfeeding'
+import {
+  BF_CLUSTER_NOTE,
+  BF_DISCLAIMER,
+  BF_NEWBORN_GUIDANCE,
+  BF_RESPONSIVE_GUIDANCE,
+} from '../lib/breastfeeding'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
 import { useAppStore } from '../store/useAppStore'
@@ -9,26 +14,36 @@ import { useToast } from '../components/Toast'
 import { ipc } from '../lib/ipc'
 import { SyncSettingsSlot } from '../components/SyncSettingsSlot'
 import { DisclosureSection } from '../components/DisclosureSection'
-import { AppSettings } from '../../shared/types'
+import type { AppSettings, BabyInfoUnlinkedArchive } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
 import { setLanguage, Language } from '../i18n'
 import { DeleteAllModal } from '../components/DeleteAllModal'
 import { mergeSettingsSafely, FormSnapshot } from '../lib/mergeSettings'
-import { updateFamilyBabyInfo, updateMemberEntry, useSyncStatus } from '../sync/useSync'
+import { updateMemberEntry, useSyncStatus } from '../sync/useSync'
 import { getSyncDisclosurePresentation } from '../lib/progressiveDisclosure'
 import { getDataDisclosurePresentation } from '../lib/settingsPresentation'
+import { AgeGuidancePanel } from '../components/AgeGuidancePanel'
 
 // Re-export for any consumers that already import from this path
 export type { FormSnapshot }
 export { mergeSettingsSafely }
+
+const ARCHIVE_INITIAL_PAGE_SIZE = 10
 
 interface SettingsPageProps {
   onStartTour?: () => void
 }
 
 export function SettingsPage({ onStartTour }: SettingsPageProps) {
-  const { settings, saveSettings, loadDataInfo, dataInfo, softDeleteAllEvents } = useAppStore()
+  const {
+    settings,
+    saveSettings,
+    saveSettingsWithBabyInfoMutation,
+    loadDataInfo,
+    dataInfo,
+    softDeleteAllEvents,
+  } = useAppStore()
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
 
@@ -52,6 +67,21 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   // Local form state
   const [babyName,   setBabyName]   = useState(settings?.baby?.name       ?? '')
   const [birthdate,  setBirthdate]  = useState(settings?.baby?.birthdate  ?? '')
+  const babyNameDirtyRef = useRef(false)
+  const birthdateDirtyRef = useRef(false)
+  const babyGenderDirtyRef = useRef(false)
+  const myNameDirtyRef = useRef(false)
+  const myRoleDirtyRef = useRef(false)
+  const themeDirtyRef = useRef(false)
+  const languageDirtyRef = useRef(false)
+  const babyNameEditGenerationRef = useRef(0)
+  const birthdateEditGenerationRef = useRef(0)
+  const babyGenderEditGenerationRef = useRef(0)
+  const myNameEditGenerationRef = useRef(0)
+  const myRoleEditGenerationRef = useRef(0)
+  const themeEditGenerationRef = useRef(0)
+  const languageEditGenerationRef = useRef(0)
+  const mountHydrationEpochRef = useRef(0)
   const [babyGender, setBabyGender] = useState<'girl' | 'boy' | undefined>(settings?.baby?.gender)
   const [myName,     setMyName]     = useState(settings?.profile?.name    ?? '')
   const [myRole,     setMyRole]     = useState<'mom' | 'dad'>(settings?.profile?.role ?? 'mom')
@@ -60,23 +90,35 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [showDeleteAllModal, setShowDeleteAllModal] = useState(false)
   const [deletingAll, setDeletingAll] = useState(false)
   const [pdfSaving, setPdfSaving] = useState(false)
+  const [unlinkedArchives, setUnlinkedArchives] = useState<BabyInfoUnlinkedArchive[]>([])
+  const [unlinkedArchiveCursor, setUnlinkedArchiveCursor] = useState<string | undefined>()
+  const [unlinkedArchiveLoading, setUnlinkedArchiveLoading] = useState(false)
+  const [unlinkedArchiveError, setUnlinkedArchiveError] = useState(false)
+  const archiveFocusIndexRef = useRef<number | null>(null)
 
   // Hydrate form from a settings object
-  const hydrateForm = useCallback((s: AppSettings) => {
-    setBabyName(s.baby?.name       ?? '')
-    setBirthdate(s.baby?.birthdate ?? '')
-    setBabyGender(s.baby?.gender)
-    setMyName(s.profile?.name      ?? '')
-    setMyRole(s.profile?.role      ?? 'mom')
-    setCurrentTheme(s.theme        ?? 'system')
+  const hydrateForm = useCallback((s: AppSettings, forceAll = false) => {
+    if (forceAll || !babyNameDirtyRef.current) {
+      setBabyName(s.baby?.name ?? '')
+    }
+    if (forceAll || !birthdateDirtyRef.current) {
+      setBirthdate(s.baby?.birthdate ?? '')
+    }
+    if (forceAll || !babyGenderDirtyRef.current) setBabyGender(s.baby?.gender)
+    if (forceAll || !myNameDirtyRef.current) setMyName(s.profile?.name ?? '')
+    if (forceAll || !myRoleDirtyRef.current) setMyRole(s.profile?.role ?? 'mom')
+    if (forceAll || !themeDirtyRef.current) setCurrentTheme(s.theme ?? 'system')
   }, [])
 
   // Belt+suspenders: on mount, always fetch fresh settings directly from disk
   // (bypasses possible stale Zustand store state from hydration race)
   useEffect(() => {
     let cancelled = false
+    const hydrationEpoch = mountHydrationEpochRef.current
     ipc.getSettings().then(fresh => {
-      if (!cancelled) hydrateForm(fresh)
+      if (!cancelled && hydrationEpoch === mountHydrationEpochRef.current) {
+        hydrateForm(fresh)
+      }
     }).catch(() => {
       // fallback to store state handled below
     })
@@ -95,56 +137,177 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
     loadDataInfo()
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    setUnlinkedArchives([])
+    setUnlinkedArchiveCursor(undefined)
+    setUnlinkedArchiveError(false)
+    archiveFocusIndexRef.current = null
+    if (!settings?.familyId) return () => { cancelled = true }
+    setUnlinkedArchiveLoading(true)
+    ipc.listUnlinkedBabyInfoArchives({ limit: ARCHIVE_INITIAL_PAGE_SIZE }).then(page => {
+      if (cancelled) return
+      setUnlinkedArchives(page.items)
+      setUnlinkedArchiveCursor(page.nextCursor)
+    }).catch(() => {
+      if (!cancelled) setUnlinkedArchiveError(true)
+    }).finally(() => {
+      if (!cancelled) setUnlinkedArchiveLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [settings?.familyId, settings?.profile?.uid])
+
+  useEffect(() => {
+    const index = archiveFocusIndexRef.current
+    if (index === null || unlinkedArchiveLoading) return
+    const button = document.querySelector<HTMLButtonElement>(`[data-archive-index="${index}"] button`)
+    button?.focus()
+    archiveFocusIndexRef.current = null
+  }, [unlinkedArchives.length, unlinkedArchiveLoading])
+
+  const loadMoreUnlinkedArchives = async () => {
+    if (!unlinkedArchiveCursor || unlinkedArchiveLoading) return
+    const firstNewIndex = unlinkedArchives.length
+    setUnlinkedArchiveLoading(true)
+    setUnlinkedArchiveError(false)
+    try {
+      const page = await ipc.listUnlinkedBabyInfoArchives({
+        limit: ARCHIVE_INITIAL_PAGE_SIZE,
+        cursor: unlinkedArchiveCursor,
+      })
+      const known = new Set(unlinkedArchives.map(item => item.archiveId))
+      const additions = page.items.filter(item => !known.has(item.archiveId))
+      archiveFocusIndexRef.current = additions.length > 0 ? firstNewIndex : null
+      setUnlinkedArchives(current => [...current, ...additions])
+      setUnlinkedArchiveCursor(page.nextCursor)
+    } catch {
+      setUnlinkedArchiveError(true)
+    } finally {
+      setUnlinkedArchiveLoading(false)
+    }
+  }
+
+  const applyUnlinkedArchive = (archive: BabyInfoUnlinkedArchive) => {
+    babyNameDirtyRef.current = true
+    birthdateDirtyRef.current = true
+    babyNameEditGenerationRef.current += 1
+    birthdateEditGenerationRef.current += 1
+    setBabyName(archive.babyName)
+    setBirthdate(archive.babyBirthdate)
+  }
+
   const handleSave = async () => {
+    // Capture both values and ownership before the first await. Edits made
+    // while this submission is pending belong to a later generation and must
+    // remain visible/dirty when the older save resolves.
+    const submittedBabyName = babyName
+    const submittedBirthdate = birthdate
+    const submittedBabyNameDirty = babyNameDirtyRef.current
+    const submittedBirthdateDirty = birthdateDirtyRef.current
+    const submittedBabyGenderDirty = babyGenderDirtyRef.current
+    const submittedMyNameDirty = myNameDirtyRef.current
+    const submittedMyRoleDirty = myRoleDirtyRef.current
+    const submittedThemeDirty = themeDirtyRef.current
+    const submittedLanguageDirty = languageDirtyRef.current
+    const submittedBabyNameGeneration = babyNameEditGenerationRef.current
+    const submittedBirthdateGeneration = birthdateEditGenerationRef.current
+    const submittedBabyGenderGeneration = babyGenderEditGenerationRef.current
+    const submittedMyNameGeneration = myNameEditGenerationRef.current
+    const submittedMyRoleGeneration = myRoleEditGenerationRef.current
+    const submittedThemeGeneration = themeEditGenerationRef.current
+    const submittedLanguageGeneration = languageEditGenerationRef.current
+    const submittedBabyGender = babyGender
+    const submittedMyName = myName
+    const submittedMyRole = myRole
+    const submittedTheme = currentTheme
+    const submittedLanguage = i18nInstance.language as Language
+    // A late mount read belongs to the pre-save snapshot and must never win.
+    mountHydrationEpochRef.current += 1
     setSaving(true)
     try {
       // Source of truth: always fetch fresh from disk before merging
       const current = await ipc.getSettings()
 
+      // Disk is authoritative for every untouched field, even after an earlier
+      // hydration completed: another process/sync path may have advanced it.
+      // Explicit user edits retain ownership, including intentional empty values.
+      const resolvedBabyName = submittedBabyNameDirty ? submittedBabyName : current.baby.name
+      const resolvedBirthdate = submittedBirthdateDirty ? submittedBirthdate : current.baby.birthdate
+      const resolvedBabyGender = submittedBabyGenderDirty ? submittedBabyGender : current.baby.gender
+      const resolvedMyName = submittedMyNameDirty ? submittedMyName : current.profile.name
+      const resolvedMyRole = submittedMyRoleDirty ? submittedMyRole : current.profile.role
+      const resolvedTheme = submittedThemeDirty ? submittedTheme : current.theme
+      const resolvedLanguage = submittedLanguageDirty ? submittedLanguage : current.language
+
       const form: FormSnapshot = {
-        babyName,
-        birthdate,
-        babyGender,
-        myName,
+        babyName: resolvedBabyName,
+        birthdate: resolvedBirthdate,
+        babyGender: resolvedBabyGender,
+        myName: resolvedMyName,
       }
 
       // Merge: never blank-overwrite non-empty saved critical fields
       const merged = mergeSettingsSafely(current, form)
+      const babyInfoWasDirty = submittedBabyNameDirty || submittedBirthdateDirty
 
       // Apply non-critical fields from UI
       const updated: AppSettings = {
         ...merged,
+        baby: {
+          ...merged.baby,
+          // Dirty fields carry exact user intent, including an empty string.
+          name: resolvedBabyName,
+          birthdate: resolvedBirthdate,
+        },
         profile: {
           ...merged.profile,
           uid:  current.profile?.uid ?? settings?.profile?.uid ?? uuidv4(),
-          role: myRole,
+          name: resolvedMyName,
+          role: resolvedMyRole,
         },
         familyId: current.familyId ?? settings?.familyId ?? '',  // F8: never fabricate
         firebase:  current.firebase  ?? settings?.firebase  ?? null,
-        language:  (i18nInstance.language as Language) ?? 'ko',
-        theme:     currentTheme,
+        language:  resolvedLanguage,
+        theme:     resolvedTheme,
       }
 
-      await saveSettings(updated)
+      const saveResult = babyInfoWasDirty
+        ? await saveSettingsWithBabyInfoMutation(updated)
+        : { settings: await saveSettings(updated), babyInfo: 'unchanged' as const }
+      const savedSettings = saveResult.settings
 
-      // Reverse-sync: if user is a family member and baby name/birthdate actually
-      // changed, push the new values to the family doc so other devices pick them up.
-      // Guard: only when familyId is set and values differ from what was on disk.
-      if (updated.familyId) {
-        const prevName      = current.baby?.name      ?? ''
-        const prevBirthdate = current.baby?.birthdate ?? ''
-        const newName       = updated.baby?.name      ?? ''
-        const newBirthdate  = updated.baby?.birthdate ?? ''
-        if (newName !== prevName || newBirthdate !== prevBirthdate) {
-          updateFamilyBabyInfo(newName, newBirthdate).catch(() => {
-            // best-effort: family doc update failure is non-fatal (local save succeeded)
-          })
-        }
+      const babyNameChangedSinceSubmission = (
+        babyNameEditGenerationRef.current !== submittedBabyNameGeneration
+      )
+      const birthdateChangedSinceSubmission = (
+        birthdateEditGenerationRef.current !== submittedBirthdateGeneration
+      )
+      const babyGenderChangedSinceSubmission = (
+        babyGenderEditGenerationRef.current !== submittedBabyGenderGeneration
+      )
+      const myNameChangedSinceSubmission = myNameEditGenerationRef.current !== submittedMyNameGeneration
+      const myRoleChangedSinceSubmission = myRoleEditGenerationRef.current !== submittedMyRoleGeneration
+      const themeChangedSinceSubmission = themeEditGenerationRef.current !== submittedThemeGeneration
+      const languageChangedSinceSubmission = (
+        languageEditGenerationRef.current !== submittedLanguageGeneration
+      )
+      if (!babyNameChangedSinceSubmission) babyNameDirtyRef.current = false
+      if (!birthdateChangedSinceSubmission) birthdateDirtyRef.current = false
+      if (!babyGenderChangedSinceSubmission) babyGenderDirtyRef.current = false
+      if (!myNameChangedSinceSubmission) myNameDirtyRef.current = false
+      if (!myRoleChangedSinceSubmission) myRoleDirtyRef.current = false
+      if (!themeChangedSinceSubmission) themeDirtyRef.current = false
+      if (!languageChangedSinceSubmission) languageDirtyRef.current = false
 
+      // Cleared fields accept the durable result. Edits made while the save was
+      // pending remain dirty and are therefore not overwritten.
+      hydrateForm(savedSettings)
+
+      if (savedSettings.familyId) {
         // Member entry self-heal: push profile name/role to family doc member entry
         // so that any role/name change is reflected in the shared family doc.
-        const newProfileName = updated.profile?.name ?? ''
-        const newProfileRole = updated.profile?.role ?? 'mom'
+        const newProfileName = savedSettings.profile?.name ?? ''
+        const newProfileRole = savedSettings.profile?.role ?? 'mom'
         updateMemberEntry(newProfileName, newProfileRole).catch(() => {
           // best-effort: non-fatal
         })
@@ -152,37 +315,51 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 
       // Detect race scenario: form was fully blank but disk had data →
       // re-hydrate the form and show info toast instead of normal saved toast
-      const formWasBlank = !babyName.trim() && !birthdate.trim() && !myName.trim()
+      const formWasBlank = !babyInfoWasDirty
+        && !submittedBabyName.trim()
+        && !submittedBirthdate.trim()
+        && !submittedMyName.trim()
       const diskHadData  = !!(current.baby?.name?.trim() || current.baby?.birthdate?.trim() || current.profile?.name?.trim())
 
-      if (formWasBlank && diskHadData) {
-        // Re-hydrate from merged result so the user sees their real data
-        hydrateForm(updated)
+      if (saveResult.babyInfo === 'pending') {
+        showToast({ message: t('settings.babyInfoSavePending') })
+      } else if (formWasBlank
+        && diskHadData
+        && !babyNameChangedSinceSubmission
+        && !birthdateChangedSinceSubmission) {
         showToast({ message: t('settings.restoredFromDisk') })
       } else {
         showToast({ message: t('settings.toastSaved') })
       }
     } catch {
       // P5: surface fs/IPC errors — user must know the save failed
-      showToast({ message: t('settings.toastSaveFail') })
+      showToast({ message: t('settings.toastSaveFail'), tone: 'error' })
     } finally {
       setSaving(false)
     }
   }
 
   const handleLanguageChange = async (lang: Language) => {
+    languageDirtyRef.current = true
+    languageEditGenerationRef.current += 1
+    const languageGeneration = languageEditGenerationRef.current
     setLanguage(lang)
     // P4: always fetch fresh settings from disk before merging — never reconstruct
     // sub-objects from possibly-null Zustand snapshot (would overwrite baby name/uid).
     try {
       const current = await ipc.getSettings()
+      if (languageEditGenerationRef.current !== languageGeneration) return
       await saveSettings({ ...current, language: lang })
+      if (languageEditGenerationRef.current === languageGeneration) languageDirtyRef.current = false
     } catch {
       showToast({ message: t('settings.toastSaveFail') })
     }
   }
 
   const handleThemeChange = async (theme: 'light' | 'dark' | 'system') => {
+    themeDirtyRef.current = true
+    themeEditGenerationRef.current += 1
+    const themeGeneration = themeEditGenerationRef.current
     setCurrentTheme(theme)
     // Apply instantly via data-theme
     let resolved: 'light' | 'dark'
@@ -196,7 +373,9 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
     // sub-objects from possibly-null Zustand snapshot (would overwrite baby name/uid).
     try {
       const current = await ipc.getSettings()
+      if (themeEditGenerationRef.current !== themeGeneration) return
       await saveSettings({ ...current, theme })
+      if (themeEditGenerationRef.current === themeGeneration) themeDirtyRef.current = false
     } catch {
       showToast({ message: t('settings.toastSaveFail') })
     }
@@ -302,6 +481,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <button
                   className={`role-btn${currentLang === 'ko' ? ' selected' : ''}`}
                   onClick={() => handleLanguageChange('ko')}
+                  data-settings-language="ko"
                   lang="ko"
                 >
                   한국어
@@ -309,6 +489,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <button
                   className={`role-btn${currentLang === 'ja' ? ' selected' : ''}`}
                   onClick={() => handleLanguageChange('ja')}
+                  data-settings-language="ja"
                   lang="ja"
                 >
                   日本語
@@ -353,14 +534,68 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   {t('settings.babyInfoSharedHint')}
                 </div>
               )}
+              {settings?.familyId
+                && (unlinkedArchives.length > 0 || unlinkedArchiveLoading || unlinkedArchiveError)
+                && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {unlinkedArchives.map((archive, index) => (
+                    <div
+                      key={archive.archiveId}
+                      data-archive-index={index}
+                      style={{ padding: 10, border: '1px solid var(--stone-200)', borderRadius: 8 }}
+                    >
+                      <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 8 }}>
+                        {t('settings.unlinkedArchiveReview', {
+                          name: archive.babyName || '—',
+                          birthdate: archive.babyBirthdate || '—',
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => applyUnlinkedArchive(archive)}
+                      >
+                        {t('settings.unlinkedArchiveApply')}
+                      </button>
+                    </div>
+                  ))}
+                  {unlinkedArchiveError && (
+                    <div role="alert" style={{ fontSize: 12, color: 'var(--danger)' }}>
+                      {t('settings.unlinkedArchiveLoadError')}
+                    </div>
+                  )}
+                  {unlinkedArchiveCursor && (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={unlinkedArchiveLoading}
+                      onClick={loadMoreUnlinkedArchives}
+                    >
+                      {unlinkedArchiveLoading
+                        ? t('settings.unlinkedArchiveLoading')
+                        : t('settings.unlinkedArchiveLoadMore')}
+                    </button>
+                  )}
+                  {unlinkedArchiveLoading && !unlinkedArchiveCursor && unlinkedArchives.length === 0 && (
+                    <div aria-live="polite" style={{ fontSize: 12 }}>
+                      {t('settings.unlinkedArchiveLoading')}
+                    </div>
+                  )}
+                </div>
+                )}
               <div>
                 <div className="label">{t('settings.babyName')}</div>
                 <input
                   type="text"
                   className="input-field"
+                  data-settings-baby-name
                   placeholder={t('settings.babyNamePlaceholder')}
                   value={babyName}
-                  onChange={e => setBabyName(e.target.value)}
+                  onChange={e => {
+                    babyNameDirtyRef.current = true
+                    babyNameEditGenerationRef.current += 1
+                    setBabyName(e.target.value)
+                  }}
                 />
               </div>
               <div>
@@ -368,8 +603,13 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <input
                   type="date"
                   className="input-field"
+                  data-settings-baby-birthdate
                   value={birthdate}
-                  onChange={e => setBirthdate(e.target.value)}
+                  onChange={e => {
+                    birthdateDirtyRef.current = true
+                    birthdateEditGenerationRef.current += 1
+                    setBirthdate(e.target.value)
+                  }}
                 />
               </div>
               <div>
@@ -377,14 +617,22 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
                     className={`role-btn${babyGender === 'girl' ? ' selected' : ''}`}
-                    onClick={() => setBabyGender(babyGender === 'girl' ? undefined : 'girl')}
+                    onClick={() => {
+                      babyGenderDirtyRef.current = true
+                      babyGenderEditGenerationRef.current += 1
+                      setBabyGender(babyGender === 'girl' ? undefined : 'girl')
+                    }}
                     type="button"
                   >
                     {t('settings.genderGirl')}
                   </button>
                   <button
                     className={`role-btn${babyGender === 'boy' ? ' selected' : ''}`}
-                    onClick={() => setBabyGender(babyGender === 'boy' ? undefined : 'boy')}
+                    onClick={() => {
+                      babyGenderDirtyRef.current = true
+                      babyGenderEditGenerationRef.current += 1
+                      setBabyGender(babyGender === 'boy' ? undefined : 'boy')
+                    }}
                     type="button"
                   >
                     {t('settings.genderBoy')}
@@ -403,9 +651,14 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <input
                   type="text"
                   className="input-field"
+                  data-settings-account-name
                   placeholder={t('settings.myNamePlaceholder')}
                   value={myName}
-                  onChange={e => setMyName(e.target.value)}
+                  onChange={e => {
+                    myNameDirtyRef.current = true
+                    myNameEditGenerationRef.current += 1
+                    setMyName(e.target.value)
+                  }}
                 />
               </div>
               <div>
@@ -413,13 +666,23 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
                     className={`role-btn${myRole === 'mom' ? ' selected' : ''}`}
-                    onClick={() => setMyRole('mom')}
+                    data-settings-account-role="mom"
+                    onClick={() => {
+                      myRoleDirtyRef.current = true
+                      myRoleEditGenerationRef.current += 1
+                      setMyRole('mom')
+                    }}
                   >
                     {t('settings.roleMom')}
                   </button>
                   <button
                     className={`role-btn${myRole === 'dad' ? ' selected' : ''}`}
-                    onClick={() => setMyRole('dad')}
+                    data-settings-account-role="dad"
+                    onClick={() => {
+                      myRoleDirtyRef.current = true
+                      myRoleEditGenerationRef.current += 1
+                      setMyRole('dad')
+                    }}
                   >
                     {t('settings.roleDad')}
                   </button>
@@ -519,14 +782,11 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
             </div>
           </DisclosureSection>
 
-          {/* Care guidance reference card */}
-          <GuidanceReferenceCard lang={i18nInstance.language as 'ko' | 'ja'} />
-
-          {/* Breastfeeding interval guide */}
-          <BreastfeedingGuideCard lang={i18nInstance.language as 'ko' | 'ja'} />
+          {/* Current-stage evidence center — unknown residence keeps both KR/JP official links. */}
+          <AgeGuidancePanel birthdate={birthdate} variant="settings" />
 
           {/* Sync section */}
-          <div data-tour="settings-sync">
+          <div data-tour="settings-sync" data-sync-settings>
             <DisclosureSection
               title={t('settings.syncSection')}
               summary={syncSummary}
@@ -569,7 +829,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 모유수유 간격 참고 / 授乳間隔の目安 — band table + notes accordion
+// 반응형 수유 안내 / 赤ちゃんのサインに応じる授乳
 // ---------------------------------------------------------------------------
 function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
   const { t } = useTranslation()
@@ -604,41 +864,17 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
       </button>
       {open && (
         <div className="card" style={{ marginTop: 8 }}>
-          {/* Band table */}
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 14 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  {lang === 'ja' ? '月齢' : '월령'}
-                </th>
-                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  {t('guidance.bfGuideIntervalHeader')}
-                </th>
-                <th style={{ textAlign: 'left', padding: '4px 6px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  {t('guidance.bfGuideFeedsHeader')}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {BREASTFEEDING_BANDS.map(band => (
-                <tr key={band.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '5px 6px', color: 'var(--text-primary)', fontWeight: 500 }}>
-                    {lang === 'ja' ? band.ageLabelJa : band.ageLabelKo}
-                  </td>
-                  <td style={{ padding: '5px 6px', color: 'var(--text-secondary)' }}>
-                    {band.intervalMaxHours != null
-                      ? `${band.intervalMinHours}~${band.intervalMaxHours}${lang === 'ja' ? '時間' : '시간'}`
-                      : `${band.intervalMinHours}${lang === 'ja' ? '時間以上' : '시간 이상'}`}
-                  </td>
-                  <td style={{ padding: '5px 6px', color: 'var(--text-secondary)' }}>
-                    {band.feedsPerDayMin}~{band.feedsPerDayMax}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div style={{
+            fontSize: 12,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.6,
+            marginBottom: 10,
+            borderLeft: '3px solid var(--sky)',
+            paddingLeft: 10,
+          }}>
+            {BF_RESPONSIVE_GUIDANCE[lang]}
+          </div>
 
-          {/* Newborn rule */}
           <div style={{
             fontSize: 12,
             color: 'var(--text-secondary)',
@@ -647,10 +883,9 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
             borderLeft: '3px solid var(--butter)',
             paddingLeft: 10,
           }}>
-            {lang === 'ja' ? BF_NEWBORN_RULE.ja : BF_NEWBORN_RULE.ko}
+            {BF_NEWBORN_GUIDANCE[lang]}
           </div>
 
-          {/* Cluster note */}
           <div style={{
             fontSize: 12,
             color: 'var(--text-secondary)',
@@ -659,10 +894,9 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
             borderLeft: '3px solid var(--mint)',
             paddingLeft: 10,
           }}>
-            {lang === 'ja' ? BF_CLUSTER_NOTE.ja : BF_CLUSTER_NOTE.ko}
+            {BF_CLUSTER_NOTE[lang]}
           </div>
 
-          {/* Disclaimer */}
           <div style={{
             fontSize: 11.5,
             color: 'var(--text-muted)',
@@ -671,10 +905,9 @@ function BreastfeedingGuideCard({ lang }: { lang: 'ko' | 'ja' }) {
             borderLeft: '3px solid var(--sky)',
             paddingLeft: 10,
           }}>
-            {lang === 'ja' ? BF_DISCLAIMER.ja : BF_DISCLAIMER.ko}
+            {BF_DISCLAIMER[lang]}
           </div>
 
-          {/* Source */}
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {t('guidance.bfGuideSourceLabel')}
           </div>

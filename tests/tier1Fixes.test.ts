@@ -119,13 +119,13 @@ describe('P3: tombstone same-rev propagation', () => {
     expect(result).toBe('duplicate')
   })
 
-  it('tombstone already-deleted duplicate at same rev returns duplicate', () => {
-    // If existing is ALREADY deleted, a duplicate tombstone at same rev should still be 'duplicate'
+  it('distinct legacy tombstones at the same rev are both preserved', () => {
     const id = uuidv4()
-    const existing = makeEvent({ id, rev: 2, deleted: true })
+    const existing = makeEvent({ id, rev: 2, deleted: true, updatedAt: '2026-07-13T08:00:00.000Z' })
     log.append(existing)
-    const anotherTombstone = makeEvent({ id, rev: 2, deleted: true })
-    expect(log.append(anotherTombstone)).toBe('duplicate')
+    const anotherTombstone = makeEvent({ id, rev: 2, deleted: true, updatedAt: '2026-07-13T08:00:01.000Z' })
+    expect(log.append(anotherTombstone)).toBe('ok')
+    expect(log.getAllMutations()).toHaveLength(2)
   })
 })
 
@@ -180,15 +180,18 @@ describe('P5: settings.save() error surfacing logic', () => {
     })).toThrow(/save failed/)
   })
 
-  it('save to non-existent directory throws a structured error (real fs test)', () => {
-    const badStore = new SettingsStore(path.join(tmpDir, 'nonexistent-subdir'))
+  it('save creates a missing settings directory before the durable atomic replace', () => {
+    const nestedDir = path.join(tmpDir, 'nonexistent-subdir')
+    const nestedStore = new SettingsStore(nestedDir)
     const settings: AppSettings = {
       baby: { name: 'Test', birthdate: '' },
       profile: { uid: '', name: '', role: 'mom' },
       familyId: '',
       firebase: null,
     }
-    expect(() => badStore.save(settings)).toThrow(/save failed/)
+    expect(() => nestedStore.save(settings)).not.toThrow()
+    expect(fs.existsSync(path.join(nestedDir, 'settings.json'))).toBe(true)
+    expect(new SettingsStore(nestedDir).get().profile.role).toBe('mom')
   })
 })
 
@@ -278,15 +281,21 @@ describe('P10: settings deep-merge on load', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('JSON with only baby.name preserves default birthdate (not undefined)', () => {
+  it('archives an unlinked partial baby pair and keeps the visible pair blank', () => {
     const settingsPath = path.join(tmpDir, 'settings.json')
-    // Write partial JSON — baby has only name, missing birthdate
+    // Write a pre-journal familyless pair with a missing birthdate.
     fs.writeFileSync(settingsPath, JSON.stringify({ baby: { name: 'Alice' } }), 'utf-8')
 
     const store = new SettingsStore(tmpDir)
     const s = store.get()
-    expect(s.baby.name).toBe('Alice')
-    expect(s.baby.birthdate).toBe('')  // defaulted, not undefined
+    expect(s.baby).toMatchObject({ name: '', birthdate: '' })
+    expect(store.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
+      expect.objectContaining({ babyName: 'Alice', babyBirthdate: '' }),
+    ])
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({ name: '', birthdate: '' })
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toHaveLength(1)
   })
 
   it('JSON with only profile.name preserves default role', () => {
