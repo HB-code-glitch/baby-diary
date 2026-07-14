@@ -27,6 +27,7 @@ import {
   ensureEventMutationIdentity,
   getEventContentId,
   getEventStorageKey,
+  isExactAuthBoundDerivative,
   isValidEventId,
   isValidMutationId,
   validateDiaryEvent,
@@ -1154,9 +1155,9 @@ export function enqueue(event: DiaryEvent): void {
  * Prepares the exact record that will be uploaded, durably, before any cloud write
  * is attempted.
  *
- * If `source` is already upload-ready for `writerUid` (native modern write, already
- * auth-bound with sync metadata), it IS the derivative — nothing new is appended and
- * it is returned unchanged.
+ * An already auth-bound derivative for `writerUid` is returned unchanged. Every
+ * migration-free source, including an owned old native cloud record, is projected
+ * to the same deterministic next-revision derivative.
  *
  * Otherwise a deterministic auth-bound derivative is computed (never mutating
  * `source`), appended through the existing main-process EventLog IPC — which
@@ -1573,12 +1574,36 @@ async function reconcile(context: SyncContext): Promise<void> {
       console.error(`[syncEngine] reconcile ignored invalid local event: ${validationError}`)
       continue
     }
-    const mutation = ensureEventMutationIdentity(localEvent)
-    localMutationMap.set(makeDocId(mutation), mutation)
+    // Deduplicate through the projected physical identity, but retain the exact
+    // source bytes. Legacy provenance and its deterministic canonical derivative
+    // are defined from the original mutation-less payload, not from the projection.
+    const projectedIdentity = ensureEventMutationIdentity(localEvent)
+    const normalizedKey = getEventStorageKey(projectedIdentity)
+    const existing = localMutationMap.get(normalizedKey)
+    const localIsRawLegacy = localEvent.mutationId === undefined
+    const existingIsRawLegacy = existing !== undefined && existing.mutationId === undefined
+    if (
+      existing === undefined
+      || (localIsRawLegacy && !existingIsRawLegacy)
+      || (localIsRawLegacy === existingIsRawLegacy
+        && canonicalEventJson(localEvent) < canonicalEventJson(existing))
+    ) {
+      localMutationMap.set(normalizedKey, localEvent)
+    }
   }
   assertCurrent(context)
   const localEvents = Array.from(localMutationMap.values())
   const localDocIds = new Set<string>(localEvents.map(makeDocId))
+
+  // localStorage is only a retry cache. If an older build projected a raw legacy
+  // source while loading that cache, restore the exact durable-log source before
+  // any reconciliation upload or later queue drain derives canonical provenance.
+  _pending = _pending.map(pending => {
+    if (pending.event.migration !== undefined) return pending
+    const normalizedKey = getEventStorageKey(ensureEventMutationIdentity(pending.event))
+    const durableSource = localMutationMap.get(normalizedKey)
+    return durableSource ? { ...pending, event: durableSource } : pending
+  })
 
   // 원격 이벤트 docs 전체 조회
   const eventsRef = collection(db, 'families', familyId, 'events')
@@ -1597,6 +1622,34 @@ async function reconcile(context: SyncContext): Promise<void> {
     remoteDocIds.add(d.id)
     remoteDocuments.push({ docId: d.id, event })
   })
+  const normalizedRemoteSourceKeys = new Set(
+    remoteDocuments
+      .map(({ event }) => event)
+      .filter(event => event.migration === undefined)
+      .map(event => getEventStorageKey(ensureEventMutationIdentity(event))),
+  )
+  const remoteCanonicalCandidatesBySourceContentId = new Map<string, DiaryEvent[]>()
+  for (const { event } of remoteDocuments) {
+    if (event.migration?.kind !== 'legacy-author-v1') continue
+    const sourceContentId = event.migration.sourceContentId
+    const candidates = remoteCanonicalCandidatesBySourceContentId.get(sourceContentId)
+    if (candidates) candidates.push(event)
+    else remoteCanonicalCandidatesBySourceContentId.set(sourceContentId, [event])
+  }
+
+  const hasExactRemoteCanonical = (source: DiaryEvent): boolean => {
+    const candidates = remoteCanonicalCandidatesBySourceContentId.get(getEventContentId(source))
+    return candidates?.some(candidate => isExactAuthBoundDerivative(candidate, source)) ?? false
+  }
+
+  const remoteSourcePolicyBlocksUpload = (source: DiaryEvent): boolean => {
+    if (source.migration !== undefined) return false
+    const exactRemoteSourceExists = normalizedRemoteSourceKeys.has(
+      getEventStorageKey(ensureEventMutationIdentity(source)),
+    )
+    return (exactRemoteSourceExists && source.author.uid !== user.uid)
+      || hasExactRemoteCanonical(source)
+  }
 
   // 1. 원격에 없는 로컬 이벤트 → 업로드.
   // Restart reconstruction (localStorage `_pending` is a cache, not authority):
@@ -1617,8 +1670,14 @@ async function reconcile(context: SyncContext): Promise<void> {
   // and deterministically re-derives the exact correct derivative for the
   // current account.
   const toUpload = localEvents.filter(e => {
-    if (remoteDocIds.has(makeDocId(e))) return false
     if (e.migration !== undefined) return false
+    // A remote native source owned by another family member is read-only here.
+    // Locally-created cross-account edits have no source document in the cloud,
+    // while an owned legacy native source may be canonically upgraded after restart.
+    if (remoteSourcePolicyBlocksUpload(e)) return false
+    // One canonical cloud projection per immutable source, regardless of which
+    // family member wrote it. Legacy same-revision derivatives fail this exact
+    // next-revision check and are upgraded from the retained source.
     try {
       const prospective = deriveUploadReadyEvent(e, user.uid)
       if (remoteDocIds.has(makeCloudEventDocId(prospective))) return false
@@ -1628,8 +1687,18 @@ async function reconcile(context: SyncContext): Promise<void> {
     }
     return true
   })
-  await batchUpload(toUpload, context)
+  const reconciledUploadIds = await batchUpload(toUpload, context)
   assertCurrent(context)
+
+  // A reconnect may restore stale source entries from localStorage after another
+  // family member already uploaded the exact canonical derivative. Apply the same
+  // source policy used above before the post-connect queue drain can re-project it.
+  _pending = _pending.filter(({ event }) => (
+    !reconciledUploadIds.has(makeDocId(event))
+    && !remoteSourcePolicyBlocksUpload(event)
+  ))
+  savePending(_pending)
+  syncPendingCount()
 
   // 2. 로컬에 없는 원격 이벤트 → 로컬 append
   const locallyConfirmedDocIds = new Set(localDocIds)

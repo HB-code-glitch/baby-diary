@@ -326,18 +326,19 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
   // ──────────────────────────────────────────────────────────
 
   describe('ensureDurableUploadDerivative', () => {
-    it('returns an already upload-ready native event unchanged and never touches the EventLog', async () => {
+    it('canonically projects an owned native event and durably appends it before upload', async () => {
       const engine = await importFreshEngine()
       const uid = 'writer-uid'
       const native = makeEvent({ author: { uid, name: 'Parent', role: 'mom' } })
       const source = { ...native, sync: createEventSyncMetadata(native) }
       const ready = deriveUploadReadyEvent(source, uid)
-      expect(ready).toBe(source) // already upload-ready: no derivation needed
+      expect(ready).not.toBe(source)
 
       const result = await engine.ensureDurableUploadDerivative(source, uid)
-      expect(result).toBe(source)
+      expect(result).toEqual(ready)
       const { ipc } = await import('../src/lib/ipc')
-      expect(ipc.appendEvent).not.toHaveBeenCalled()
+      expect(ipc.appendEvent).toHaveBeenCalledWith(ready)
+      expect(harness.mutations.has(getEventStorageKey(ready))).toBe(true)
     })
 
     it('derives a legacy/foreign-author event, durably appends it, then reads it back before returning', async () => {
@@ -567,6 +568,43 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
   // ──────────────────────────────────────────────────────────
 
   describe('account switch and restart reconstruction', () => {
+    it('upgrades an owned legacy native cloud source even when its old document is already remote', async () => {
+      const familyId = 'family-owned-upgrade'
+      const uid = 'owner-account'
+      seedFamily(familyId, uid)
+      const native = makeEvent({ author: { uid, name: 'Owner', role: 'mom' } })
+      const source = { ...native, sync: createEventSyncMetadata(native) }
+      const canonical = deriveUploadReadyEvent(source, uid)
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      harness.store.set(eventDocPath(familyId, source), { event: structuredClone(source) })
+
+      const engine = await connect(uid, 'owner@example.test', familyId)
+
+      await vi.waitFor(() => {
+        expect(harness.store.get(eventDocPath(familyId, canonical))).toEqual({ event: canonical })
+      })
+      expect(harness.store.get(eventDocPath(familyId, source))).toEqual({ event: source })
+      engine.stop()
+    })
+
+    it('does not re-project another member remote native source under the current account', async () => {
+      const familyId = 'family-foreign-native'
+      const uid = 'reader-account'
+      seedFamily(familyId, uid)
+      const native = makeEvent({ author: { uid: 'other-member', name: 'Other', role: 'dad' } })
+      const source = { ...native, sync: createEventSyncMetadata(native) }
+      const forbiddenProjection = deriveUploadReadyEvent(source, uid)
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      harness.store.set(eventDocPath(familyId, source), { event: structuredClone(source) })
+
+      const engine = await connect(uid, 'reader@example.test', familyId)
+      await vi.waitFor(() => expect(engine.getStatus().status).toBe('online'))
+
+      expect(harness.store.has(eventDocPath(familyId, forbiddenProjection))).toBe(false)
+      expect(harness.mutations.has(getEventStorageKey(forbiddenProjection))).toBe(false)
+      engine.stop()
+    })
+
     it('never rebinds or removes account A\'s uploaded derivative after account B connects and reconciles', async () => {
       const familyId = 'shared-family'
       const uidA = 'account-a'
@@ -598,9 +636,91 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       expect(harness.store.get(docPathA)).toEqual(bytesAfterA)
       // A's durable local derivative record must still exist, untouched.
       expect(harness.mutations.get(getEventStorageKey(derivativeA))).toEqual(derivativeA)
+      const derivativeB = deriveUploadReadyEvent(source, uidB)
+      expect(harness.store.has(eventDocPath(familyId, derivativeB))).toBe(false)
+      const eventDocPrefix = `families/${familyId}/events/`
+      expect(Array.from(harness.store.keys()).filter(path => path.startsWith(eventDocPrefix)))
+        .toEqual([docPathA])
     })
 
-    it('discovers and uploads a derivative that was durably appended by a crashed prior run, with no localStorage pending record at all', async () => {
+    it('clears a stale pending source when another member already uploaded its exact canonical derivative', async () => {
+      const familyId = 'family-stale-pending-canonical'
+      const uidA = 'account-a'
+      const uidB = 'account-b'
+      seedFamily(familyId, uidB)
+
+      const source = makeEvent()
+      const derivativeA = deriveUploadReadyEvent(source, uidA)
+      const derivativeB = deriveUploadReadyEvent(source, uidB)
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      harness.store.set(eventDocPath(familyId, derivativeA), { event: structuredClone(derivativeA) })
+      localStorage.setItem('babydiary.pendingUploads', JSON.stringify([
+        { event: source, attempts: 0, nextRetry: 0 },
+      ]))
+
+      const engineB = await connect(uidB, 'b@example.test', familyId)
+      await vi.waitFor(() => expect(engineB.getStatus().pendingCount).toBe(0))
+
+      expect(readPendingFromLocalStorage()).toHaveLength(0)
+      expect(harness.store.has(eventDocPath(familyId, derivativeB))).toBe(false)
+      const eventDocPrefix = `families/${familyId}/events/`
+      expect(Array.from(harness.store.keys()).filter(path => path.startsWith(eventDocPrefix)))
+        .toEqual([eventDocPath(familyId, derivativeA)])
+      engineB.stop()
+    })
+
+    it('clears a stale pending source when the exact foreign native source is already remote', async () => {
+      const familyId = 'family-stale-pending-foreign-source'
+      const uid = 'reader-account'
+      seedFamily(familyId, uid)
+
+      const native = makeEvent({ author: { uid: 'other-member', name: 'Other', role: 'dad' } })
+      const source = { ...native, sync: createEventSyncMetadata(native) }
+      const forbiddenProjection = deriveUploadReadyEvent(source, uid)
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      harness.store.set(eventDocPath(familyId, source), { event: structuredClone(source) })
+      localStorage.setItem('babydiary.pendingUploads', JSON.stringify([
+        { event: source, attempts: 0, nextRetry: 0 },
+      ]))
+
+      const engine = await connect(uid, 'reader@example.test', familyId)
+      await vi.waitFor(() => expect(engine.getStatus().pendingCount).toBe(0))
+
+      expect(readPendingFromLocalStorage()).toHaveLength(0)
+      expect(harness.store.has(eventDocPath(familyId, forbiddenProjection))).toBe(false)
+      engine.stop()
+    })
+
+    it('restores raw legacy provenance from the durable log before draining a stale pending projection', async () => {
+      const familyId = 'family-raw-stale-pending'
+      const uid = 'writer-account'
+      seedFamily(familyId, uid)
+
+      const rawSource = makeEvent({
+        id: 'raw-stale-pending',
+        mutationId: undefined,
+        data: { celsius: 36.9 },
+      })
+      const { ensureEventMutationIdentity } = await import('../shared/eventResolver')
+      const identifiedProjection = ensureEventMutationIdentity(rawSource)
+      const expectedCanonical = deriveUploadReadyEvent(rawSource, uid)
+      const wrongCanonical = deriveUploadReadyEvent(identifiedProjection, uid)
+      harness.mutations.set(getEventStorageKey(rawSource), structuredClone(rawSource))
+      localStorage.setItem('babydiary.pendingUploads', JSON.stringify([
+        { event: rawSource, attempts: 0, nextRetry: 0 },
+      ]))
+
+      const engine = await connect(uid, 'writer@example.test', familyId)
+      await vi.waitFor(() => expect(engine.getStatus().pendingCount).toBe(0))
+
+      expect(harness.store.get(eventDocPath(familyId, expectedCanonical)))
+        .toEqual({ event: expectedCanonical })
+      expect(harness.store.has(eventDocPath(familyId, wrongCanonical))).toBe(false)
+      expect(readPendingFromLocalStorage()).toHaveLength(0)
+      engine.stop()
+    })
+
+    it('upgrades a crashed legacy same-revision derivative from its preserved source without pending state', async () => {
       const familyId = 'family-restart'
       const uid = 'writer-uid'
       seedFamily(familyId, uid)
@@ -609,7 +729,8 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       // process EventLog), then crashed before the Firestore write ever happened.
       // localStorage was never written (or was cleared) — nothing in `_pending`.
       const source = makeEvent()
-      const priorDerivative = deriveUploadReadyEvent(source, uid)
+      const canonicalDerivative = deriveUploadReadyEvent(source, uid)
+      const priorDerivative = { ...canonicalDerivative, rev: source.rev }
       harness.mutations.set(getEventStorageKey(source), structuredClone(source))
       harness.mutations.set(getEventStorageKey(priorDerivative), structuredClone(priorDerivative))
       expect(localStorage.getItem('babydiary.pendingUploads')).toBeNull()
@@ -617,8 +738,10 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const engine = await connect(uid, 'g@example.test', familyId)
 
       await vi.waitFor(() => {
-        expect(harness.store.get(eventDocPath(familyId, priorDerivative))).toEqual({ event: priorDerivative })
+        expect(harness.store.get(eventDocPath(familyId, canonicalDerivative))).toEqual({ event: canonicalDerivative })
       })
+      expect(harness.mutations.get(getEventStorageKey(priorDerivative))).toEqual(priorDerivative)
+      expect(harness.mutations.get(getEventStorageKey(canonicalDerivative))).toEqual(canonicalDerivative)
       expect(engine.getStatus().status).toBe('online')
     })
 

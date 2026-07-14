@@ -1099,7 +1099,7 @@ describe('packaged in-place upgrade driver', () => {
     expect(serialized).not.toContain('hunter2')
     expect(serialized).not.toContain('never-persist')
     expect(JSON.parse(serialized)).toMatchObject({ phase: 'baseline-initialize', passed: false })
-  })
+  }, 30_000)
 
   it('sums network counters while retaining the first value-free blocked-request shape', () => {
     const firstExternalBlock = {

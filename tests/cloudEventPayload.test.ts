@@ -10,7 +10,13 @@ import {
   makeCloudEventDocId,
   parseCloudEventPayload,
 } from '../shared/cloudEventPayload'
-import { getEventContentId } from '../shared/eventResolver'
+import {
+  compareEventMutations,
+  deriveAuthBoundEvent,
+  getEventContentId,
+  isExactAuthBoundDerivative,
+  resolveLatestEvent,
+} from '../shared/eventResolver'
 
 const NOW = Date.parse('2026-07-13T12:00:00.000Z')
 const WRITER_UID = 'firebase-writer-uid'
@@ -32,10 +38,12 @@ function event(overrides: Partial<DiaryEvent> = {}): DiaryEvent {
 }
 
 describe('cloud event transport payload', () => {
-  it('binds native modern writes with exact bounded timestamp shadows inside { event }', () => {
+  it('treats native writes as sources and only their canonical projection as upload-ready', () => {
     const source = event()
-    const ready = { ...source, sync: createEventSyncMetadata(source) }
+    const native = { ...source, sync: createEventSyncMetadata(source) }
+    const ready = deriveUploadReadyEvent(native, WRITER_UID)
 
+    expect(isUploadReadyEvent(native, WRITER_UID)).toBe(false)
     expect(isUploadReadyEvent(ready, WRITER_UID)).toBe(true)
     expect(ready.sync).toEqual({
       version: 1,
@@ -47,6 +55,8 @@ describe('cloud event transport payload', () => {
     const docId = makeCloudEventDocId(ready)
     expect(parseCloudEventPayload(docId, { event: ready }, NOW)?.event).toEqual(ready)
     expect(parseCloudEventPayload(docId, { event: ready, writerUid: WRITER_UID }, NOW)).toBeNull()
+    expect(ready.rev).toBe(Date.parse(source.updatedAt))
+    expect(ready.mutationId).toBe(source.mutationId)
 
     const clockPoison = { ...ready, rev: NOW + CLOUD_FUTURE_SKEW_MS + 1 }
     expect(parseCloudEventPayload(
@@ -77,6 +87,124 @@ describe('cloud event transport payload', () => {
     expect(eventMigrationSourceContentId(derived)).toBe(getEventContentId(source))
     expect(isUploadReadyEvent(derived, WRITER_UID)).toBe(true)
     expect(parseCloudEventPayload(makeCloudEventDocId(derived), { event: derived }, NOW)?.event).toEqual(derived)
+  })
+
+  it('always resolves an exact auth-bound derivative over its retained source', () => {
+    const source = event({
+      mutationId: 'ffffffff-ffff-4fff-bfff-ffffffffffff',
+      author: { uid: 'other-account', name: 'Original display name', role: 'dad' },
+      sync: createEventSyncMetadata(event()),
+    })
+    source.sync = createEventSyncMetadata(source)
+    const derivative = deriveUploadReadyEvent(source, WRITER_UID)
+
+    expect(derivative).toEqual(deriveAuthBoundEvent(source, WRITER_UID))
+    expect(isExactAuthBoundDerivative(derivative, source)).toBe(true)
+    expect(isExactAuthBoundDerivative({ ...derivative, rev: source.rev }, source)).toBe(false)
+    expect(isExactAuthBoundDerivative({ ...derivative, data: { celsius: 39.9 } }, source)).toBe(false)
+    expect(resolveLatestEvent([source, derivative])).toEqual(derivative)
+    expect(resolveLatestEvent([derivative, source])).toEqual(derivative)
+  })
+
+  it('never gives forged migration claims privileged resolver priority', () => {
+    const source = event({
+      mutationId: 'ffffffff-ffff-4fff-bfff-ffffffffffff',
+      author: { uid: 'other-account', name: 'Original display name', role: 'dad' },
+    })
+    const exact = deriveUploadReadyEvent(source, WRITER_UID)
+    const forgeries: DiaryEvent[] = [
+      { ...exact, rev: source.rev, mutationId: 'eeeeeeee-eeee-5eee-aeee-eeeeeeeeeeee' },
+      { ...exact, rev: source.rev, data: { celsius: 39.9 } },
+      { ...exact, rev: source.rev, author: { ...exact.author, name: 'Forged name' } },
+      { ...exact, rev: source.rev, author: { ...exact.author, role: 'mom' } },
+      { ...exact, rev: source.rev, sync: { ...exact.sync!, updatedAtMs: exact.sync!.updatedAtMs + 1 } },
+    ]
+
+    const migratedSource: DiaryEvent = {
+      ...source,
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: getEventContentId(source),
+      },
+    }
+    forgeries.push({
+      ...exact,
+      rev: migratedSource.rev,
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: getEventContentId(migratedSource),
+      },
+    })
+
+    for (const forged of forgeries.slice(0, -1)) {
+      expect(forged.migration?.sourceContentId).toBe(getEventContentId(source))
+      const ordinaryWinner = compareEventMutations(forged, source) > 0 ? forged : source
+      expect(resolveLatestEvent([source, forged])).toEqual(ordinaryWinner)
+      expect(resolveLatestEvent([forged, source])).toEqual(ordinaryWinner)
+    }
+    const reboundForgery = forgeries.at(-1)!
+    expect(reboundForgery.migration?.sourceContentId).toBe(getEventContentId(migratedSource))
+    const reboundWinner = compareEventMutations(reboundForgery, migratedSource) > 0
+      ? reboundForgery
+      : migratedSource
+    expect(resolveLatestEvent([migratedSource, reboundForgery])).toEqual(reboundWinner)
+    expect(resolveLatestEvent([reboundForgery, migratedSource])).toEqual(reboundWinner)
+  })
+
+  it('keeps revision and tombstone safety ahead of identity tie-breaks', () => {
+    const source = event({
+      mutationId: 'ffffffff-ffff-4fff-bfff-ffffffffffff',
+      author: { uid: 'other-account', name: 'Original display name', role: 'dad' },
+    })
+    const derivative = deriveUploadReadyEvent(source, WRITER_UID)
+    const higherRevisionSource = { ...source, rev: derivative.rev + 1 }
+
+    expect(resolveLatestEvent([higherRevisionSource, derivative])).toEqual(higherRevisionSource)
+    expect(resolveLatestEvent([derivative, higherRevisionSource])).toEqual(higherRevisionSource)
+
+    const tombstoneSource = { ...source, deleted: true }
+    const forgedLiveDerivative = {
+      ...deriveUploadReadyEvent(tombstoneSource, WRITER_UID),
+      rev: tombstoneSource.rev,
+      deleted: false,
+    }
+    expect(getEventContentId(tombstoneSource)).toBe(forgedLiveDerivative.migration?.sourceContentId)
+    expect(resolveLatestEvent([tombstoneSource, forgedLiveDerivative])).toEqual(tombstoneSource)
+    expect(resolveLatestEvent([forgedLiveDerivative, tombstoneSource])).toEqual(tombstoneSource)
+  })
+
+  it('keeps a deterministic total order for unrelated same-revision mutations', () => {
+    const left = event({ mutationId: '11111111-1111-4111-8111-111111111111' })
+    const right = event({ mutationId: 'eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee' })
+    const forward = resolveLatestEvent([left, right])
+
+    expect(resolveLatestEvent([right, left])).toEqual(forward)
+    expect([left, right]).toContainEqual(forward)
+  })
+
+  it('preserves the source conflict winner after every source is canonically projected', () => {
+    const lowerSource = event({ mutationId: '11111111-1111-4111-8111-111111111111' })
+    const higherSource = event({ mutationId: 'eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee' })
+    const lowerCanonical = deriveUploadReadyEvent(lowerSource, WRITER_UID)
+    const higherCanonical = deriveUploadReadyEvent(higherSource, WRITER_UID)
+
+    expect(resolveLatestEvent([lowerSource, higherSource])).toEqual(higherSource)
+    expect(lowerCanonical.rev).toBe(higherCanonical.rev)
+    expect(lowerCanonical.mutationId).toBe(lowerSource.mutationId)
+    expect(higherCanonical.mutationId).toBe(higherSource.mutationId)
+    expect(resolveLatestEvent([lowerCanonical, higherCanonical])).toEqual(higherCanonical)
+  })
+
+  it('lets a preserved source deterministically supersede a legacy same-revision derivative', () => {
+    const source = event({ author: { uid: 'legacy-owner', name: 'Parent', role: 'mom' } })
+    const canonical = deriveUploadReadyEvent(source, WRITER_UID)
+    const legacySameRevision = { ...canonical, rev: source.rev }
+
+    expect(isUploadReadyEvent(legacySameRevision, WRITER_UID)).toBe(true)
+    expect(resolveLatestEvent([source, legacySameRevision, canonical])).toEqual(canonical)
+    expect(canonical.rev).toBeGreaterThan(legacySameRevision.rev)
   })
 
   it('migrates missing-mutationId legacy records losslessly and reads old legacy documents', () => {

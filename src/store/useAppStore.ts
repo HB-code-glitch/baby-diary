@@ -311,8 +311,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     // while the modal was open — prevents the edit being silently dropped by
     // mergeEventIntoList (incoming.rev not > existing.rev).
     const liveRev = get().events.find(e => e.id === original.id)?.rev ?? original.rev
+    const { migration: _priorMigration, ...freshSource } = original
     const baseUpdated: DiaryEvent = {
-      ...original,
+      ...freshSource,
       ...patch,
       updatedAt: t,
       rev: nextHybridLogicalClock(Math.max(original.rev, liveRev), Date.parse(t)),
@@ -344,8 +345,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     let partial = false
     for (const event of targets) {
       const updatedAt = now()
+      const { migration: _priorMigration, ...freshSource } = event
       const baseTombstone: DiaryEvent = {
-        ...event,
+        ...freshSource,
         deleted: true,
         updatedAt,
         rev: nextHybridLogicalClock(event.rev, Date.parse(updatedAt)),

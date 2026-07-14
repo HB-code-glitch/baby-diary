@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { validateDiaryEvent } from '../shared/eventResolver'
 import {
   FIREBASE_AUTH_PORT,
   FIREBASE_CLI_VERSION,
@@ -24,6 +25,7 @@ import {
   buildFirebaseCliInvocation,
   buildExpectedDeletedEvent,
   buildExpectedEditedEvent,
+  buildExpectedCanonicalMutation,
   buildSameRevisionConflicts,
   buildSeedSettings,
   classifyFirstLaunchState,
@@ -35,6 +37,8 @@ import {
   installNetworkGuards,
   isAllowedNetworkUrl,
   makeMutationDocId,
+  matchesExpectedLocalOperationMutation,
+  nextExpectedHybridLogicalClock,
   normalizeConvergence,
   normalizeSemanticEvents,
   ownedProcessTreePids,
@@ -500,6 +504,11 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       rev: 1,
       deleted: false,
       mutationId: '11111111-1111-4111-8111-111111111111',
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: 'bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb',
+      },
     }
     const dynamic = {
       updatedAt: '2026-07-13T08:10:00.000Z',
@@ -511,12 +520,20 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       dynamic,
       { startedAt: Date.parse('2026-07-13T08:09:59.000Z'), finishedAt: Date.parse('2026-07-13T08:10:01.000Z') },
     )
+    const { migration: _priorMigration, ...freshOriginal } = original
     expect(edited).toEqual({
-      ...original,
+      ...freshOriginal,
       at: '2026-07-13T07:30:00.000Z',
       updatedAt: dynamic.updatedAt,
-      rev: 2,
+      rev: Date.parse(dynamic.updatedAt),
       mutationId: dynamic.mutationId,
+      sync: {
+        version: 1,
+        encodedEventId: original.id,
+        eventAtMs: Date.parse('2026-07-13T07:30:00.000Z'),
+        createdAtMs: Date.parse(original.createdAt),
+        updatedAtMs: Date.parse(dynamic.updatedAt),
+      },
     })
     expect(edited.data).toEqual(original.data)
     expect(edited.author).toEqual(original.author)
@@ -527,17 +544,74 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       { startedAt: Date.parse('2026-07-13T08:09:59.000Z'), finishedAt: Date.parse('2026-07-13T08:10:01.000Z') },
     )
     expect(deleted).toEqual({
-      ...original,
+      ...freshOriginal,
       deleted: true,
       updatedAt: dynamic.updatedAt,
-      rev: 2,
+      rev: Date.parse(dynamic.updatedAt),
       mutationId: dynamic.mutationId,
+      sync: {
+        version: 1,
+        encodedEventId: original.id,
+        eventAtMs: Date.parse(original.at),
+        createdAtMs: Date.parse(original.createdAt),
+        updatedAtMs: Date.parse(dynamic.updatedAt),
+      },
     })
+    expect(edited.migration).toBeUndefined()
+    expect(deleted.migration).toBeUndefined()
     expect(semanticEventsEqual(edited, { ...edited, data: { side: 'right', ml: 80 } })).toBe(false)
     expect(() => buildExpectedEditedEvent(original, edited.at, {
       ...dynamic,
       mutationId: original.mutationId,
     }, { startedAt: 0, finishedAt: Number.MAX_SAFE_INTEGER })).toThrow(/mutation/i)
+
+    const futureLogicalClock = Date.parse(dynamic.updatedAt) + 10
+    expect(nextExpectedHybridLogicalClock(futureLogicalClock, dynamic.updatedAt))
+      .toBe(futureLogicalClock + 1)
+    expect(() => nextExpectedHybridLogicalClock(Number.MAX_SAFE_INTEGER, dynamic.updatedAt))
+      .toThrow(/revision|clock/i)
+    expect(() => nextExpectedHybridLogicalClock(original.rev, 'invalid-date'))
+      .toThrow(/updatedAt/i)
+  })
+
+  it('captures only the new local v4 operation after the authoritative live winner', () => {
+    const prior = {
+      id: 'cross-account-event',
+      type: 'pee',
+      at: '2026-07-13T08:00:00.000Z',
+      data: {},
+      author: { uid: 'account-a', name: 'A', role: 'mom' },
+      createdAt: '2026-07-13T08:00:00.000Z',
+      updatedAt: '2026-07-13T08:00:01.000Z',
+      rev: Date.parse('2026-07-13T08:00:01.000Z'),
+      deleted: false,
+      mutationId: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa',
+    }
+    const expectedAt = '2026-07-13T07:30:00.000Z'
+    const startedAt = Date.parse('2026-07-13T08:09:59.000Z')
+    const finishedAt = Date.parse('2026-07-13T08:10:01.000Z')
+    const staleHigherDerivative = {
+      ...prior,
+      rev: prior.rev + 1,
+      mutationId: 'bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb',
+    }
+    const localSource = {
+      ...prior,
+      at: expectedAt,
+      updatedAt: '2026-07-13T08:10:00.000Z',
+      rev: Date.parse('2026-07-13T08:10:00.000Z'),
+      mutationId: '22222222-2222-4222-8222-222222222222',
+    }
+    const operation = { prior, expectedAt, expectedDeleted: false, startedAt, finishedAt }
+
+    expect(matchesExpectedLocalOperationMutation(staleHigherDerivative, operation)).toBe(false)
+    expect(matchesExpectedLocalOperationMutation(localSource, operation)).toBe(true)
+    const canonical = buildExpectedCanonicalMutation(localSource, 'account-b')
+    expect(canonical.author.uid).toBe('account-b')
+    expect(canonical.mutationId).toBe(localSource.mutationId)
+    expect(canonical.rev).toBe(localSource.rev + 1)
+    expect(buildExpectedCanonicalMutation(localSource, 'account-b')).toEqual(canonical)
+    expect(localSource.author.uid).toBe('account-a')
   })
 
   it('decodes and compares the complete event stored in a Firestore emulator document', () => {
@@ -698,14 +772,27 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       updatedAt: '2026-07-13T08:00:00.000Z',
       rev: 1,
       deleted: false,
+      sync: {
+        version: 1,
+        encodedEventId: 'shared-event',
+        eventAtMs: Date.parse('2026-07-13T08:00:00.000Z'),
+        createdAtMs: Date.parse('2026-07-13T08:00:00.000Z'),
+        updatedAtMs: Date.parse('2026-07-13T08:00:00.000Z'),
+      },
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa',
+      },
     }
 
-    const [a, b] = buildSameRevisionConflicts(base, 1_752_393_601_000)
+    const nowMs = 1_752_393_601_000
+    const [a, b] = buildSameRevisionConflicts(base, nowMs)
 
     expect(a.id).toBe(base.id)
     expect(b.id).toBe(base.id)
-    expect(a.rev).toBe(2)
-    expect(b.rev).toBe(2)
+    expect(a.rev).toBe(nowMs)
+    expect(b.rev).toBe(nowMs)
     expect(a.deleted).toBe(false)
     expect(b.deleted).toBe(false)
     expect(a.at).not.toBe(b.at)
@@ -713,11 +800,23 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(a.mutationId).toMatch(/^[0-9a-f-]{36}$/)
     expect(b.mutationId).toMatch(/^[0-9a-f-]{36}$/)
     expect(a.mutationId).not.toBe(b.mutationId)
+    expect(a.migration).toBeUndefined()
+    expect(b.migration).toBeUndefined()
+    expect(validateDiaryEvent(a)).toBeNull()
+    expect(validateDiaryEvent(b)).toBeNull()
+    expect(a.sync).toEqual({
+      version: 1,
+      encodedEventId: 'shared-event',
+      eventAtMs: Date.parse(a.at),
+      createdAtMs: Date.parse(a.createdAt),
+      updatedAtMs: nowMs,
+    })
+    expect(b.sync).toEqual({ ...a.sync, eventAtMs: Date.parse(b.at) })
     expect(selectMutationWinner([b, a])).toEqual(b)
     expect(selectMutationWinner([a, b])).toEqual(b)
     expect(normalizeConvergence([b, a])).toEqual([{
       id: base.id,
-      rev: 2,
+      rev: nowMs,
       deleted: false,
       mutationId: b.mutationId,
     }])

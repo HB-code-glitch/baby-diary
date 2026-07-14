@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppSettings, DiaryEvent } from '../shared/types'
-import { createEventSyncMetadata } from '../shared/cloudEventPayload'
+import { createEventSyncMetadata, deriveUploadReadyEvent } from '../shared/cloudEventPayload'
 import { getEventStorageKey } from '../shared/eventResolver'
 
 type FakeDoc = {
@@ -359,9 +359,85 @@ describe('sync mutation collision integration', () => {
     harness.remote.set(m2DocId, event)
 
     const engine = await connectEngine()
+    const canonical = deriveUploadReadyEvent(event, harness.auth.currentUser.uid)
 
     expect(harness.remote.has(m2DocId)).toBe(true)
-    expect(harness.remote.has(engine.makeDocId(event))).toBe(true)
+    expect(harness.remote.has(engine.makeDocId(canonical))).toBe(true)
+    expect(harness.remote.size).toBe(2)
+    engine.stop()
+  })
+
+  it.each(['raw-first', 'projection-first'] as const)(
+    'preserves raw legacy source bytes when its identified projection shares the normalized key (%s)',
+    async order => {
+      const raw = makeMutation('11111111-1111-4111-8111-111111111111', {
+        id: 'raw-legacy-source',
+        mutationId: undefined,
+        data: { note: 'raw provenance' },
+      })
+      const { ensureEventMutationIdentity } = await import('../shared/eventResolver')
+      const identified = ensureEventMutationIdentity(raw)
+      const expectedCanonical = deriveUploadReadyEvent(raw, harness.auth.currentUser.uid)
+      const wrongProjectedCanonical = deriveUploadReadyEvent(identified, harness.auth.currentUser.uid)
+      harness.localMutations = order === 'raw-first' ? [raw, identified] : [identified, raw]
+
+      const engine = await connectEngine()
+
+      expect(harness.remote.has(engine.makeDocId(expectedCanonical))).toBe(true)
+      expect(harness.remote.has(engine.makeDocId(wrongProjectedCanonical))).toBe(false)
+      expect(expectedCanonical.migration?.sourceContentId)
+        .not.toBe(wrongProjectedCanonical.migration?.sourceContentId)
+      engine.stop()
+    },
+  )
+
+  it('does not re-project an exact foreign m2 source under the current account', async () => {
+    const source = makeMutation('11111111-1111-4111-8111-111111111111', {
+      author: { uid: 'other-member', name: 'Other', role: 'dad' },
+    })
+    const m2DocId = `m2|${encodeURIComponent(source.id)}|${source.rev}|${source.mutationId}`
+    const forbiddenCanonical = deriveUploadReadyEvent(source, harness.auth.currentUser.uid)
+    harness.localMutations = [source]
+    harness.remote.set(m2DocId, source)
+
+    const engine = await connectEngine()
+
+    expect(harness.remote.has(m2DocId)).toBe(true)
+    expect(harness.remote.has(engine.makeDocId(forbiddenCanonical))).toBe(false)
+    expect(harness.remote.size).toBe(1)
+    engine.stop()
+  })
+
+  it('normalizes legacy document identity when blocking a foreign source', async () => {
+    const foreignSource = makeMutation('11111111-1111-4111-8111-111111111111', {
+      id: 'foreign-legacy',
+      mutationId: undefined,
+      author: { uid: 'other-member', name: 'Other', role: 'dad' },
+    })
+    const foreignLegacyDocId = `${foreignSource.id}_${foreignSource.rev}`
+    const forbiddenCanonical = deriveUploadReadyEvent(foreignSource, harness.auth.currentUser.uid)
+    harness.localMutations = [foreignSource]
+    harness.remote.set(foreignLegacyDocId, foreignSource)
+
+    let engine = await connectEngine()
+    expect(harness.remote.has(engine.makeDocId(forbiddenCanonical))).toBe(false)
+    expect(harness.remote.size).toBe(1)
+    engine.stop()
+  })
+
+  it('upgrades an owned source even when its exact legacy document is already remote', async () => {
+    const ownedSource = makeMutation('22222222-2222-4222-8222-222222222222', {
+      id: 'owned-legacy',
+      mutationId: undefined,
+    })
+    const ownedLegacyDocId = `${ownedSource.id}_${ownedSource.rev}`
+    const ownedCanonical = deriveUploadReadyEvent(ownedSource, harness.auth.currentUser.uid)
+    harness.localMutations = [ownedSource]
+    harness.remote.set(ownedLegacyDocId, ownedSource)
+
+    const engine = await connectEngine()
+    expect(harness.remote.has(ownedLegacyDocId)).toBe(true)
+    expect(harness.remote.has(engine.makeDocId(ownedCanonical))).toBe(true)
     expect(harness.remote.size).toBe(2)
     engine.stop()
   })
@@ -419,7 +495,7 @@ describe('sync mutation collision integration', () => {
     const pending = JSON.parse(localStorage.getItem('babydiary.pendingUploads') ?? '[]')
     expect(pending).toHaveLength(1)
     expect(pending[0].event.mutationId).toBe(second.mutationId)
-    expect(harness.appended).toEqual([first])
+    expect(harness.appended.filter(event => getEventStorageKey(event) === getEventStorageKey(first))).toEqual([first])
 
     const appendedBeforeInvalid = harness.appended.length
     harness.snapshot!({

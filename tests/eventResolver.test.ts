@@ -3,10 +3,12 @@ import type { DiaryEvent } from '../shared/types'
 
 type ResolverModule = {
   compareEventMutations?: (left: DiaryEvent, right: DiaryEvent) => number
+  deriveAuthBoundEvent?: (source: DiaryEvent, writerUid: string) => DiaryEvent
   ensureEventMutationIdentity?: (event: DiaryEvent) => DiaryEvent
   getEventStorageKey?: (event: DiaryEvent) => string
   getEventMutationKey?: (event: DiaryEvent) => string
   resolveLatestEvent?: (events: readonly DiaryEvent[]) => DiaryEvent | undefined
+  mergeResolvedEvent?: (events: readonly DiaryEvent[], incoming: DiaryEvent) => DiaryEvent[]
   validateDiaryEvent?: (event: unknown) => string | null
 }
 
@@ -163,5 +165,35 @@ describe('shared event mutation resolver', () => {
     expect(forward).toBe(-reverse)
     expect(forward).not.toBe(0)
     expect(resolveLatestEvent!([first, second])).toEqual(resolveLatestEvent!([second, first]))
+  })
+
+  it('keeps source, exact derivative, and unrelated mutation transitive in all orders', async () => {
+    const {
+      compareEventMutations,
+      deriveAuthBoundEvent,
+      mergeResolvedEvent,
+      resolveLatestEvent,
+    } = await loadResolver()
+    const source = makeEvent({ mutationId: 'ffffffff-ffff-4fff-bfff-ffffffffffff' })
+    const derivative = deriveAuthBoundEvent!(source, 'writer-account')
+    const unrelated = makeEvent({ mutationId: '88888888-8888-4888-8888-888888888888' })
+    const permutations = [
+      [source, derivative, unrelated],
+      [source, unrelated, derivative],
+      [derivative, source, unrelated],
+      [derivative, unrelated, source],
+      [unrelated, source, derivative],
+      [unrelated, derivative, source],
+    ]
+
+    expect(derivative.rev).toBeGreaterThan(source.rev)
+    expect(compareEventMutations!(derivative, source)).toBeGreaterThan(0)
+    expect(compareEventMutations!(derivative, unrelated)).toBeGreaterThan(0)
+    for (const order of permutations) {
+      expect(resolveLatestEvent!(order)).toEqual(derivative)
+      expect(order.reduce<DiaryEvent[]>((visible, event) => (
+        mergeResolvedEvent!(visible, event)
+      ), [])).toEqual([derivative])
+    }
   })
 })

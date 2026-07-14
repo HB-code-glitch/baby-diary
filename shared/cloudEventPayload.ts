@@ -1,8 +1,8 @@
-import { v5 as uuidv5 } from 'uuid'
 import type { DiaryEvent, DiaryEventSyncMetadata } from './types'
 import {
+  buildEventSyncMetadata,
   canonicalEventJson,
-  ensureEventMutationIdentity,
+  deriveAuthBoundEvent,
   getEventContentId,
   isValidEventId,
   isValidMutationId,
@@ -10,7 +10,6 @@ import {
 } from './eventResolver'
 
 export const CLOUD_FUTURE_SKEW_MS = 5 * 60 * 1000
-const DERIVED_EVENT_NAMESPACE = '6ba7b817-9dad-11d1-80b4-00c04fd430c8'
 
 export interface ParsedCloudEventPayload {
   event: DiaryEvent
@@ -25,19 +24,7 @@ function assertValidEvent(event: DiaryEvent): void {
 export function createEventSyncMetadata(
   event: Pick<DiaryEvent, 'id' | 'at' | 'createdAt' | 'updatedAt'>,
 ): DiaryEventSyncMetadata {
-  const metadata: DiaryEventSyncMetadata = {
-    version: 1,
-    encodedEventId: encodeURIComponent(event.id),
-    eventAtMs: Date.parse(event.at),
-    createdAtMs: Date.parse(event.createdAt),
-    updatedAtMs: Date.parse(event.updatedAt),
-  }
-  if (!Number.isSafeInteger(metadata.eventAtMs)
-    || !Number.isSafeInteger(metadata.createdAtMs)
-    || !Number.isSafeInteger(metadata.updatedAtMs)) {
-    throw new Error('invalid event timestamp metadata')
-  }
-  return metadata
+  return buildEventSyncMetadata(event)
 }
 
 export function eventMigrationSourceContentId(event: DiaryEvent): string | undefined {
@@ -48,7 +35,10 @@ export function eventMigrationSourceContentId(event: DiaryEvent): string | undef
 
 export function isUploadReadyEvent(event: DiaryEvent, writerUid: string): boolean {
   if (writerUid.length === 0 || validateDiaryEvent(event) !== null) return false
-  if (!isValidMutationId(event.mutationId) || event.author.uid !== writerUid || !event.sync) return false
+  if (!isValidMutationId(event.mutationId)
+    || event.author.uid !== writerUid
+    || event.migration?.kind !== 'legacy-author-v1'
+    || !event.sync) return false
   const expected = createEventSyncMetadata(event)
   return event.sync.version === 1
     && event.sync.encodedEventId === expected.encodedEventId
@@ -64,28 +54,10 @@ export function isUploadReadyEvent(event: DiaryEvent, writerUid: string): boolea
 export function deriveUploadReadyEvent(source: DiaryEvent, writerUid: string): DiaryEvent {
   assertValidEvent(source)
   if (writerUid.length === 0) throw new Error('writer uid is required')
-  if (isUploadReadyEvent(source, writerUid)) return source
+  if (source.migration !== undefined && isUploadReadyEvent(source, writerUid)) return source
   if (source.migration !== undefined) throw new Error('event derivative cannot be rebound')
 
-  const sourceContentId = getEventContentId(source)
-  const identified = ensureEventMutationIdentity(source)
-  const mutationId = uuidv5(
-    `baby-diary:auth-bound-event:${sourceContentId}:${writerUid}`,
-    DERIVED_EVENT_NAMESPACE,
-  )
-  const derived: DiaryEvent = {
-    ...identified,
-    mutationId,
-    author: { ...identified.author, uid: writerUid },
-    sync: createEventSyncMetadata(identified),
-    migration: {
-      version: 1,
-      kind: 'legacy-author-v1',
-      sourceContentId,
-    },
-  }
-  assertValidEvent(derived)
-  return derived
+  return deriveAuthBoundEvent(source, writerUid)
 }
 
 function hasExactEventEnvelope(data: unknown): data is { event: DiaryEvent } {

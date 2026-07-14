@@ -192,6 +192,11 @@ describe('softDeleteAllEvents', () => {
     const event = makeEvent({
       id: 'mutation-check',
       mutationId: '11111111-1111-4111-8111-111111111111',
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: '22222222-2222-5222-8222-222222222222',
+      },
     })
     useAppStore.setState({ events: [event] })
 
@@ -201,6 +206,7 @@ describe('softDeleteAllEvents', () => {
     const enqueued = mockEnqueue.mock.calls[0][0] as DiaryEvent
     expect(persisted.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(persisted.mutationId).not.toBe(event.mutationId)
+    expect(persisted.migration).toBeUndefined()
     expect(enqueued).toBe(persisted)
   })
 
@@ -229,6 +235,26 @@ describe('softDeleteAllEvents', () => {
     expect(edited.sync?.updatedAtMs).toBe(Date.parse(edited.updatedAt))
     expect(edited.mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(edited.mutationId).not.toBe(original.mutationId)
+    expect(mockAppendEvent.mock.calls[0][0]).toBe(edited)
+    expect(mockEnqueue.mock.calls[0][0]).toBe(edited)
+  })
+
+  it('starts an edited derivative as a fresh local source without rebinding provenance', async () => {
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const original = makeEvent({
+      mutationId: '11111111-1111-5111-8111-111111111111',
+      migration: {
+        version: 1,
+        kind: 'legacy-author-v1',
+        sourceContentId: '22222222-2222-5222-8222-222222222222',
+      },
+    })
+    useAppStore.setState({ events: [original] })
+
+    const edited = await useAppStore.getState().editEvent(original, { at: '2026-07-13T09:00:00.000Z' })
+
+    expect(edited.migration).toBeUndefined()
+    expect(original.migration).toBeDefined()
     expect(mockAppendEvent.mock.calls[0][0]).toBe(edited)
     expect(mockEnqueue.mock.calls[0][0]).toBe(edited)
   })

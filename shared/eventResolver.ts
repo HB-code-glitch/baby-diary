@@ -1,6 +1,7 @@
-import type { DiaryEvent, EventType } from './types'
+import type { DiaryEvent, DiaryEventSyncMetadata, EventType } from './types'
 import { v5 as uuidv5 } from 'uuid'
 import { validateDiaryEventData } from './eventDataValidator'
+import { nextHybridLogicalClock } from './hybridLogicalClock'
 
 const VALID_TYPE_LIST: EventType[] = [
   'pee', 'poop', 'temp', 'breast', 'formula', 'diary', 'message', 'sleep', 'growth',
@@ -193,6 +194,65 @@ export function ensureEventMutationIdentity(event: DiaryEvent): DiaryEvent {
 /** Stable payload identity used to recover safely from a corrupt reused UUID. */
 export function getEventContentId(event: DiaryEvent): string {
   return uuidv5(`baby-diary:event-content:${canonicalEventJson(event)}`, CONTENT_ID_NAMESPACE)
+}
+
+/** Exact timestamp shadow shared by local derivation and cloud transport. */
+export function buildEventSyncMetadata(
+  event: Pick<DiaryEvent, 'id' | 'at' | 'createdAt' | 'updatedAt'>,
+): DiaryEventSyncMetadata {
+  const metadata: DiaryEventSyncMetadata = {
+    version: 1,
+    encodedEventId: encodeURIComponent(event.id),
+    eventAtMs: Date.parse(event.at),
+    createdAtMs: Date.parse(event.createdAt),
+    updatedAtMs: Date.parse(event.updatedAt),
+  }
+  if (!Number.isSafeInteger(metadata.eventAtMs)
+    || !Number.isSafeInteger(metadata.createdAtMs)
+    || !Number.isSafeInteger(metadata.updatedAtMs)) {
+    throw new Error('invalid event timestamp metadata')
+  }
+  return metadata
+}
+
+/** Single deterministic authority for immutable authentication-bound derivatives. */
+export function deriveAuthBoundEvent(source: DiaryEvent, writerUid: string): DiaryEvent {
+  const sourceError = validateDiaryEvent(source)
+  if (sourceError) throw new Error(`invalid event data: ${sourceError}`)
+  if (writerUid.length === 0) throw new Error('writer uid is required')
+  if (source.migration !== undefined) throw new Error('event derivative cannot be rebound')
+
+  const sourceContentId = getEventContentId(source)
+  const identified = ensureEventMutationIdentity(source)
+  const derived: DiaryEvent = {
+    ...identified,
+    rev: nextHybridLogicalClock(source.rev, Date.parse(source.updatedAt)),
+    // Preserve source ordering across transport. Revision and m3 content id keep
+    // each immutable projection physically distinct, including different writers.
+    mutationId: identified.mutationId,
+    author: { ...identified.author, uid: writerUid },
+    sync: buildEventSyncMetadata(identified),
+    migration: {
+      version: 1,
+      kind: 'legacy-author-v1',
+      sourceContentId,
+    },
+  }
+  const derivedError = validateDiaryEvent(derived)
+  if (derivedError) throw new Error(`invalid event data: ${derivedError}`)
+  return derived
+}
+
+/** Exact provenance check for sync reconciliation; never used as a comparator override. */
+export function isExactAuthBoundDerivative(candidate: DiaryEvent, source: DiaryEvent): boolean {
+  if (source.migration !== undefined || candidate.migration?.kind !== 'legacy-author-v1') return false
+  try {
+    if (candidate.migration.sourceContentId !== getEventContentId(source)) return false
+    return canonicalEventJson(candidate)
+      === canonicalEventJson(deriveAuthBoundEvent(source, candidate.author.uid))
+  } catch {
+    return false
+  }
 }
 
 /**

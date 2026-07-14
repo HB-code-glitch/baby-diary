@@ -346,7 +346,7 @@ export function normalizeSemanticEvents(events) {
 }
 
 function validateExpectedMutationDynamic(original, dynamic, { startedAt, finishedAt }) {
-  invariant(original && Number.isInteger(original.rev) && original.rev >= 1, 'Original event revision is required')
+  invariant(original && Number.isSafeInteger(original.rev) && original.rev >= 1, 'Original event revision is required')
   invariant(
     dynamic && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(dynamic.mutationId),
     'Expected mutation id must be UUID v4',
@@ -361,29 +361,99 @@ function validateExpectedMutationDynamic(original, dynamic, { startedAt, finishe
   )
 }
 
+export function nextExpectedHybridLogicalClock(priorRev, updatedAt) {
+  invariant(
+    Number.isSafeInteger(priorRev) && priorRev >= 0 && priorRev < Number.MAX_SAFE_INTEGER,
+    'Prior event revision logical clock is invalid or exhausted',
+  )
+  const updatedAtMs = Date.parse(updatedAt)
+  invariant(
+    Number.isSafeInteger(updatedAtMs) && updatedAtMs >= 0,
+    'Expected mutation updatedAt logical clock is invalid',
+  )
+  return Math.max(priorRev + 1, updatedAtMs)
+}
+
+function expectedEventSyncMetadata(event) {
+  return {
+    version: 1,
+    encodedEventId: encodeURIComponent(event.id),
+    eventAtMs: Date.parse(event.at),
+    createdAtMs: Date.parse(event.createdAt),
+    updatedAtMs: Date.parse(event.updatedAt),
+  }
+}
+
+export function matchesExpectedLocalOperationMutation(event, {
+  prior,
+  expectedAt,
+  expectedDeleted,
+  startedAt,
+  finishedAt,
+}) {
+  const updatedAtMs = Date.parse(event?.updatedAt)
+  return event?.id === prior?.id
+    && event.at === expectedAt
+    && event.deleted === expectedDeleted
+    && Number.isSafeInteger(event.rev)
+    && event.rev > prior.rev
+    && Number.isSafeInteger(updatedAtMs)
+    && updatedAtMs >= startedAt
+    && updatedAtMs <= finishedAt
+    && typeof event.mutationId === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(event.mutationId)
+    && event.mutationId !== prior.mutationId
+    && event.migration === undefined
+}
+
+export function buildExpectedCanonicalMutation(source, writerUid) {
+  invariant(typeof writerUid === 'string' && writerUid.length > 0, 'Writer uid is required')
+  invariant(source.migration === undefined, 'Auth-bound derivative cannot be rebound')
+  const sourceContentId = uuidv5(
+    `baby-diary:event-content:${stableJson(source)}`,
+    CONTENT_ID_NAMESPACE,
+  )
+  return {
+    ...source,
+    rev: nextExpectedHybridLogicalClock(source.rev, source.updatedAt),
+    mutationId: source.mutationId,
+    author: { ...source.author, uid: writerUid },
+    sync: expectedEventSyncMetadata(source),
+    migration: {
+      version: 1,
+      kind: 'legacy-author-v1',
+      sourceContentId,
+    },
+  }
+}
+
 export function buildExpectedEditedEvent(original, expectedAt, dynamic, bounds) {
   invariant(original && original.deleted === false, 'Only an active original event can be edited')
   invariant(Number.isFinite(Date.parse(expectedAt)), 'Expected edited event time must be valid')
   validateExpectedMutationDynamic(original, dynamic, bounds)
-  return {
-    ...original,
+  const { migration: _priorMigration, ...freshSource } = original
+  const expected = {
+    ...freshSource,
     at: expectedAt,
     updatedAt: dynamic.updatedAt,
-    rev: original.rev + 1,
+    rev: nextExpectedHybridLogicalClock(original.rev, dynamic.updatedAt),
     mutationId: dynamic.mutationId,
   }
+  return { ...expected, sync: expectedEventSyncMetadata(expected) }
 }
 
 export function buildExpectedDeletedEvent(original, dynamic, bounds) {
   invariant(original && original.deleted === false, 'Only an active original event can be deleted')
   validateExpectedMutationDynamic(original, dynamic, bounds)
-  return {
-    ...original,
+  const { migration: _priorMigration, ...freshSource } = original
+  const expected = {
+    ...freshSource,
     deleted: true,
     updatedAt: dynamic.updatedAt,
-    rev: original.rev + 1,
+    rev: nextExpectedHybridLogicalClock(original.rev, dynamic.updatedAt),
     mutationId: dynamic.mutationId,
   }
+  return { ...expected, sync: expectedEventSyncMetadata(expected) }
 }
 
 function compareStrings(left, right) {
@@ -396,6 +466,14 @@ function mutationIdentity(event) {
     return `mutation:${encodeURIComponent(event.id)}:${event.rev}:${event.mutationId}`
   }
   return `legacy:${encodeURIComponent(event.id)}:${event.rev}:${stableJson(event)}`
+}
+
+function mutationContentId(event) {
+  return uuidv5(`baby-diary:event-content:${stableJson(event)}`, CONTENT_ID_NAMESPACE)
+}
+
+function mutationStorageKey(event) {
+  return `${mutationIdentity(event)}:${mutationContentId(event)}`
 }
 
 export function compareMutationEvents(left, right) {
@@ -417,7 +495,7 @@ export function selectMutationWinner(events) {
 export function makeMutationDocId(event) {
   invariant(typeof event.id === 'string' && event.id.length > 0, 'Event id is required')
   invariant(Number.isInteger(event.rev) && event.rev >= 1, 'Event revision is required')
-  invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(event.mutationId), 'Mutation id must be UUID v4')
+  invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(event.mutationId), 'Mutation id must be UUID v4 or v5')
   const contentId = uuidv5(`baby-diary:event-content:${stableJson(event)}`, CONTENT_ID_NAMESPACE)
   return `m3|${encodeURIComponent(event.id)}|${event.rev}|${event.mutationId}|${contentId}`
 }
@@ -433,24 +511,31 @@ export function buildSameRevisionConflicts(baseEvent, nowMs = Date.now()) {
     return value.toISOString()
   }
 
-  return [
+  const updatedAt = new Date(nowMs).toISOString()
+  const rev = nextExpectedHybridLogicalClock(baseEvent.rev, updatedAt)
+  const { migration: _priorMigration, sync: _priorSync, ...freshSource } = baseEvent
+  const conflicts = [
     {
-      ...baseEvent,
+      ...freshSource,
       mutationId: '11111111-1111-4111-8111-111111111111',
       at: shiftedAt(-45),
-      updatedAt: new Date(nowMs).toISOString(),
-      rev: baseEvent.rev + 1,
+      updatedAt,
+      rev,
       deleted: false,
     },
     {
-      ...baseEvent,
+      ...freshSource,
       mutationId: '22222222-2222-4222-8222-222222222222',
       at: shiftedAt(45),
-      updatedAt: new Date(nowMs).toISOString(),
-      rev: baseEvent.rev + 1,
+      updatedAt,
+      rev,
       deleted: false,
     },
   ]
+  return conflicts.map(conflict => ({
+    ...conflict,
+    sync: expectedEventSyncMetadata(conflict),
+  }))
 }
 
 function javaEnvironment(env) {
@@ -1151,7 +1236,7 @@ async function runCanonicalUpgradeProfileContinuation({
       await readSnapshot(device),
       canonicalUpgradeProfile,
     )
-    invariant(after.events.some(event => event.id === continued.id && event.rev === 1 && !event.deleted),
+    invariant(after.events.some(event => semanticEventsEqual(event, continued)),
       'Canonical upgraded profile emulator continuation did not persist its new event')
     invariant(after.events.length > before.events.length,
       'Canonical upgraded profile emulator continuation replaced legacy events')
@@ -1177,8 +1262,8 @@ async function waitForConflictConvergence(deviceA, deviceB, expectedEvent) {
     lastA = convergencePayload(snapshotA.events.find(event => event.id === expectedEvent.id))
     lastB = convergencePayload(snapshotB.events.find(event => event.id === expectedEvent.id))
     if (
-      lastA?.rev >= 2
-      && lastB?.rev >= 2
+      lastA?.rev === expectedEvent.rev
+      && lastB?.rev === expectedEvent.rev
       && semanticEventsEqual(lastA, lastB)
       && semanticEventsEqual(lastA, expected)
     ) {
@@ -1272,18 +1357,110 @@ async function readCloudEventDocuments(familyId) {
   return documents.map(decodeFirestoreEventDocument)
 }
 
-async function waitForRevision(device, expected) {
+async function waitForExactCloudMutationSet(familyId, expectedEvents, absentEvents = []) {
+  invariant(expectedEvents.length > 0, 'Expected cloud mutation set is required')
+  const { id, rev } = expectedEvents[0]
+  invariant(expectedEvents.every(event => event.id === id && event.rev === rev),
+    'Expected cloud mutation set must share one event id and revision')
+  const expectedPayloads = new Map(expectedEvents.map(event => [makeMutationDocId(event), stableJson(event)]))
+  const absentDocIds = new Set(absentEvents.map(makeMutationDocId))
+  const relevantRevisions = new Set([...expectedEvents, ...absentEvents].map(event => event.rev))
   const deadline = Date.now() + E2E_TIMEOUT_MS
-  let last = null
+  let lastRelevant = []
   while (Date.now() < deadline) {
-    last = (await readSnapshot(device)).events.find(event => event.id === expected.id) ?? null
-    if (
-      last?.rev >= expected.rev
-      && (expected.deleted == null || last.deleted === expected.deleted)
-    ) return last
-    await delay(200)
+    const documents = await readCloudEventDocuments(familyId)
+    lastRelevant = documents.filter(document => (
+      document.event.id === id && relevantRevisions.has(document.event.rev)
+    ))
+    const unexpected = lastRelevant.filter(document => (
+      absentDocIds.has(document.docId) || !expectedPayloads.has(document.docId)
+    ))
+    invariant(unexpected.length === 0,
+      `Cloud contains unexpected same-id/rev mutations: ${stableJson(unexpected)}`)
+    const complete = expectedEvents.every(event => lastRelevant.some(document => (
+      document.docId === makeMutationDocId(event)
+      && stableJson(document.event) === stableJson(event)
+    )))
+    if (complete) {
+      invariant(lastRelevant.length === expectedEvents.length,
+        `Cloud mutation count mismatch: ${lastRelevant.length}/${expectedEvents.length}`)
+      return lastRelevant
+    }
+    await delay(100)
   }
-  throw new Error(`${device.name}: revision did not converge: ${stableJson(last)} / ${stableJson(expected)}`)
+  throw new Error(`Exact cloud mutation set did not converge: ${stableJson(lastRelevant)}`)
+}
+
+async function waitForLocalOperationSource(device, operation, preMutationStorageKeys) {
+  const deadline = Date.now() + E2E_TIMEOUT_MS
+  let lastCandidates = []
+  while (Date.now() < deadline) {
+    const snapshot = await readSnapshot(device)
+    lastCandidates = snapshot.mutations.filter(event => (
+      !preMutationStorageKeys.has(mutationStorageKey(event))
+      && matchesExpectedLocalOperationMutation(event, {
+        ...operation,
+        finishedAt: Date.now(),
+      })
+    ))
+    invariant(lastCandidates.length <= 1,
+      `${device.name}: operation created multiple matching local v4 sources`)
+    if (lastCandidates.length === 1) return lastCandidates[0]
+    await delay(100)
+  }
+  throw new Error(`${device.name}: new local operation source was not observed: ${stableJson(lastCandidates)}`)
+}
+
+async function waitForDurableCanonicalMutation(device, source, writerUid) {
+  const expected = buildExpectedCanonicalMutation(source, writerUid)
+  if (expected === source) return source
+  const sourcePayload = stableJson(source)
+  const expectedPayload = stableJson(expected)
+  const deadline = Date.now() + E2E_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const mutations = (await readSnapshot(device)).mutations
+    const retainedSources = mutations.filter(candidate => stableJson(candidate) === sourcePayload)
+    invariant(retainedSources.length === 1,
+      `${device.name}: local v4 source must remain exactly once, got ${retainedSources.length}`)
+    const derivatives = mutations.filter(candidate => stableJson(candidate) === expectedPayload)
+    invariant(derivatives.length <= 1,
+      `${device.name}: duplicate exact auth-bound derivatives were appended`)
+    const derivativeContentId = mutationContentId(expected)
+    const chainedDerivatives = mutations.filter(candidate => (
+      candidate.migration?.sourceContentId === derivativeContentId
+    ))
+    invariant(chainedDerivatives.length === 0,
+      `${device.name}: derivative-of-derivative mutation was appended`)
+    if (derivatives.length === 1) return expected
+    await delay(100)
+  }
+  throw new Error(`${device.name}: exact durable auth-bound derivative was not observed`)
+}
+
+async function waitForExactLocalMutationSet(device, eventId, expectedMutations) {
+  const expectedPayloads = new Set(expectedMutations.map(stableJson))
+  const expectedRevisions = new Set(expectedMutations.map(event => event.rev))
+  const deadline = Date.now() + E2E_TIMEOUT_MS
+  let lastMutations = []
+  while (Date.now() < deadline) {
+    const snapshot = await readSnapshot(device)
+    lastMutations = snapshot.mutations.filter(event => (
+      event.id === eventId && expectedRevisions.has(event.rev)
+    ))
+    const unexpected = lastMutations.filter(event => !expectedPayloads.has(stableJson(event)))
+    invariant(unexpected.length === 0,
+      `${device.name}: unexpected local same-id/rev mutations: ${stableJson(unexpected)}`)
+    const complete = expectedMutations.every(expected => (
+      lastMutations.filter(event => stableJson(event) === stableJson(expected)).length === 1
+    ))
+    if (complete) {
+      invariant(lastMutations.length === expectedMutations.length,
+        `${device.name}: local mutation count mismatch: ${lastMutations.length}/${expectedMutations.length}`)
+      return snapshot
+    }
+    await delay(100)
+  }
+  throw new Error(`${device.name}: exact local mutation set did not converge: ${stableJson(lastMutations)}`)
 }
 
 async function waitForSemanticEvent(device, expectedEvent) {
@@ -1300,7 +1477,9 @@ async function waitForSemanticEvent(device, expectedEvent) {
 }
 
 async function addQuickEvent(device, type) {
-  const before = normalizeConvergence((await readSnapshot(device)).events)
+  const beforeSnapshot = await readSnapshot(device)
+  const before = normalizeConvergence(beforeSnapshot.events)
+  const preMutationStorageKeys = new Set(beforeSnapshot.mutations.map(mutationStorageKey))
   await openHome(device)
   await device.page.locator(`[data-quick-record="${type}"]`).click()
   await device.page.waitForFunction(
@@ -1311,10 +1490,26 @@ async function addQuickEvent(device, type) {
     before.map(event => event.id),
     { timeout: E2E_TIMEOUT_MS },
   )
-  const after = (await readSnapshot(device)).events
-  const created = after.find(event => !before.some(previous => previous.id === event.id))
-  invariant(created, `${device.name}: ${type} event was not created`)
-  return created
+  const deadline = Date.now() + E2E_TIMEOUT_MS
+  let source = null
+  while (Date.now() < deadline) {
+    const snapshot = await readSnapshot(device)
+    const candidates = snapshot.mutations.filter(event => (
+      !preMutationStorageKeys.has(mutationStorageKey(event))
+      && !before.some(previous => previous.id === event.id)
+      && event.type === type
+      && event.migration === undefined
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(event.mutationId)
+    ))
+    invariant(candidates.length <= 1, `${device.name}: quick add created multiple local sources`)
+    if (candidates.length === 1) {
+      source = candidates[0]
+      break
+    }
+    await delay(100)
+  }
+  invariant(source, `${device.name}: ${type} local source was not created`)
+  return waitForDurableCanonicalMutation(device, source, beforeSnapshot.settings.profile.uid)
 }
 
 function toLocalDateTime(iso, minuteDelta) {
@@ -1326,6 +1521,10 @@ function toLocalDateTime(iso, minuteDelta) {
 
 async function editEventTime(device, event) {
   await openHome(device)
+  const before = await readSnapshot(device)
+  const prior = before.events.find(candidate => candidate.id === event.id)
+  invariant(prior && !prior.deleted, `${device.name}: live event to edit is missing or deleted`)
+  const preMutationStorageKeys = new Set(before.mutations.map(mutationStorageKey))
   const item = device.page.locator(`[data-event-id="${event.id}"]`)
   await item.locator('[data-event-action="edit"]').click()
   const modal = device.page.locator('[data-time-edit-modal]')
@@ -1335,34 +1534,50 @@ async function editEventTime(device, event) {
   await modal.locator('[data-time-edit-input]').fill(localDateTime)
   const startedAt = Date.now()
   await modal.locator('[data-time-edit-action="confirm"]').click()
-  const observedEdited = await waitForRevision(device, { id: event.id, rev: event.rev + 1, deleted: false })
-  const expectedEdited = buildExpectedEditedEvent(event, expectedAt, {
-    updatedAt: observedEdited.updatedAt,
-    mutationId: observedEdited.mutationId,
+  const localSource = await waitForLocalOperationSource(device, {
+    prior,
+    expectedAt,
+    expectedDeleted: false,
+    startedAt,
+  }, preMutationStorageKeys)
+  const expectedSource = buildExpectedEditedEvent(prior, expectedAt, {
+    updatedAt: localSource.updatedAt,
+    mutationId: localSource.mutationId,
   }, { startedAt, finishedAt: Date.now() })
   invariant(
-    semanticEventsEqual(observedEdited, expectedEdited),
-    `${device.name}: local edited payload mismatch: ${stableJson(semanticEventPayload(observedEdited))}/${stableJson(semanticEventPayload(expectedEdited))}`,
+    stableJson(localSource) === stableJson(expectedSource),
+    `${device.name}: local edited source mismatch: ${stableJson(localSource)}/${stableJson(expectedSource)}`,
   )
-  return expectedEdited
+  const canonical = await waitForDurableCanonicalMutation(device, localSource, before.settings.profile.uid)
+  return { source: localSource, canonical }
 }
 
 async function deleteEvent(device, event) {
   await openHome(device)
+  const before = await readSnapshot(device)
+  const prior = before.events.find(candidate => candidate.id === event.id)
+  invariant(prior && !prior.deleted, `${device.name}: live event to delete is missing or deleted`)
+  const preMutationStorageKeys = new Set(before.mutations.map(mutationStorageKey))
   const item = device.page.locator(`[data-event-id="${event.id}"]`)
   await item.locator('[data-event-action="delete"]').click()
   const startedAt = Date.now()
   await item.locator('[data-event-action="confirm-delete"]').click()
-  const observedDeleted = await waitForRevision(device, { id: event.id, rev: event.rev + 1, deleted: true })
-  const expectedDeleted = buildExpectedDeletedEvent(event, {
-    updatedAt: observedDeleted.updatedAt,
-    mutationId: observedDeleted.mutationId,
+  const localSource = await waitForLocalOperationSource(device, {
+    prior,
+    expectedAt: prior.at,
+    expectedDeleted: true,
+    startedAt,
+  }, preMutationStorageKeys)
+  const expectedSource = buildExpectedDeletedEvent(prior, {
+    updatedAt: localSource.updatedAt,
+    mutationId: localSource.mutationId,
   }, { startedAt, finishedAt: Date.now() })
   invariant(
-    semanticEventsEqual(observedDeleted, expectedDeleted),
-    `${device.name}: local deleted payload mismatch: ${stableJson(semanticEventPayload(observedDeleted))}/${stableJson(semanticEventPayload(expectedDeleted))}`,
+    stableJson(localSource) === stableJson(expectedSource),
+    `${device.name}: local deleted source mismatch: ${stableJson(localSource)}/${stableJson(expectedSource)}`,
   )
-  return expectedDeleted
+  const canonical = await waitForDurableCanonicalMutation(device, localSource, before.settings.profile.uid)
+  return { source: localSource, canonical }
 }
 
 async function runInsideEmulators() {
@@ -1447,12 +1662,18 @@ async function runInsideEmulators() {
     invariant((await readSnapshot(b)).settings.familyId === familyA, 'B relaunch did not restore family identity')
 
     console.log('[sync-e2e] revision edit and tombstone convergence')
-    const expectedEdited = await editEventTime(b, firstA)
+    const editedOperation = await editEventTime(b, firstA)
+    const expectedEdited = editedOperation.canonical
     await waitForSemanticEvent(a, expectedEdited)
-    const expectedDeleted = await deleteEvent(a, firstB)
+    const deletedOperation = await deleteEvent(a, firstB)
+    const expectedDeleted = deletedOperation.canonical
     await waitForSemanticEvent(b, expectedDeleted)
 
-    const [finalA, finalB] = await Promise.all([readSnapshot(a), readSnapshot(b)])
+    const [finalA, finalB, operationCloudDocuments] = await Promise.all([
+      readSnapshot(a),
+      readSnapshot(b),
+      readCloudEventDocuments(familyA),
+    ])
     const normalizedA = normalizeSemanticEvents(finalA.events)
     const normalizedB = normalizeSemanticEvents(finalB.events)
     invariant(stableJson(normalizedA) === stableJson(normalizedB), `Final convergence mismatch: ${stableJson(normalizedA)} / ${stableJson(normalizedB)}`)
@@ -1463,29 +1684,58 @@ async function runInsideEmulators() {
       `Final payloads differ from source mutations: ${stableJson(normalizedA)} / ${stableJson(expectedFinal)}`,
     )
     invariant(
-      normalizedA.some(event => event.id === firstA.id && event.rev === 2 && !event.deleted),
-      'Edited event did not converge at rev 2',
+      normalizedA.some(event => event.id === firstA.id && event.rev === expectedEdited.rev && !event.deleted),
+      `Edited event did not converge at rev ${expectedEdited.rev}`,
     )
     invariant(
-      normalizedA.some(event => event.id === firstB.id && event.rev === 2 && event.deleted),
-      'Deleted event tombstone did not converge at rev 2',
+      normalizedA.some(event => event.id === firstB.id && event.rev === expectedDeleted.rev && event.deleted),
+      `Deleted event tombstone did not converge at rev ${expectedDeleted.rev}`,
     )
     invariant(
-      normalizedA.some(event => event.id === offlineForB.id && event.rev === 1 && !event.deleted),
-      'Offline-created event did not converge at rev 1',
+      normalizedA.some(event => event.id === offlineForB.id && event.rev === offlineForB.rev && !event.deleted),
+      `Offline-created event did not converge at rev ${offlineForB.rev}`,
     )
-    const editedA = finalA.events.find(event => event.id === firstA.id && event.rev === 2)
-    const editedB = finalB.events.find(event => event.id === firstA.id && event.rev === 2)
+    const editedA = finalA.events.find(event => event.id === firstA.id && event.rev === expectedEdited.rev)
+    const editedB = finalB.events.find(event => event.id === firstA.id && event.rev === expectedEdited.rev)
     invariant(
       semanticEventsEqual(editedA, expectedEdited) && semanticEventsEqual(editedB, expectedEdited),
       `Edited event payload mismatch: ${stableJson(semanticEventPayload(editedA))}/${stableJson(semanticEventPayload(editedB))}`,
     )
-    const deletedA = finalA.events.find(event => event.id === firstB.id && event.rev === 2)
-    const deletedB = finalB.events.find(event => event.id === firstB.id && event.rev === 2)
+    invariant(
+      stableJson(editedA) === stableJson(expectedEdited) && stableJson(editedB) === stableJson(expectedEdited),
+      `Edited event did not converge to the exact canonical derivative on both devices`,
+    )
+    const deletedA = finalA.events.find(event => event.id === firstB.id && event.rev === expectedDeleted.rev)
+    const deletedB = finalB.events.find(event => event.id === firstB.id && event.rev === expectedDeleted.rev)
     invariant(
       semanticEventsEqual(deletedA, expectedDeleted) && semanticEventsEqual(deletedB, expectedDeleted),
       'Deleted poop tombstone payload did not converge',
     )
+    invariant(
+      stableJson(deletedA) === stableJson(expectedDeleted) && stableJson(deletedB) === stableJson(expectedDeleted),
+      'Deleted tombstone did not converge to the exact canonical derivative on both devices',
+    )
+    for (const [label, operation] of [['edit', editedOperation], ['delete', deletedOperation]]) {
+      const canonicalDocuments = operationCloudDocuments.filter(
+        document => document.docId === makeMutationDocId(operation.canonical),
+      )
+      invariant(canonicalDocuments.length === 1,
+        `Cloud must contain exactly one ${label} canonical derivative, got ${canonicalDocuments.length}`)
+      invariant(stableJson(canonicalDocuments[0].event) === stableJson(operation.canonical),
+        `Cloud ${label} canonical derivative bytes differ from the deterministic expected event`)
+      if (stableJson(operation.source) !== stableJson(operation.canonical)) {
+        const sourceDocuments = operationCloudDocuments.filter(
+          document => document.docId === makeMutationDocId(operation.source),
+        )
+        invariant(sourceDocuments.length === 0,
+          `Cloud must not contain the local-only ${label} v4 source, got ${sourceDocuments.length}`)
+        const chainedDocuments = operationCloudDocuments.filter(
+          document => document.event.migration?.sourceContentId === mutationContentId(operation.canonical),
+        )
+        invariant(chainedDocuments.length === 0,
+          `Cloud must not contain a ${label} derivative-of-derivative, got ${chainedDocuments.length}`)
+      }
+    }
     invariant(finalA.dataInfo.eventCount === 2 && finalB.dataInfo.eventCount === 2, `Expected two active events, got ${finalA.dataInfo.eventCount}/${finalB.dataInfo.eventCount}`)
     invariant(finalA.settings.familyId === familyA && finalB.settings.familyId === familyA, 'Final family id was not preserved')
     const expectedBaby = JSON.stringify({ name: 'Sync Baby', birthdate: '2026-01-15' })
@@ -1495,7 +1745,11 @@ async function runInsideEmulators() {
     console.log('[sync-e2e] deterministic offline same-id/rev payload conflict')
     await Promise.all([closeDevice(a), closeDevice(b)])
     const [conflictA, conflictB] = buildSameRevisionConflicts(offlineForB)
-    const expectedConflict = selectMutationWinner([conflictA, conflictB])
+    const canonicalConflicts = [
+      buildExpectedCanonicalMutation(conflictA, uidA),
+      buildExpectedCanonicalMutation(conflictB, uidB),
+    ]
+    const expectedConflict = selectMutationWinner(canonicalConflicts)
     appendOfflineEvent(userDataA, conflictA)
     appendOfflineEvent(userDataB, conflictB)
     a = await launchDevice({ executablePath, userData: userDataA, name: 'A-conflict', rendererErrors, blockedRequests, diagnosticFiles })
@@ -1515,36 +1769,51 @@ async function runInsideEmulators() {
     )
     invariant(convergedConflict.deleted === false, 'Same-revision conflict unexpectedly deleted the event')
     const [conflictSnapshotA, conflictSnapshotB, cloudDocuments] = await Promise.all([
-      readSnapshot(a),
-      readSnapshot(b),
-      readCloudEventDocuments(familyA),
+      waitForExactLocalMutationSet(a, offlineForB.id, [conflictA, ...canonicalConflicts]),
+      waitForExactLocalMutationSet(b, offlineForB.id, [conflictB, ...canonicalConflicts]),
+      waitForExactCloudMutationSet(familyA, canonicalConflicts, [conflictA, conflictB]),
     ])
-    const expectedConflicts = [conflictA, conflictB]
-    for (const [name, snapshot] of [['A', conflictSnapshotA], ['B', conflictSnapshotB]]) {
+    const expectedLocalConflicts = [
+      ['A', conflictSnapshotA, [conflictA, ...canonicalConflicts]],
+      ['B', conflictSnapshotB, [conflictB, ...canonicalConflicts]],
+    ]
+    for (const [name, snapshot, expectedMutations] of expectedLocalConflicts) {
+      const expectedRevisions = new Set(expectedMutations.map(event => event.rev))
       const localMutations = snapshot.mutations
-        .filter(event => event.id === offlineForB.id && event.rev === conflictA.rev)
-      invariant(localMutations.length === expectedConflicts.length, `${name} did not preserve exactly both conflict mutations: ${localMutations.length}`)
-      for (const conflict of expectedConflicts) {
-        const localMutation = localMutations.find(event => event.mutationId === conflict.mutationId)
+        .filter(event => event.id === offlineForB.id && expectedRevisions.has(event.rev))
+      invariant(localMutations.length === expectedMutations.length,
+        `${name} conflict mutation count mismatch: ${localMutations.length}/${expectedMutations.length}`)
+      for (const conflict of expectedMutations) {
+        const conflictPayload = stableJson(conflict)
+        const matchingMutations = localMutations.filter(event => stableJson(event) === conflictPayload)
         invariant(
-          localMutation && semanticEventsEqual(localMutation, conflict),
-          `${name} local conflict payload mismatch for mutation ${conflict.mutationId}`,
+          matchingMutations.length === 1,
+          `${name} must preserve the exact conflict mutation once: ${conflict.mutationId}`,
         )
       }
+      const chainedDerivatives = localMutations.filter(event => (
+        canonicalConflicts.some(canonical => event.migration?.sourceContentId === mutationContentId(canonical))
+      ))
+      invariant(chainedDerivatives.length === 0, `${name} retained a derivative-of-derivative conflict`)
     }
-    const cloudConflictDocuments = cloudDocuments.filter(
-      document => document.event.id === offlineForB.id && document.event.rev === conflictA.rev,
-    )
-    invariant(cloudConflictDocuments.length === expectedConflicts.length, `Cloud did not preserve exactly both conflict mutations: ${cloudConflictDocuments.length}`)
-    for (const conflict of expectedConflicts) {
-      const cloudDocument = cloudConflictDocuments.find(
+    for (const conflict of canonicalConflicts) {
+      const cloudDocument = cloudDocuments.find(
         document => document.docId === makeMutationDocId(conflict),
       )
       invariant(
-        cloudDocument && semanticEventsEqual(cloudDocument.event, conflict),
-        `Cloud conflict payload mismatch for mutation ${conflict.mutationId}`,
+        cloudDocument && stableJson(cloudDocument.event) === stableJson(conflict),
+        `Cloud canonical conflict payload mismatch for mutation ${conflict.mutationId}`,
       )
     }
+    invariant(!cloudDocuments.some(document => document.docId === makeMutationDocId(conflictB)),
+      'Cloud retained the local-only B conflict source')
+    const visibleConflictA = conflictSnapshotA.events.find(event => event.id === expectedConflict.id)
+    const visibleConflictB = conflictSnapshotB.events.find(event => event.id === expectedConflict.id)
+    invariant(
+      stableJson(visibleConflictA) === stableJson(expectedConflict)
+      && stableJson(visibleConflictB) === stableJson(expectedConflict),
+      'Both devices must expose the exact deterministic canonical conflict winner',
+    )
     passSummary = {
       familyId: familyA,
       events: normalizeConvergence(normalizedA),
