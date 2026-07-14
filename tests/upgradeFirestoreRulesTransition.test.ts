@@ -29,6 +29,11 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
+// Each test spawns real git subprocesses to materialize SHA-pinned blobs; under
+// full-suite parallel load the default 5s per-test timeout flakes, so every test
+// in this suite carries an explicit 30s budget.
+const GIT_MATERIALIZE_TIMEOUT_MS = 30_000
+
 describe('published upgrade Firestore rules transition', () => {
   it('materializes only the SHA-pinned v0.3.8 blob and candidate commit blob in a run-owned config', async () => {
     const root = rulesRoot()
@@ -65,7 +70,7 @@ describe('published upgrade Firestore rules transition', () => {
         singleProjectMode: true,
       },
     })
-  })
+  }, GIT_MATERIALIZE_TIMEOUT_MS)
 
   it('atomically switches only after baseline allow/deny probes and records candidate allow/deny proof', async () => {
     const root = rulesRoot()
@@ -105,7 +110,7 @@ describe('published upgrade Firestore rules transition', () => {
         candidate: { legacyWrite: 403, modernBabyMutation: 200 },
       },
     })
-  })
+  }, GIT_MATERIALIZE_TIMEOUT_MS)
 
   it('refuses a tampered candidate rules file before activating it', async () => {
     const root = rulesRoot()
@@ -124,5 +129,5 @@ describe('published upgrade Firestore rules transition', () => {
     await expect(transitionUpgradeFirestoreRules({ root, runId: RUN_ID, candidateSourceSha }, {
       runRulesTransitionSentinel: vi.fn(),
     })).rejects.toThrow(/candidate rules.*hash|tamper/i)
-  })
+  }, GIT_MATERIALIZE_TIMEOUT_MS)
 })
