@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppSettings, DiaryEvent } from '../shared/types'
+import { createEventSyncMetadata } from '../shared/cloudEventPayload'
+import { getEventStorageKey } from '../shared/eventResolver'
 
 type FakeDoc = {
   id: string
@@ -46,6 +48,12 @@ vi.mock('../src/lib/ipc', () => ({
     listEventMutations: vi.fn(async () => [...harness.localMutations]),
     appendEvent: vi.fn(async (event: DiaryEvent) => {
       harness.appended.push(event)
+      // Model the real EventLog: fsync-durable, content-addressed dedup — a
+      // physical append (including an auth-bound upload derivative) is durably
+      // discoverable by the very next listEventMutations() read-back.
+      const key = getEventStorageKey(event)
+      if (harness.localMutations.some(existing => getEventStorageKey(existing) === key)) return 'duplicate'
+      harness.localMutations.push(event)
       return 'ok'
     }),
     getSettings: vi.fn(async () => structuredClone(harness.settings)),
@@ -211,20 +219,32 @@ const config = {
 }
 
 function makeMutation(mutationId: string, overrides: Partial<DiaryEvent> = {}): DiaryEvent {
-  const now = '2026-07-13T08:00:00.000Z'
-  return {
+  // A live, recent timestamp — parseCloudEventPayload's/deriveUploadReadyEvent's
+  // server-side clock reasoning is anchored to the real wall clock, so a fixed/
+  // hardcoded date is not safe here.
+  const now = new Date(Date.now() - 60_000).toISOString()
+  const base = {
     id: 'shared-event',
     mutationId,
-    type: 'pee',
+    type: 'pee' as const,
     at: now,
     data: {},
-    author: { uid: 'user-1', name: 'Parent', role: 'mom' },
+    author: { uid: 'user-1', name: 'Parent', role: 'mom' as const },
     createdAt: now,
     updatedAt: now,
     rev: 2,
     deleted: false,
     ...overrides,
   }
+  // Already auth-bound + synced for the connected uid ('user-1') by default, so
+  // this suite's own already-upload-ready fixtures are uploaded as-is (matching
+  // its pre-existing exact-mutationId assertions) instead of being migrated
+  // through a fresh derivative. Tests that specifically exercise the legacy
+  // migration path (e.g. `mutationId: undefined`) opt out via their own override.
+  if (base.mutationId !== undefined && !('sync' in overrides)) {
+    return { ...base, sync: createEventSyncMetadata(base) }
+  }
+  return base
 }
 
 async function connectEngine() {

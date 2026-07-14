@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { DiaryEvent } from '../shared/types'
 import {
   CLOUD_FUTURE_SKEW_MS,
+  cloudEventPayloadEquals,
   createEventSyncMetadata,
   deriveUploadReadyEvent,
   eventMigrationSourceContentId,
@@ -116,5 +117,69 @@ describe('cloud event transport payload', () => {
     expect(() => deriveUploadReadyEvent(event({
       data: { celsius: Number.POSITIVE_INFINITY },
     }), WRITER_UID)).toThrow(/celsius|data/i)
+  })
+
+  describe('cloudEventPayloadEquals — exact server read-back ACK', () => {
+    it('accepts only an exact document-id and canonical-payload match', () => {
+      const source = event({
+        author: { uid: 'local-profile-placeholder', name: 'Original display name', role: 'dad' },
+      })
+      const derivative = deriveUploadReadyEvent(source, WRITER_UID)
+      const docId = makeCloudEventDocId(derivative)
+      const readBack = parseCloudEventPayload(docId, { event: derivative }, NOW)
+
+      expect(readBack).not.toBeNull()
+      expect(cloudEventPayloadEquals(readBack!, derivative)).toBe(true)
+    })
+
+    it('rejects a read-back whose canonical payload differs even when the doc id matches', () => {
+      const source = event()
+      const derivative = deriveUploadReadyEvent(source, WRITER_UID)
+      const docId = makeCloudEventDocId(derivative)
+
+      // A malformed/tampered sibling written at the exact same content-bound id
+      // with different bytes must never be treated as an ACK for `derivative`.
+      const tampered: DiaryEvent = { ...derivative, data: { celsius: 39.9 } }
+      const readBack = parseCloudEventPayload(docId, { event: tampered }, NOW)
+
+      // parseCloudEventPayload itself rejects this (identity no longer matches the
+      // content-bound doc id), which is exactly the fail-closed behavior required —
+      // an already-exists-different-bytes sibling can never be parsed as this ACK.
+      expect(readBack).toBeNull()
+    })
+
+    it('the equality check itself rejects matching doc id with differing canonical bytes', () => {
+      // Construct a parsed payload directly (bypassing parseCloudEventPayload's own
+      // identity filter) to prove cloudEventPayloadEquals independently enforces
+      // byte-for-byte canonical equality, not just doc-id equality.
+      const source = event()
+      const derivative = deriveUploadReadyEvent(source, WRITER_UID)
+      const docId = makeCloudEventDocId(derivative)
+      const sameIdDifferentBytes = { ...derivative, data: { celsius: 40.1 } }
+
+      expect(cloudEventPayloadEquals({ event: sameIdDifferentBytes, docId }, derivative)).toBe(false)
+    })
+
+    it('rejects a read-back for a different (but validly parsed) event at another id', () => {
+      const source = event()
+      const derivative = deriveUploadReadyEvent(source, WRITER_UID)
+      const otherSource = event({ id: 'event-2' })
+      const otherDerivative = deriveUploadReadyEvent(otherSource, WRITER_UID)
+      const otherDocId = makeCloudEventDocId(otherDerivative)
+      const readBack = parseCloudEventPayload(otherDocId, { event: otherDerivative }, NOW)
+
+      expect(readBack).not.toBeNull()
+      expect(cloudEventPayloadEquals(readBack!, derivative)).toBe(false)
+    })
+
+    it('is reflexive for an already upload-ready native write (no derivation needed)', () => {
+      const native = event()
+      const ready = { ...native, sync: createEventSyncMetadata(native) }
+      const docId = makeCloudEventDocId(ready)
+      const readBack = parseCloudEventPayload(docId, { event: ready }, NOW)
+
+      expect(readBack).not.toBeNull()
+      expect(cloudEventPayloadEquals(readBack!, ready)).toBe(true)
+    })
   })
 })

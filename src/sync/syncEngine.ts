@@ -15,9 +15,10 @@
  */
 // PERF: Type-only imports — no runtime firebase code pulled into main bundle
 import type {
+  DocumentData,
+  DocumentReference,
   Firestore,
   Unsubscribe,
-  DocumentData,
 } from 'firebase/firestore'
 import type { Auth, User } from 'firebase/auth'
 import { AppSettings, DiaryEvent } from '../../shared/types'
@@ -25,10 +26,17 @@ import {
   canonicalEventJson,
   ensureEventMutationIdentity,
   getEventContentId,
+  getEventStorageKey,
   isValidEventId,
   isValidMutationId,
   validateDiaryEvent,
 } from '../../shared/eventResolver'
+import {
+  cloudEventPayloadEquals,
+  deriveUploadReadyEvent,
+  makeCloudEventDocId,
+  parseCloudEventPayload,
+} from '../../shared/cloudEventPayload'
 import { assertFamilyId } from '../../shared/familyId'
 import { generateInviteCode } from '../../shared/inviteCode'
 import {
@@ -1142,6 +1150,61 @@ export function enqueue(event: DiaryEvent): void {
   }
 }
 
+/**
+ * Prepares the exact record that will be uploaded, durably, before any cloud write
+ * is attempted.
+ *
+ * If `source` is already upload-ready for `writerUid` (native modern write, already
+ * auth-bound with sync metadata), it IS the derivative — nothing new is appended and
+ * it is returned unchanged.
+ *
+ * Otherwise a deterministic auth-bound derivative is computed (never mutating
+ * `source`), appended through the existing main-process EventLog IPC — which
+ * fsyncs before resolving — and then re-read back from the durable local mutation
+ * log to prove it physically landed before this function ever lets a caller upload
+ * it. A crash between these two IPC calls simply leaves nothing uploaded yet; the
+ * next reconcile() re-derives the identical deterministic derivative and retries.
+ */
+export async function ensureDurableUploadDerivative(
+  source: DiaryEvent,
+  writerUid: string,
+): Promise<DiaryEvent> {
+  const derivative = deriveUploadReadyEvent(source, writerUid)
+  if (derivative === source) return derivative
+
+  const appendResult = await ipc.appendEvent(derivative)
+  if (appendResult === 'error') {
+    throw new Error('failed to durably append the auth-bound upload derivative')
+  }
+
+  // 'ok' or 'duplicate' both mean the exact bytes are durably on disk — re-read the
+  // local mutation log to prove it independently of the IPC call's own report.
+  const durableMutations = await ipc.listEventMutations()
+  const derivativeKey = getEventStorageKey(derivative)
+  const landed = durableMutations.some(candidate => (
+    validateDiaryEvent(candidate) === null && getEventStorageKey(candidate) === derivativeKey
+  ))
+  if (!landed) {
+    throw new Error('upload derivative missing from the durable local mutation log after append')
+  }
+  return derivative
+}
+
+/** Exact server read-back ACK: only a matching document id AND canonical payload counts. */
+async function verifyUploadedDerivative(
+  ref: DocumentReference<DocumentData>,
+  derivative: DiaryEvent,
+  context: SyncContext,
+): Promise<boolean> {
+  const { getDoc } = await _firestoreOps()
+  assertCurrent(context)
+  const snapshot = await getDoc(ref)
+  assertCurrent(context)
+  if (!snapshot.exists()) return false
+  const parsed = parseCloudEventPayload(snapshot.id, snapshot.data())
+  return parsed !== null && cloudEventPayloadEquals(parsed, derivative)
+}
+
 function detachDataListeners(): void {
   _unsubSnapshot?.()
   _unsubSnapshot = null
@@ -1535,8 +1598,25 @@ async function reconcile(context: SyncContext): Promise<void> {
     remoteDocuments.push({ docId: d.id, event })
   })
 
-  // 1. 원격에 없는 로컬 이벤트 → 업로드
-  const toUpload = localEvents.filter(e => !remoteDocIds.has(makeDocId(e)))
+  // 1. 원격에 없는 로컬 이벤트 → 업로드.
+  // Restart reconstruction (localStorage `_pending` is a cache, not authority):
+  // a local mutation is skipped only when its OWN identity is already remote, or
+  // when the exact durable upload derivative this account would produce for it is
+  // already remote. Anything else — including an upload-ready derivative from a
+  // crashed prior run that never reached the cloud, or one durably appended under
+  // a different previously-signed-in account — is re-enqueued for upload without
+  // ever rewriting the local original.
+  const toUpload = localEvents.filter(e => {
+    if (remoteDocIds.has(makeDocId(e))) return false
+    try {
+      const prospective = deriveUploadReadyEvent(e, user.uid)
+      if (remoteDocIds.has(makeCloudEventDocId(prospective))) return false
+    } catch {
+      // Fall through — uploadOne/batchUpload will surface and quarantine the
+      // real failure instead of silently skipping a possibly-valid mutation.
+    }
+    return true
+  })
   await batchUpload(toUpload, context)
   assertCurrent(context)
 
@@ -1700,39 +1780,53 @@ export function parseCloudEventDocument(docId: string, data: DocumentData): Diar
 
 /**
  * Upload a single event to Firestore. Returns 'ok', 'already-exists', or 'error'.
- * F6: when the same immutable mutation doc already exists remotely (create-conflict),
- *     we treat remote as winner and fetch it to apply locally via ipc.appendEvent.
+ * F-DUR: the SOURCE is never uploaded directly. `ensureDurableUploadDerivative`
+ *   durably appends+fsyncs a deterministic auth-bound derivative first (or reuses
+ *   `event` unchanged if it is already upload-ready); only that derivative — under
+ *   its own content-bound doc id — is ever written to Firestore. A commit is only
+ *   ever treated as a success once a server read-back parses and byte-matches the
+ *   derivative (`parseCloudEventPayload` + `cloudEventPayloadEquals`); an existing
+ *   doc at the same id with different bytes is NOT success.
  */
 async function uploadOne(
   event: DiaryEvent,
   context: SyncContext,
 ): Promise<'ok' | 'already-exists' | 'error'> {
   assertCurrent(context)
-  const { doc, writeBatch, getDoc } = await _firestoreOps()
+  let derivative: DiaryEvent
+  try {
+    derivative = await ensureDurableUploadDerivative(event, context.user.uid)
+  } catch (err) {
+    if (err instanceof StaleSyncOperationError) throw err
+    console.error('[syncEngine] failed to prepare a durable upload derivative', err)
+    return 'error'
+  }
   assertCurrent(context)
-  const docId = makeDocId(event)
+
+  const { doc, writeBatch } = await _firestoreOps()
+  assertCurrent(context)
+  const docId = makeCloudEventDocId(derivative)
   const ref = doc(context.db, 'families', context.familyId, 'events', docId)
   try {
     const batch = writeBatch(context.db)
-    batch.set(ref, { event })
+    batch.set(ref, { event: derivative })
     assertCurrent(context)
     await batch.commit()
     assertCurrent(context)
-    return 'ok'
+    const acked = await verifyUploadedDerivative(ref, derivative, context)
+    return acked ? 'ok' : 'error'
   } catch (err) {
-    // Firestore returns ALREADY_EXISTS (code 6) when a create-only doc already exists
+    if (err instanceof StaleSyncOperationError) throw err
+    // Firestore returns ALREADY_EXISTS (code 6), or the create-only rule reports
+    // permission-denied, when a doc already exists at this content-bound id.
     const code = (err as { code?: number | string }).code
-    if (code === 6 || String(code) === 'already-exists') {
-      return 'already-exists'
-    }
-    if (code === ERR_PERMISSION_DENIED || String(code) === ERR_PERMISSION_DENIED) {
+    const maybeExists = code === 6 || String(code) === 'already-exists'
+      || code === ERR_PERMISSION_DENIED || String(code) === ERR_PERMISSION_DENIED
+    if (maybeExists) {
       try {
-        const snapshot = await getDoc(ref)
-        assertCurrent(context)
-        if (snapshot.exists() && parseCloudEventDocument(snapshot.id, snapshot.data())) {
-          return 'already-exists'
-        }
-      } catch {
+        if (await verifyUploadedDerivative(ref, derivative, context)) return 'already-exists'
+      } catch (verifyErr) {
+        if (verifyErr instanceof StaleSyncOperationError) throw verifyErr
         // Keep as an upload error; pending must survive for retry.
       }
     }
@@ -1741,67 +1835,67 @@ async function uploadOne(
 }
 
 /**
- * P2 + F6 + F7: Batch upload with per-doc fallback.
- * 1. Try a full batch. On failure fall back to per-doc writes.
- * 2. Docs that already exist remotely (create-conflict) → remote won: fetch remote,
- *    apply locally, converge (treat as uploaded).
- * 3. Other failing docs are quarantined: kept in pending for retry with backoff.
- * Returns Set of docIds that were successfully uploaded OR converged remotely.
- * drainQueue uses the returned set to remove only confirmed-ok docs from _pending,
- * so partial-failure events are never silently dropped.
+ * P2 + F-DUR + F7: Batch upload with per-doc fallback.
+ * 1. Durably derive every event first (F-DUR) — a derivation failure quarantines
+ *    only that one event; it never blocks the rest of the chunk.
+ * 2. Try a full batch write of the derivatives. On failure fall back to per-doc
+ *    writes (uploadOne), so one poison doc can't block the rest.
+ * 3. Every write — batch or per-doc — is only counted as uploaded once a server
+ *    read-back exactly matches the derivative. Already-exists with different bytes
+ *    is never treated as success.
+ * Returns the set of SOURCE doc ids (as `makeDocId` computes them) that were
+ * successfully uploaded OR converged remotely, so drainQueue/reconcile can remove
+ * exactly those pending entries.
  */
 async function batchUpload(events: DiaryEvent[], context: SyncContext): Promise<Set<string>> {
   const uploaded = new Set<string>()
   if (events.length === 0) return uploaded
   assertCurrent(context)
 
-  const { doc, writeBatch, getDoc } = await _firestoreOps()
+  const { doc, writeBatch } = await _firestoreOps()
   assertCurrent(context)
 
   for (let i = 0; i < events.length; i += BATCH_SIZE) {
     const chunk = events.slice(i, i + BATCH_SIZE)
-    const batch = writeBatch(context.db)
 
-    for (const event of chunk) {
-      const docId = makeDocId(event)
-      const ref = doc(context.db, 'families', context.familyId, 'events', docId)
-      batch.set(ref, { event })
+    const prepared: Array<{ source: DiaryEvent; derivative: DiaryEvent; docId: string }> = []
+    for (const source of chunk) {
+      try {
+        const derivative = await ensureDurableUploadDerivative(source, context.user.uid)
+        assertCurrent(context)
+        prepared.push({ source, derivative, docId: makeCloudEventDocId(derivative) })
+      } catch (err) {
+        if (err instanceof StaleSyncOperationError) throw err
+        console.error('[syncEngine] failed to prepare a durable upload derivative', err)
+        // Quarantined: stays in pending for retry with backoff.
+      }
+    }
+    if (prepared.length === 0) continue
+
+    const batch = writeBatch(context.db)
+    for (const item of prepared) {
+      const ref = doc(context.db, 'families', context.familyId, 'events', item.docId)
+      batch.set(ref, { event: item.derivative })
     }
 
     try {
       assertCurrent(context)
       await batch.commit()
       assertCurrent(context)
-      // Full batch succeeded — all docs in this chunk are uploaded
-      for (const event of chunk) uploaded.add(makeDocId(event))
-    } catch {
-      // F7: batch failed — fall back to per-doc so one poison doc can't block the rest
-      for (const event of chunk) {
-        const docId = makeDocId(event)
-        const result = await uploadOne(event, context)
-        if (result === 'ok') {
-          uploaded.add(docId)
-        } else if (result === 'already-exists') {
-          // F6: remote won — fetch it and apply locally, then converge
-          let converged = false
-          try {
-            const ref = doc(context.db, 'families', context.familyId, 'events', docId)
-            const remoteSnap = await getDoc(ref)
-            assertCurrent(context)
-            if (remoteSnap.exists()) {
-              const remoteEvent = parseCloudEventDocument(remoteSnap.id, remoteSnap.data())
-              if (remoteEvent) {
-                _seenFromRemote.add(docId)
-                const appendResult = await ipc.appendEvent(remoteEvent)
-                assertCurrent(context)
-                converged = appendResult !== 'error'
-                  && canonicalEventJson(remoteEvent) === canonicalEventJson(event)
-              }
-            }
-          } catch {
-            // Do not clear pending until the immutable remote doc is confirmed locally.
-          }
-          if (converged) uploaded.add(docId)
+      // Exact ACK: only a verified server read-back removes a doc from pending.
+      for (const item of prepared) {
+        const ref = doc(context.db, 'families', context.familyId, 'events', item.docId)
+        const acked = await verifyUploadedDerivative(ref, item.derivative, context)
+        assertCurrent(context)
+        if (acked) uploaded.add(makeDocId(item.source))
+      }
+    } catch (err) {
+      if (err instanceof StaleSyncOperationError) throw err
+      // F7: batch failed — fall back to per-doc so one poison doc can't block the rest.
+      for (const item of prepared) {
+        const result = await uploadOne(item.source, context)
+        if (result === 'ok' || result === 'already-exists') {
+          uploaded.add(makeDocId(item.source))
         }
         // 'error' docs: NOT added to uploaded → drain keeps them in pending for retry
       }
