@@ -129,7 +129,7 @@ export function packagedResourcePath(executablePath, platform) {
     const directoryName = path.basename(executableDirectory).toLowerCase()
     const sourceSegments = path.resolve(executablePath).split(/[\\/]+/).map(segment => segment.toLowerCase())
     if (sourceSegments.includes('node_modules') || sourceSegments.includes('electron')) return null
-    if (directoryName !== 'win-unpacked' && directoryName !== 'baby diary') return null
+    if (!new Set(['win-unpacked', 'baby diary', 'baby-diary']).has(directoryName)) return null
     return path.join(executableDirectory, 'resources', 'app.asar')
   }
 
