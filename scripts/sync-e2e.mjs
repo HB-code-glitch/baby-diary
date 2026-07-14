@@ -38,7 +38,9 @@ export const FIRESTORE_PORT = 8080
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
-const APP_VERSION = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version
+const APP_PACKAGE = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+const APP_PACKAGE_NAME = APP_PACKAGE.name
+const APP_VERSION = APP_PACKAGE.version
 const E2E_TIMEOUT_MS = 30_000
 const CLOSE_TIMEOUT_MS = 10_000
 const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
@@ -155,7 +157,7 @@ export function assertPackagedRuntimeAttestation(attestation, {
   expectedVersion,
 }) {
   const validIdentity = attestation
-    && attestation.name === 'Baby Diary'
+    && attestation.name === APP_PACKAGE_NAME
     && attestation.isPackaged === true
     && attestation.version === expectedVersion
   const validPaths = validIdentity

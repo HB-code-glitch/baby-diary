@@ -308,11 +308,13 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     }
   })
 
-  it('attests the launched installed app and rejects a source Electron runtime', () => {
+  it('attests the launched installed app by its packaged npm identity and rejects a source Electron runtime', () => {
     const executablePath = path.resolve('Program Files', 'Baby Diary', 'Baby Diary.exe')
     const resourcePath = path.resolve('Program Files', 'Baby Diary', 'resources', 'app.asar')
     const valid = {
-      name: 'Baby Diary',
+      // Electron app.getName() reads the packaged package.json "name". The
+      // electron-builder productName controls the executable/display name only.
+      name: 'baby-diary',
       version: '0.3.9',
       isPackaged: true,
       appPath: resourcePath,
@@ -325,6 +327,15 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       platform: 'win32',
       expectedVersion: '0.3.9',
     })).toEqual(valid)
+    expect(() => assertPackagedRuntimeAttestation({
+      ...valid,
+      name: 'Baby Diary',
+    }, {
+      executablePath,
+      resourcePath,
+      platform: 'win32',
+      expectedVersion: '0.3.9',
+    })).toThrow(/packaged Baby Diary runtime/i)
     expect(() => assertPackagedRuntimeAttestation({
       ...valid,
       name: 'Electron',
