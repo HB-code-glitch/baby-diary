@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 export const PRODUCTION_PROJECT_ID = 'baby-diary-jaei-2026'
 export const PRODUCTION_RULESET_ID = 'd884dc4c-e702-4451-aa42-76d961012d75'
 export const PRODUCTION_RULES_SHA256 = 'cbd10fb1c0d8ce1a46f64d912d8bcf1d9f606521273ffb8d63760cabe241d770'
+export const LOCAL_RULES_CANONICAL_SHA256 = '366bc77d7a40dbd492793604ad7f8bd9d8908475a2c692abf0d8dd009dfe6995'
 export const REQUIRED_RULE_ANCHORS = Object.freeze([
   'match /users/{uid}',
   'match /invites/{code}',
@@ -52,9 +53,14 @@ function digestRules(content) {
   return createHash('sha256').update(content, 'utf8').digest('hex')
 }
 
-function validateRulesSource(content, expectedSha256, hashCode, anchorCode) {
+function canonicalizeLineEndings(content) {
+  return content.replace(/\r\n?/g, '\n')
+}
+
+function validateRulesSource(content, expectedSha256, hashCode, anchorCode, options = {}) {
   if (typeof content !== 'string') throw new ParityFailure('unexpected-rules-source')
-  const sha256 = digestRules(content)
+  const sourceForDigest = options.canonicalLineEndings ? canonicalizeLineEndings(content) : content
+  const sha256 = digestRules(sourceForDigest)
   if (sha256 !== expectedSha256) throw new ParityFailure(hashCode, { sha256 })
   if (REQUIRED_RULE_ANCHORS.some(anchor => !content.includes(anchor))) {
     throw new ParityFailure(anchorCode, { sha256 })
@@ -63,7 +69,7 @@ function validateRulesSource(content, expectedSha256, hashCode, anchorCode) {
 }
 
 export async function runLocalRulesGate(options = {}) {
-  const expectedSha256 = options.expectedSha256 ?? PRODUCTION_RULES_SHA256
+  const expectedSha256 = options.expectedSha256 ?? LOCAL_RULES_CANONICAL_SHA256
   const loadLocalRules = options.loadLocalRules ?? readLocalFirestoreRules
   const stdout = options.stdout ?? console.log
   const stderr = options.stderr ?? console.error
@@ -74,6 +80,7 @@ export async function runLocalRulesGate(options = {}) {
       expectedSha256,
       'hash-mismatch',
       'missing-required-anchor',
+      { canonicalLineEndings: true },
     )
     stdout(JSON.stringify({ sha256 }))
     return 0
@@ -88,7 +95,8 @@ export async function runProductionRulesParity(options = {}) {
   const projectId = options.projectId ?? PRODUCTION_PROJECT_ID
   const expectedRulesetId = options.expectedRulesetId ?? PRODUCTION_RULESET_ID
   const expectedSha256 = options.expectedSha256 ?? PRODUCTION_RULES_SHA256
-  const expectedLocalSha256 = options.expectedLocalSha256 ?? expectedSha256
+  const expectedLocalSha256 = options.expectedLocalSha256
+    ?? (options.expectedSha256 === undefined ? LOCAL_RULES_CANONICAL_SHA256 : expectedSha256)
   const loadLocalRules = options.loadLocalRules ?? readLocalFirestoreRules
   const loadActiveRules = options.loadActiveRules ?? readActiveFirestoreRules
   const stdout = options.stdout ?? console.log
@@ -100,6 +108,7 @@ export async function runProductionRulesParity(options = {}) {
       expectedLocalSha256,
       'local-hash-mismatch',
       'local-missing-required-anchor',
+      { canonicalLineEndings: true },
     )
     const active = await loadActiveRules(projectId)
     const rulesetId = active.rulesetName?.split('/').at(-1) ?? ''

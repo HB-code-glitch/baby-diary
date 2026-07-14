@@ -48,6 +48,25 @@ async function command() {
 }
 
 describe('production Firestore rules parity command', () => {
+  it('accepts the same checked-in rules with LF or CRLF checkout line endings', async () => {
+    const canonicalHash = createHash('sha256').update(validRulesContent).digest('hex')
+    const loaded = await modulePromise as ParityModule
+    expect(loaded.runLocalRulesGate).toBeTypeOf('function')
+
+    for (const content of [validRulesContent, validRulesContent.replace(/\n/g, '\r\n')]) {
+      const stderr: string[] = []
+      const exitCode = await loaded.runLocalRulesGate!({
+        expectedSha256: canonicalHash,
+        loadLocalRules: async () => content,
+        stdout: () => undefined,
+        stderr: line => stderr.push(line),
+      })
+
+      expect(exitCode).toBe(0)
+      expect(stderr).toEqual([])
+    }
+  })
+
   it('prints only project/ruleset/hash metadata after read-only active rules loading', async () => {
     const content = validRulesContent
     const hash = createHash('sha256').update(content).digest('hex')
