@@ -104,6 +104,81 @@ export function selectBackupsToPrune(names: string[], now: Date): string[] {
   return toPrune
 }
 
+/** Minimum age before a crash-orphaned tmp directory is eligible for sweep. */
+const STALE_TMP_MIN_AGE_MS = 24 * 60 * 60 * 1000
+
+// Staging dirs created by backupDestination(): `${timestamp}.tmp-<random>`.
+const STAGING_TMP_NAME_PATTERN = /^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.tmp-.+$/
+// Evidence spool dirs created by createEvidenceSpool() in backupSnapshot.ts:
+// `.baby-info-backup.tmp-evidence-<pid>-<random>`.
+const EVIDENCE_TMP_NAME_PATTERN = /^\.baby-info-backup\.tmp-evidence-(\d+)-.+$/
+
+export interface StaleTmpSweepCandidate {
+  name: string
+  mtimeMs: number
+}
+
+/**
+ * Pure function: given the direct children of a backup root (name + mtime),
+ * decide which crash-orphaned staging/evidence tmp directories are safe to
+ * delete during the retention sweep.
+ *
+ * This app must never lose verified backup data, so the rules are
+ * deliberately conservative:
+ *   - Only names that exactly match one of our own tmp-directory naming
+ *     schemes are ever considered. Every other name (including verified
+ *     snapshot directories, which never contain ".tmp-") is left untouched,
+ *     no matter how old.
+ *   - Only tmp directories older than 24h are considered, so a directory
+ *     currently being written by an in-flight backup or restore is never
+ *     touched.
+ *   - Evidence spool directories additionally encode the owning pid. If that
+ *     pid is still alive the directory is skipped even when stale, since a
+ *     long-running process may legitimately still hold it open.
+ * Never throws.
+ */
+export function selectStaleTmpDirectoriesToSweep(
+  entries: StaleTmpSweepCandidate[],
+  now: Date,
+  isPidAlive: (pid: number) => boolean,
+): string[] {
+  const cutoff = now.getTime() - STALE_TMP_MIN_AGE_MS
+  const toSweep: string[] = []
+  for (const entry of entries) {
+    // Require age to strictly exceed the minimum (an exact-boundary mtime is
+    // treated as still-recent) so anything possibly in-flight is preserved.
+    if (entry.mtimeMs >= cutoff) continue
+
+    const stagingMatch = entry.name.match(STAGING_TMP_NAME_PATTERN)
+    if (stagingMatch) {
+      if (!parseBackupName(stagingMatch[1])) continue // not our timestamp format
+      toSweep.push(entry.name)
+      continue
+    }
+
+    const evidenceMatch = entry.name.match(EVIDENCE_TMP_NAME_PATTERN)
+    if (evidenceMatch) {
+      const pid = Number(evidenceMatch[1])
+      if (Number.isFinite(pid) && isPidAlive(pid)) continue // owner still running
+      toSweep.push(entry.name)
+      continue
+    }
+    // Anything else (including verified snapshot directories) is never swept.
+  }
+  return toSweep
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // ESRCH: no such process -> dead. EPERM: process exists but we lack
+    // permission to signal it -> treat as alive (do not touch its files).
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
 export class BackupManager {
   private readonly userDataPath: string
   private userDataBackupDir: string
@@ -180,6 +255,44 @@ export class BackupManager {
     }
   }
 
+  /**
+   * Sweep crash-orphaned staging/evidence tmp directories left behind by a
+   * prior process that died mid-backup (crash, power loss) before it could
+   * run its in-process finally-block cleanup. Runs at the start of every
+   * backup cycle so these never accumulate without bound.
+   * Never throws; a sweep failure must not fail the backup itself.
+   */
+  private sweepStaleTmpDirectories(root: string): void {
+    try {
+      if (!fs.existsSync(root)) return
+      const dirents = fs.readdirSync(root, { withFileTypes: true })
+      const candidates: StaleTmpSweepCandidate[] = []
+      for (const dirent of dirents) {
+        if (!dirent.isDirectory() || dirent.isSymbolicLink()) continue
+        const fullPath = path.join(root, dirent.name)
+        try {
+          const stat = fs.lstatSync(fullPath)
+          if (!stat.isDirectory()) continue
+          candidates.push({ name: dirent.name, mtimeMs: stat.mtimeMs })
+        } catch {
+          continue
+        }
+      }
+      const toSweep = selectStaleTmpDirectoriesToSweep(candidates, new Date(), isPidAlive)
+      for (const name of toSweep) {
+        const fullPath = path.join(root, name)
+        try {
+          fs.rmSync(fullPath, { recursive: true, force: true })
+          console.log(`[Backup] Swept stale tmp directory: ${name}`)
+        } catch (rmErr) {
+          console.error(`[Backup] Failed to sweep stale tmp directory ${name}:`, rmErr)
+        }
+      }
+    } catch (sweepErr) {
+      console.error('[Backup] Stale tmp sweep failed (non-fatal):', sweepErr)
+    }
+  }
+
   private pruneVerifiedBackups(root: string): void {
     try {
       if (fs.existsSync(root)) {
@@ -200,6 +313,11 @@ export class BackupManager {
   }
 
   private async backupOnce(): Promise<BackupResult> {
+    // Entry point of each backup cycle: sweep any crash-orphaned tmp
+    // directories left over from a prior process before staging new ones.
+    this.sweepStaleTmpDirectories(this.userDataBackupDir)
+    this.sweepStaleTmpDirectories(this.documentsBackupDir)
+
     const now = new Date()
     const timestamp = now.toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
     const targets: Array<{ destination: BackupDestination; root: string }> = [
