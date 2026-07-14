@@ -2265,7 +2265,16 @@ function assertRegularFileAuthority(
 }
 
 function intentTombstoneNames(userDataPath: string): string[] {
-  const handle = fs.opendirSync(userDataPath)
+  let handle: fs.Dir
+  try {
+    handle = fs.opendirSync(userDataPath)
+  } catch (error) {
+    // A userData directory that does not exist yet (fresh install, or a
+    // caller-supplied path not yet materialized) has no tombstones to
+    // reconcile. Any other failure (permissions, I/O) must still propagate.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
   const names: string[] = []
   try {
     for (;;) {
