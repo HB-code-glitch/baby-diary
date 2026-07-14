@@ -25,7 +25,9 @@ import {
   type Firestore,
 } from 'firebase/firestore'
 import { INVITE_CODE_ALPHABET } from '../shared/inviteCode'
-import type { BabyInfoMutation } from '../shared/types'
+import { deriveUploadReadyEvent, makeCloudEventDocId } from '../shared/cloudEventPayload'
+import type { BabyInfoMutation, DiaryEvent } from '../shared/types'
+import { buildSameRevisionConflicts } from '../scripts/sync-e2e.mjs'
 
 const PROJECT_ID = 'demo-baby-diary'
 const firestoreHost = process.env.FIRESTORE_EMULATOR_HOST
@@ -520,6 +522,31 @@ describe.skipIf(!emulatorAvailable)('Firestore security rules in the real emulat
       event: modern.event,
       writerUid: family.owner.user.uid,
     }))
+  })
+
+  it('accepts both writer-bound derivatives of the bounded E2E same-revision conflict', async () => {
+    const family = await createFamily('event-conflict')
+    const secondMember = await createClient('event-conflict-second')
+    await joinFamily(secondMember, family)
+    const base = validEvent(family.owner, sequence + 700).event as DiaryEvent
+    const [sourceA, sourceB] = buildSameRevisionConflicts(base, Date.now() - 1_000)
+    const canonicalA = deriveUploadReadyEvent(sourceA, family.owner.user.uid)
+    const canonicalB = deriveUploadReadyEvent(sourceB, secondMember.user.uid)
+
+    await expectAllowed(() => setDoc(doc(
+      family.owner.db,
+      'families',
+      family.id,
+      'events',
+      makeCloudEventDocId(canonicalA),
+    ), { event: canonicalA }))
+    await expectAllowed(() => setDoc(doc(
+      secondMember.db,
+      'families',
+      family.id,
+      'events',
+      makeCloudEventDocId(canonicalB),
+    ), { event: canonicalB }))
   })
 
   it('rejects malformed event data, timestamp/revision poison, mutation-id mismatch and outsiders', async () => {

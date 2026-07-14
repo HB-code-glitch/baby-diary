@@ -521,7 +521,7 @@ export function buildSameRevisionConflicts(baseEvent, nowMs = Date.now()) {
     {
       ...freshSource,
       mutationId: '11111111-1111-4111-8111-111111111111',
-      at: shiftedAt(-45),
+      at: shiftedAt(-2),
       updatedAt,
       rev,
       deleted: false,
@@ -529,7 +529,7 @@ export function buildSameRevisionConflicts(baseEvent, nowMs = Date.now()) {
     {
       ...freshSource,
       mutationId: '22222222-2222-4222-8222-222222222222',
-      at: shiftedAt(45),
+      at: shiftedAt(2),
       updatedAt,
       rev,
       deleted: false,

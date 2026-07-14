@@ -13,7 +13,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { SettingsStore } from '../electron/store/settings'
-import { validateDiaryEvent } from '../shared/eventResolver'
+import { deriveUploadReadyEvent } from '../shared/cloudEventPayload'
+import { resolveLatestEvent, validateDiaryEvent } from '../shared/eventResolver'
 import {
   FIREBASE_AUTH_PORT,
   FIREBASE_CLI_VERSION,
@@ -868,7 +869,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       },
     }
 
-    const nowMs = 1_752_393_601_000
+    const nowMs = Date.parse('2026-07-13T08:00:01.000Z')
     const [a, b] = buildSameRevisionConflicts(base, nowMs)
 
     expect(a.id).toBe(base.id)
@@ -894,8 +895,22 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       updatedAtMs: nowMs,
     })
     expect(b.sync).toEqual({ ...a.sync, eventAtMs: Date.parse(b.at) })
+    const firestoreClockUpperBound = nowMs + 5 * 60 * 1000
+    for (const conflict of [a, b]) {
+      expect(conflict.sync.eventAtMs).toBeLessThanOrEqual(firestoreClockUpperBound)
+      expect(conflict.sync.createdAtMs).toBeLessThanOrEqual(firestoreClockUpperBound)
+      expect(conflict.sync.updatedAtMs).toBeLessThanOrEqual(firestoreClockUpperBound)
+      expect(conflict.rev).toBeLessThanOrEqual(firestoreClockUpperBound)
+    }
     expect(selectMutationWinner([b, a])).toEqual(b)
     expect(selectMutationWinner([a, b])).toEqual(b)
+    const canonicalA = deriveUploadReadyEvent(a, 'account-a')
+    const canonicalB = deriveUploadReadyEvent(b, 'account-b')
+    expect(canonicalA).toEqual(buildExpectedCanonicalMutation(a, 'account-a'))
+    expect(canonicalB).toEqual(buildExpectedCanonicalMutation(b, 'account-b'))
+    expect(canonicalA.rev).toBeGreaterThan(a.rev)
+    expect(canonicalB.rev).toBeGreaterThan(b.rev)
+    expect(resolveLatestEvent([a, b, canonicalA, canonicalB])).toEqual(canonicalB)
     expect(normalizeConvergence([b, a])).toEqual([{
       id: base.id,
       rev: nowMs,

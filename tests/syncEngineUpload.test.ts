@@ -286,7 +286,11 @@ function eventDocPath(familyId: string, event: DiaryEvent): string {
   return `families/${familyId}/events/${makeCloudEventDocId(event)}`
 }
 
-function readPendingFromLocalStorage(): Array<{ event: DiaryEvent }> {
+function readPendingFromLocalStorage(): Array<{
+  event: DiaryEvent
+  attempts: number
+  nextRetry: number
+}> {
   const raw = localStorage.getItem('babydiary.pendingUploads')
   return raw ? JSON.parse(raw) : []
 }
@@ -568,6 +572,64 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
   // ──────────────────────────────────────────────────────────
 
   describe('account switch and restart reconstruction', () => {
+    it('keeps distinct raw legacy source bytes in the retry queue', async () => {
+      const engine = await importFreshEngine()
+      const shared = makeEvent({
+        id: 'raw-shared-revision',
+        rev: 7,
+        mutationId: undefined,
+      })
+      const first = { ...shared, data: { celsius: 36.8 } }
+      const second = { ...shared, data: { celsius: 38.2 } }
+      const { ensureEventMutationIdentity } = await import('../shared/eventResolver')
+
+      expect(getEventStorageKey(ensureEventMutationIdentity(first)))
+        .not.toBe(getEventStorageKey(ensureEventMutationIdentity(second)))
+
+      engine.enqueue(first)
+      engine.enqueue(second)
+
+      const pending = readPendingFromLocalStorage()
+      expect(pending).toHaveLength(2)
+      expect(pending.map(item => item.event)).toEqual([first, second])
+      expect(pending.every(item => item.event.mutationId === undefined)).toBe(true)
+    })
+
+    it('persists a reconcile-discovered source with backoff and retries it after restart', async () => {
+      const familyId = 'family-reconcile-retry'
+      const uid = 'writer-account'
+      seedFamily(familyId, uid)
+
+      const source = makeEvent()
+      const derivative = deriveUploadReadyEvent(source, uid)
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      harness.commitQueue.push(...Array.from({ length: 20 }, () => ({
+        kind: 'error' as const,
+        code: 'unavailable',
+        applied: false,
+      })))
+
+      const firstEngine = await connect(uid, 'writer@example.test', familyId)
+      await vi.waitFor(() => {
+        const pending = readPendingFromLocalStorage()
+        expect(pending).toHaveLength(1)
+        expect(pending[0].event).toEqual(source)
+        expect(pending[0].attempts).toBeGreaterThanOrEqual(1)
+        expect(pending[0].nextRetry).toBeGreaterThan(Date.now())
+      })
+      expect(harness.store.has(eventDocPath(familyId, derivative))).toBe(false)
+
+      await firstEngine.stop()
+      harness.commitQueue = []
+      vi.resetModules()
+
+      const restartedEngine = await connect(uid, 'writer@example.test', familyId)
+      await vi.waitFor(() => expect(restartedEngine.getStatus().pendingCount).toBe(0))
+      expect(harness.store.get(eventDocPath(familyId, derivative))).toEqual({ event: derivative })
+      expect(readPendingFromLocalStorage()).toHaveLength(0)
+      await restartedEngine.stop()
+    })
+
     it('upgrades an owned legacy native cloud source even when its old document is already remote', async () => {
       const familyId = 'family-owned-upgrade'
       const uid = 'owner-account'

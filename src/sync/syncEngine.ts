@@ -417,6 +417,11 @@ function totalPendingCount(): number {
   return _pending.length + _babyInfoPendingCount
 }
 
+/** Stable identity for one physical source mutation without rewriting its bytes. */
+function pendingSourceKey(event: DiaryEvent): string {
+  return getEventStorageKey(ensureEventMutationIdentity(event))
+}
+
 // ────────────────────────────────────────────────────────────
 // localStorage 기반 대기열 영속
 // ────────────────────────────────────────────────────────────
@@ -444,11 +449,8 @@ function loadPending(): PendingItem[] {
         Number.isFinite(item.nextRetry) &&
         validateDiaryEvent(item.event) === null
       ) {
-        const pendingItem = {
-          ...(item as PendingItem),
-          event: ensureEventMutationIdentity((item as PendingItem).event),
-        }
-        const key = makeDocId(pendingItem.event)
+        const pendingItem = item as PendingItem
+        const key = pendingSourceKey(pendingItem.event)
         if (!seen.has(key)) {
           seen.add(key)
           valid.push(pendingItem)
@@ -1131,16 +1133,17 @@ export function enqueue(event: DiaryEvent): void {
     console.error(`[syncEngine] enqueue rejected invalid event: ${validationError}`)
     return
   }
-  const mutation = ensureEventMutationIdentity(event)
-  const docId = makeDocId(mutation)
+  const projectedIdentity = ensureEventMutationIdentity(event)
+  const docId = makeDocId(projectedIdentity)
+  const sourceKey = pendingSourceKey(event)
 
   // 원격에서 받은 이벤트는 재업로드 하지 않음
   if (_seenFromRemote.has(docId)) return
 
   // 이미 대기 중인 동일 immutable mutation은 추가하지 않음
-  if (_pending.some(p => makeDocId(p.event) === docId)) return
+  if (_pending.some(p => pendingSourceKey(p.event) === sourceKey)) return
 
-  _pending.push({ event: mutation, attempts: 0, nextRetry: 0 })
+  _pending.push({ event, attempts: 0, nextRetry: 0 })
   savePending(_pending)
   syncPendingCount()
 
@@ -1687,14 +1690,32 @@ async function reconcile(context: SyncContext): Promise<void> {
     }
     return true
   })
-  const reconciledUploadIds = await batchUpload(toUpload, context)
+
+  // The durable mutation log is authoritative and localStorage is the retry
+  // accelerator. Persist every discovered source before its first cloud attempt,
+  // preserving existing backoff metadata and the exact durable source bytes.
+  const pendingBySourceKey = new Map(
+    _pending.map(item => [pendingSourceKey(item.event), item] as const),
+  )
+  for (const source of toUpload) {
+    const sourceKey = pendingSourceKey(source)
+    const existing = pendingBySourceKey.get(sourceKey)
+    pendingBySourceKey.set(sourceKey, existing
+      ? { ...existing, event: source }
+      : { event: source, attempts: 0, nextRetry: 0 })
+  }
+  _pending = Array.from(pendingBySourceKey.values())
+  savePending(_pending)
+  syncPendingCount()
+
+  const reconciledUploadKeys = await batchUpload(toUpload, context)
   assertCurrent(context)
 
   // A reconnect may restore stale source entries from localStorage after another
   // family member already uploaded the exact canonical derivative. Apply the same
   // source policy used above before the post-connect queue drain can re-project it.
   _pending = _pending.filter(({ event }) => (
-    !reconciledUploadIds.has(makeDocId(event))
+    !reconciledUploadKeys.has(pendingSourceKey(event))
     && !remoteSourcePolicyBlocksUpload(event)
   ))
   savePending(_pending)
@@ -1923,7 +1944,7 @@ async function uploadOne(
  * 3. Every write — batch or per-doc — is only counted as uploaded once a server
  *    read-back exactly matches the derivative. Already-exists with different bytes
  *    is never treated as success.
- * Returns the set of SOURCE doc ids (as `makeDocId` computes them) that were
+ * Returns the set of normalized physical SOURCE keys that were
  * successfully uploaded OR converged remotely, so drainQueue/reconcile can remove
  * exactly those pending entries.
  */
@@ -1967,7 +1988,7 @@ async function batchUpload(events: DiaryEvent[], context: SyncContext): Promise<
         const ref = doc(context.db, 'families', context.familyId, 'events', item.docId)
         const acked = await verifyUploadedDerivative(ref, item.derivative, context)
         assertCurrent(context)
-        if (acked) uploaded.add(makeDocId(item.source))
+        if (acked) uploaded.add(pendingSourceKey(item.source))
       }
     } catch (err) {
       if (err instanceof StaleSyncOperationError) throw err
@@ -1975,7 +1996,7 @@ async function batchUpload(events: DiaryEvent[], context: SyncContext): Promise<
       for (const item of prepared) {
         const result = await uploadOne(item.source, context)
         if (result === 'ok' || result === 'already-exists') {
-          uploaded.add(makeDocId(item.source))
+          uploaded.add(pendingSourceKey(item.source))
         }
         // 'error' docs: NOT added to uploaded → drain keeps them in pending for retry
       }
@@ -2017,15 +2038,15 @@ async function drainQueue(context: SyncContext): Promise<void> {
   const toUpload = ready.map(p => p.event)
 
   try {
-    // P2: batchUpload now returns only the set of docIds that succeeded or converged.
+    // P2: batchUpload returns only normalized source keys that succeeded or converged.
     // We filter _pending by that set so partial-failure docs stay for retry.
-    const uploadedIds = await batchUpload(toUpload, context)
+    const uploadedKeys = await batchUpload(toUpload, context)
     assertCurrent(context)
-    _pending = _pending.filter(p => !uploadedIds.has(makeDocId(p.event)))
+    _pending = _pending.filter(p => !uploadedKeys.has(pendingSourceKey(p.event)))
     // Apply backoff to any docs that were attempted but NOT confirmed (still in pending)
-    const attemptedDocIds = new Set(toUpload.map(makeDocId))
+    const attemptedSourceKeys = new Set(toUpload.map(pendingSourceKey))
     _pending = _pending.map(p => {
-      if (!attemptedDocIds.has(makeDocId(p.event))) return p
+      if (!attemptedSourceKeys.has(pendingSourceKey(p.event))) return p
       const attempts = p.attempts + 1
       const backoff = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempts - 1), MAX_BACKOFF_MS)
       return { ...p, attempts, nextRetry: Date.now() + backoff }
@@ -2045,8 +2066,9 @@ async function drainQueue(context: SyncContext): Promise<void> {
     if (error instanceof StaleSyncOperationError || !contextIsCurrent(context)) return
     // batchUpload itself threw (e.g. network-level error before any doc processed)
     // 실패: 지수 백오프로 재시도 시간 설정
+    const attemptedSourceKeys = new Set(toUpload.map(pendingSourceKey))
     _pending = _pending.map(p => {
-      if (!toUpload.some(e => makeDocId(e) === makeDocId(p.event))) return p
+      if (!attemptedSourceKeys.has(pendingSourceKey(p.event))) return p
       const attempts = p.attempts + 1
       const backoff = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempts - 1), MAX_BACKOFF_MS)
       return { ...p, attempts, nextRetry: Date.now() + backoff }
