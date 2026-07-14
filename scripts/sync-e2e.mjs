@@ -644,6 +644,51 @@ export function isAllowedNetworkUrl(rawUrl, { resourcePath } = {}) {
   return false
 }
 
+export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, method) {
+  if (method !== 'GET' || errorText !== 'net::ERR_ABORTED') return false
+  let url
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return false
+  }
+  if (
+    url.username
+    || url.password
+    || url.hash
+    || url.protocol !== 'http:'
+    || url.hostname !== '127.0.0.1'
+    || url.port !== String(FIRESTORE_PORT)
+    || url.pathname !== '/google.firestore.v1.Firestore/Write/channel'
+  ) return false
+
+  const expectedKeys = ['VER', 'database', 'RID', 'SID', 'AID', 'CI', 'TYPE', 'zx', 't']
+  const entries = Array.from(url.searchParams.entries())
+  if (entries.length !== expectedKeys.length) return false
+  if (expectedKeys.some(key => url.searchParams.getAll(key).length !== 1)) return false
+  if (entries.some(([key]) => !expectedKeys.includes(key))) return false
+
+  const sid = url.searchParams.get('SID') ?? ''
+  const aid = url.searchParams.get('AID') ?? ''
+  const zx = url.searchParams.get('zx') ?? ''
+  const attempt = url.searchParams.get('t') ?? ''
+  const canonicalNonNegativeInteger = value => /^(?:0|[1-9]\d*)$/.test(value)
+    && Number.isSafeInteger(Number(value))
+  const canonicalPositiveInteger = value => /^[1-9]\d*$/.test(value)
+    && Number.isSafeInteger(Number(value))
+
+  return url.searchParams.get('VER') === '8'
+    && url.searchParams.get('database') === `projects/${FIREBASE_PROJECT_ID}/databases/(default)`
+    && url.searchParams.get('RID') === 'rpc'
+    && sid.length <= 256
+    && /^[A-Za-z0-9_-]{1,254}={0,2}$/.test(sid)
+    && canonicalNonNegativeInteger(aid)
+    && /^(?:0|1)$/.test(url.searchParams.get('CI') ?? '')
+    && url.searchParams.get('TYPE') === 'xmlhttp'
+    && /^[a-z0-9]{1,64}$/.test(zx)
+    && canonicalPositiveInteger(attempt)
+}
+
 export async function installNetworkGuards(context, {
   name,
   resourcePath,
@@ -702,10 +747,12 @@ export function attachRendererDiagnostics({
     page.on('requestfailed', request => {
       const url = request.url()
       const errorText = request.failure()?.errorText ?? 'unknown failure'
+      const method = typeof request.method === 'function' ? request.method() : ''
       const expectedCloseAbort = isClosing()
         && isAllowedNetworkUrl(url, { resourcePath })
         && /ERR_ABORTED|ERR_CANCELED|ERR_CONNECTION_CLOSED/i.test(errorText)
-      if (!expectedCloseAbort) {
+      const expectedWriteChannelCancellation = isExpectedFirestoreWriteChannelCancellation(url, errorText, method)
+      if (!expectedCloseAbort && !expectedWriteChannelCancellation) {
         rendererErrors.push(`${name}: requestfailed ${url} ${errorText}`)
       }
     })

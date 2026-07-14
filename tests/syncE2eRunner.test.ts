@@ -310,6 +310,89 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     ])
   })
 
+  it('ignores only the exact Firestore write backchannel supersede cancellation', () => {
+    const page = new EventEmitter() as EventEmitter & { url(): string }
+    page.url = () => 'file:///packaged/index.html'
+    const rendererErrors: string[] = []
+    attachRendererDiagnostics({
+      app: new EventEmitter(),
+      context: { pages: () => [page] },
+      name: 'B-conflict',
+      rendererErrors,
+      isClosing: () => false,
+    })
+    const requestFailed = (url: string, errorText: string, method = 'GET') => {
+      page.emit('requestfailed', {
+        url: () => url,
+        method: () => method,
+        failure: () => ({ errorText }),
+      })
+    }
+    const channelPath = '/google.firestore.v1.Firestore/Write/channel'
+    const baseParams = {
+      VER: '8',
+      database: 'projects/demo-baby-diary/databases/(default)',
+      RID: 'rpc',
+      SID: 'U-GGjzJWWoW38eKvw-FmbA==',
+      AID: '0',
+      CI: '0',
+      TYPE: 'xmlhttp',
+      zx: '9csslt22zv35',
+      t: '1',
+    }
+    const channelUrl = (
+      overrides: Partial<typeof baseParams> = {},
+      options: { duplicate?: keyof typeof baseParams; extra?: boolean } = {},
+    ) => {
+      const params = new URLSearchParams({ ...baseParams, ...overrides })
+      if (options.duplicate) params.append(options.duplicate, baseParams[options.duplicate])
+      if (options.extra) params.set('unexpected', '1')
+      return `http://127.0.0.1:${FIRESTORE_PORT}${channelPath}?${params}`
+    }
+
+    requestFailed(channelUrl(), 'net::ERR_ABORTED')
+
+    const rejected: Array<[string, string, string]> = [
+      [channelUrl(), 'net::ERR_ABORTED', 'POST'],
+      [channelUrl(), 'ERR_ABORTED', 'GET'],
+      [channelUrl(), 'net::ERR_CANCELED', 'GET'],
+      [channelUrl(), 'net::ERR_CONNECTION_CLOSED', 'GET'],
+      [channelUrl().replace('http://127.0.0.1:', 'https://127.0.0.1:'), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl().replace('127.0.0.1', 'localhost'), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl().replace('127.0.0.1', '[::1]'), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl().replace(`:${FIRESTORE_PORT}`, ':9099'), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl().replace('/Write/channel', '/Listen/channel'), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl().replace('/Write/channel?', '/Write/channel/?'), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl().replace('http://', 'http://user:password@'), 'net::ERR_ABORTED', 'GET'],
+      [`${channelUrl()}#fragment`, 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({}, { extra: true }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ VER: '9' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ database: 'projects/other/databases/(default)' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ RID: '12345' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ SID: '' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ SID: 'unsafe/value' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ AID: '-1' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ AID: '1.5' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ CI: '2' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ TYPE: 'json' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ zx: '' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ zx: 'unsafe/value' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ t: '0' }), 'net::ERR_ABORTED', 'GET'],
+      [channelUrl({ t: '1.5' }), 'net::ERR_ABORTED', 'GET'],
+    ]
+    for (const key of Object.keys(baseParams) as Array<keyof typeof baseParams>) {
+      const missing = new URL(channelUrl())
+      missing.searchParams.delete(key)
+      rejected.push([missing.href, 'net::ERR_ABORTED', 'GET'])
+      rejected.push([channelUrl({}, { duplicate: key }), 'net::ERR_ABORTED', 'GET'])
+    }
+    for (const [url, errorText, method] of rejected) requestFailed(url, errorText, method)
+
+    expect(rendererErrors).toEqual(rejected.map(
+      ([url, errorText]) => `B-conflict: requestfailed ${url} ${errorText}`,
+    ))
+  })
+
   it('fails closed for every blocked request and renderer console error', () => {
     expect(() => assertCleanDiagnostics([], [])).not.toThrow()
     expect(() => assertCleanDiagnostics(
