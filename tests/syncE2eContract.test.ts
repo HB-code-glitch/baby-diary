@@ -60,10 +60,12 @@ describe('packaged sync E2E selector contract', () => {
 
   it('checks complete local and Firestore conflict mutations instead of document ids alone', () => {
     const runner = source('scripts/sync-e2e.mjs')
-    expect(runner).toContain('readCloudEventDocuments(familyA)')
+    expect(runner).toContain('readCloudEventDocuments(familyA, cloudReadIdToken)')
+    expect(runner).toContain('Authorization: `Bearer ${idToken}`')
+    expect(runner).toContain('signInExistingAuthEmulatorAccount(emailA, password)')
     expect(runner).toContain('stableJson(event) === conflictPayload')
     expect(runner).toContain('stableJson(cloudDocument.event) === stableJson(conflict)')
-    expect(runner).toContain('waitForExactCloudMutationSet(familyA, canonicalConflicts, [conflictA, conflictB])')
+    expect(runner).toContain('waitForExactCloudMutationSet(familyA, cloudReadIdToken, canonicalConflicts, [conflictA, conflictB])')
     expect(runner).not.toContain('async function readCloudEventDocIds')
     expect(runner).not.toContain('cloudDocIds.includes(')
   })

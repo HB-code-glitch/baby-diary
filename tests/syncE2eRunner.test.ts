@@ -11,7 +11,7 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { validateDiaryEvent } from '../shared/eventResolver'
 import {
   FIREBASE_AUTH_PORT,
@@ -43,7 +43,9 @@ import {
   normalizeSemanticEvents,
   ownedProcessTreePids,
   parseEmulatorAddress,
+  readCloudEventDocuments,
   readJavaMajor,
+  signInExistingAuthEmulatorAccount,
   resolveCanonicalUpgradeProfile,
   resolvePackagedExecutable,
   removeTempDirectoryWithRetry,
@@ -53,6 +55,57 @@ import {
 } from '../scripts/sync-e2e.mjs'
 
 describe('packaged cross-platform sync E2E runner contract', () => {
+  it('uses a real Auth emulator ID token for Firestore REST reads without exposing secrets in failures', async () => {
+    const idToken = 'secret-id-token-that-must-not-be-logged'
+    const authFetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ idToken, localId: 'member-uid' }),
+    }))
+
+    await expect(signInExistingAuthEmulatorAccount(
+      'member@example.test',
+      'secret-password-that-must-not-be-logged',
+      authFetch,
+    )).resolves.toEqual({ idToken, localId: 'member-uid' })
+    expect(authFetch).toHaveBeenCalledOnce()
+    expect(authFetch.mock.calls[0][0]).toBe(
+      `http://127.0.0.1:${FIREBASE_AUTH_PORT}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-api-key`,
+    )
+
+    const firestoreFetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ documents: [] }),
+    }))
+    await expect(readCloudEventDocuments('family-a', idToken, firestoreFetch)).resolves.toEqual([])
+    expect(firestoreFetch).toHaveBeenCalledOnce()
+    expect(firestoreFetch.mock.calls[0][1]).toMatchObject({
+      headers: { Authorization: `Bearer ${idToken}` },
+    })
+
+    const deniedFetch = vi.fn(async () => ({ ok: false, status: 403 }))
+    let failure = ''
+    try {
+      await readCloudEventDocuments('family-a', idToken, deniedFetch)
+    } catch (error) {
+      failure = String(error)
+    }
+    expect(failure).toMatch(/403/)
+    expect(failure).not.toContain(idToken)
+
+    const rejectedAuthFetch = vi.fn(async () => ({ ok: false, status: 400 }))
+    const password = 'another-secret-password'
+    failure = ''
+    try {
+      await signInExistingAuthEmulatorAccount('member@example.test', password, rejectedAuthFetch)
+    } catch (error) {
+      failure = String(error)
+    }
+    expect(failure).toMatch(/400/)
+    expect(failure).not.toContain(password)
+  })
+
   it('pins demo-only Firebase 15.23.0 endpoints', () => {
     expect(FIREBASE_CLI_VERSION).toBe('15.23.0')
     expect(FIREBASE_PROJECT_ID).toBe('demo-baby-diary')

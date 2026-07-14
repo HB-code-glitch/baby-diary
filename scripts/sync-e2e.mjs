@@ -1347,9 +1347,32 @@ export function decodeFirestoreEventDocument(document) {
   return { docId, event }
 }
 
-async function readCloudEventDocuments(familyId) {
+export async function signInExistingAuthEmulatorAccount(email, password, fetchImpl = fetch) {
+  invariant(typeof email === 'string' && email.length > 0, 'Auth emulator account email is required')
+  invariant(typeof password === 'string' && password.length > 0, 'Auth emulator account password is required')
+  const endpoint = `http://127.0.0.1:${FIREBASE_AUTH_PORT}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-api-key`
+  const response = await fetchImpl(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, returnSecureToken: true }),
+    signal: AbortSignal.timeout(E2E_TIMEOUT_MS),
+  })
+  invariant(response.ok, `Auth emulator account sign-in failed: ${response.status}`)
+  const payload = await response.json()
+  invariant(typeof payload?.idToken === 'string' && payload.idToken.length > 0,
+    'Auth emulator sign-in did not return an ID token')
+  invariant(typeof payload?.localId === 'string' && payload.localId.length > 0,
+    'Auth emulator sign-in did not return an account id')
+  return { idToken: payload.idToken, localId: payload.localId }
+}
+
+export async function readCloudEventDocuments(familyId, idToken, fetchImpl = fetch) {
+  invariant(typeof idToken === 'string' && idToken.length > 0, 'Firestore emulator ID token is required')
   const endpoint = `http://127.0.0.1:${FIRESTORE_PORT}/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/families/${encodeURIComponent(familyId)}/events?pageSize=1000`
-  const response = await fetch(endpoint, { signal: AbortSignal.timeout(E2E_TIMEOUT_MS) })
+  const response = await fetchImpl(endpoint, {
+    headers: { Authorization: `Bearer ${idToken}` },
+    signal: AbortSignal.timeout(E2E_TIMEOUT_MS),
+  })
   invariant(response.ok, `Firestore emulator document listing failed: ${response.status}`)
   const payload = await response.json()
   const documents = payload.documents ?? []
@@ -1357,7 +1380,7 @@ async function readCloudEventDocuments(familyId) {
   return documents.map(decodeFirestoreEventDocument)
 }
 
-async function waitForExactCloudMutationSet(familyId, expectedEvents, absentEvents = []) {
+async function waitForExactCloudMutationSet(familyId, idToken, expectedEvents, absentEvents = []) {
   invariant(expectedEvents.length > 0, 'Expected cloud mutation set is required')
   const { id, rev } = expectedEvents[0]
   invariant(expectedEvents.every(event => event.id === id && event.rev === rev),
@@ -1368,7 +1391,7 @@ async function waitForExactCloudMutationSet(familyId, expectedEvents, absentEven
   const deadline = Date.now() + E2E_TIMEOUT_MS
   let lastRelevant = []
   while (Date.now() < deadline) {
-    const documents = await readCloudEventDocuments(familyId)
+    const documents = await readCloudEventDocuments(familyId, idToken)
     lastRelevant = documents.filter(document => (
       document.event.id === id && relevantRevisions.has(document.event.rev)
     ))
@@ -1641,6 +1664,9 @@ async function runInsideEmulators() {
     const uidA = joinedA.settings.profile?.uid
     const uidB = joinedB.settings.profile?.uid
     invariant(uidA && uidB && uidA !== uidB, `Expected two distinct account ids, got ${uidA}/${uidB}`)
+    const cloudReadAuth = await signInExistingAuthEmulatorAccount(emailA, password)
+    invariant(cloudReadAuth.localId === uidA, 'Cloud verification token does not belong to device A')
+    const cloudReadIdToken = cloudReadAuth.idToken
 
     console.log('[sync-e2e] A -> B and B -> A delivery')
     const firstA = await addQuickEvent(a, 'pee')
@@ -1672,7 +1698,7 @@ async function runInsideEmulators() {
     const [finalA, finalB, operationCloudDocuments] = await Promise.all([
       readSnapshot(a),
       readSnapshot(b),
-      readCloudEventDocuments(familyA),
+      readCloudEventDocuments(familyA, cloudReadIdToken),
     ])
     const normalizedA = normalizeSemanticEvents(finalA.events)
     const normalizedB = normalizeSemanticEvents(finalB.events)
@@ -1771,7 +1797,7 @@ async function runInsideEmulators() {
     const [conflictSnapshotA, conflictSnapshotB, cloudDocuments] = await Promise.all([
       waitForExactLocalMutationSet(a, offlineForB.id, [conflictA, ...canonicalConflicts]),
       waitForExactLocalMutationSet(b, offlineForB.id, [conflictB, ...canonicalConflicts]),
-      waitForExactCloudMutationSet(familyA, canonicalConflicts, [conflictA, conflictB]),
+      waitForExactCloudMutationSet(familyA, cloudReadIdToken, canonicalConflicts, [conflictA, conflictB]),
     ])
     const expectedLocalConflicts = [
       ['A', conflictSnapshotA, [conflictA, ...canonicalConflicts]],
