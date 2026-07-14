@@ -844,6 +844,51 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     }
   })
 
+  it('fails active and legacy console diagnostics with safe locations but ignores closing noise', () => {
+    const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-persistent-guard-')))
+    try {
+      const diagnosticPath = path.join(root, 'guard.jsonl')
+      writeFileSync(diagnosticPath, [
+        JSON.stringify({ kind: 'guard-ready', timestamp: '2026-07-13T08:00:00.000Z' }),
+        JSON.stringify({
+          kind: 'console-error',
+          phase: 'active',
+          protocol: 'file:',
+          destination: 'packaged',
+          line: 17,
+        }),
+        JSON.stringify({
+          kind: 'console-error',
+          protocol: 'http:',
+          destination: 'loopback',
+          port: 8080,
+          line: 23,
+        }),
+        JSON.stringify({
+          kind: 'console-error',
+          phase: 'closing',
+          protocol: 'file:',
+          destination: 'packaged',
+          line: 99,
+        }),
+      ].join('\n') + '\n')
+      const rendererErrors: string[] = []
+
+      collectPersistentGuardDiagnostics(
+        [{ name: 'B-relaunch', path: diagnosticPath }],
+        [],
+        rendererErrors,
+      )
+
+      expect(rendererErrors).toEqual([
+        'B-relaunch: early console-error file: packaged line=17',
+        'B-relaunch: early console-error http: loopback port=8080 line=23',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('builds a deterministic same-id/rev conflict with different payloads', () => {
     const base = {
       id: 'shared-event',

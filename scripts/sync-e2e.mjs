@@ -779,7 +779,16 @@ export function collectPersistentGuardDiagnostics(
         rendererErrors.push(`${diagnosticFile.name}: early renderer-gone ${reason}${exitCode}`)
         continue
       }
-      if (['console-error', 'load-failed', 'preload-error', 'renderer-unresponsive'].includes(record.kind)) {
+      if (record.kind === 'console-error') {
+        if (record.phase === 'closing') continue
+        const protocol = typeof record.protocol === 'string' ? record.protocol : 'unknown'
+        const destination = typeof record.destination === 'string' ? record.destination : 'unknown'
+        const port = typeof record.port === 'number' ? ` port=${record.port}` : ''
+        const line = typeof record.line === 'number' ? ` line=${record.line}` : ''
+        rendererErrors.push(`${diagnosticFile.name}: early console-error ${protocol} ${destination}${port}${line}`)
+        continue
+      }
+      if (['load-failed', 'preload-error', 'renderer-unresponsive'].includes(record.kind)) {
         rendererErrors.push(`${diagnosticFile.name}: early ${record.kind}`)
         continue
       }

@@ -40,6 +40,7 @@ interface GuardWebContents {
 
 interface GuardWindow {
   webContents: GuardWebContents
+  on: (...args: any[]) => unknown
 }
 
 function invariant(condition: unknown, message: string): asserts condition {
@@ -209,6 +210,10 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
     const webContents = window.webContents
     if (attached.has(webContents as object)) return
     attached.add(webContents as object)
+    let phase: 'active' | 'closing' = 'active'
+    window.on('close', () => {
+      phase = 'closing'
+    })
 
     webContents.on('console-message', (...args: unknown[]) => {
       const details = args.find(value => isRecord(value) && 'level' in value) as Record<string, unknown> | undefined
@@ -217,6 +222,7 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
       const source = details?.sourceId ?? args[4]
       const lineNumber = details?.lineNumber ?? args[3]
       record('console-error', {
+        phase,
         ...safeUrlFields(source, resourceRoot),
         ...(typeof lineNumber === 'number' ? { line: lineNumber } : {}),
       })

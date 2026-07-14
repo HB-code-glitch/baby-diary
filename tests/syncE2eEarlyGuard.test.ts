@@ -143,12 +143,20 @@ describe('packaged sync E2E early main-process guard', () => {
       const window = new EventEmitter() as EventEmitter & { webContents: EventEmitter }
       window.webContents = webContents
       guard.attachWindowDiagnostics(window, resourceRoot)
+      const packagedSource = `${pathToFileURL(path.join(resourceRoot, 'dist', 'index.html')).href}?token=secret`
 
       webContents.emit('console-message', {
         level: 'error',
         message: 'private-account@example.test password=do-not-write',
         lineNumber: 17,
-        sourceId: 'file:///app.asar/dist/index.html?token=secret',
+        sourceId: packagedSource,
+      })
+      window.emit('close')
+      webContents.emit('console-message', {
+        level: 'error',
+        message: 'private-account@example.test password=still-do-not-write',
+        lineNumber: 18,
+        sourceId: packagedSource,
       })
       let prevented = false
       webContents.emit('will-navigate', {
@@ -161,6 +169,27 @@ describe('packaged sync E2E early main-process guard', () => {
 
       expect(prevented).toBe(true)
       const source = readFileSync(config.diagnosticPath, 'utf8')
+      const consoleRecords = source
+        .trim()
+        .split(/\r?\n/)
+        .map(line => JSON.parse(line))
+        .filter(record => record.kind === 'console-error')
+      expect(consoleRecords).toEqual([
+        expect.objectContaining({
+          kind: 'console-error',
+          phase: 'active',
+          protocol: 'file:',
+          destination: 'packaged',
+          line: 17,
+        }),
+        expect.objectContaining({
+          kind: 'console-error',
+          phase: 'closing',
+          protocol: 'file:',
+          destination: 'packaged',
+          line: 18,
+        }),
+      ])
       for (const kind of ['console-error', 'navigation-blocked', 'load-failed', 'renderer-gone']) {
         expect(source).toContain(`"kind":"${kind}"`)
       }
