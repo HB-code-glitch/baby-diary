@@ -68,6 +68,7 @@ const REQUIRED_NODE_VERSION = '24.18.0'
 const RELEASE_TAG_CONDITION = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
 const RELEASE_PREFLIGHT_STEP_NAME = 'Verify release tag matches package version'
 const RELEASE_UPLOAD_TARGET_STEP_NAME = 'Verify release upload target is absent or a private draft'
+const UPGRADE_JOBS = ['upgrade-win', 'upgrade-mac-arm64', 'upgrade-mac-intel']
 const REQUIRED_RELEASE_NEEDS = [
   'security-check',
   'release-context',
@@ -79,6 +80,7 @@ const REQUIRED_RELEASE_NEEDS = [
   'smoke-mac-arm64',
   'smoke-mac-intel',
   'smoke-win',
+  ...UPGRADE_JOBS,
 ]
 const RELEASE_MANIFEST_NEED: Record<string, string> = {
   'release-win': 'manifest-win',
@@ -92,8 +94,10 @@ const RELEASE_CRITICAL_JOBS = [
   'e2e-win',
   'release-context',
   'release-preflight',
+  'baseline-v038',
   'package-mac',
   'package-win',
+  ...UPGRADE_JOBS,
   'smoke-mac-arm64',
   'smoke-mac-intel',
   'smoke-win',
@@ -628,7 +632,7 @@ describe('release workflow CI gates', () => {
     expect(Object.values(workflow.permissions)).not.toContain('write')
   })
 
-  it('preserves all build, packaged E2E, and release jobs', () => {
+  it('preserves all build, packaged E2E, upgrade-gate, and release jobs', () => {
     expect(new Set(Object.keys(workflow.jobs))).toEqual(new Set([
       'security-check',
       'build-mac',
@@ -636,8 +640,10 @@ describe('release workflow CI gates', () => {
       'e2e-win',
       'release-context',
       'release-preflight',
+      'baseline-v038',
       'package-mac',
       'package-win',
+      ...UPGRADE_JOBS,
       'smoke-mac-arm64',
       'smoke-mac-intel',
       'smoke-win',

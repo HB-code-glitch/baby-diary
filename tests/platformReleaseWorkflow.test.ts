@@ -45,10 +45,23 @@ const WIN_VERIFIED_MANIFEST = `verified-release-manifest-windows-${RUN_SCOPE}`
 const SIGNING_ENVIRONMENT = 'platform-release-signing'
 const PUBLISH_ENVIRONMENT = 'platform-release-publish'
 
+const BASELINE_ARTIFACT = `upgrade-baseline-v038-${RUN_SCOPE}`
+const BASELINE_SOURCE_SHA = '4ad44829c0de56da33d9123c16f92e6090f0df4a'
+const BASELINE_RELEASE_ID = '352876543'
+const BASELINE_WIN_ASSET = { id: '474870034', size: '233249330', sha256: 'edb3a3e2d036f0d16dc8d75948c3f160c35adc9d1277a3dedc41d8671bd6a6de' }
+const BASELINE_MAC_ASSET = { id: '474869787', size: '351533375', sha256: '2793e91c0dc49b436451f150ba0c8dc625cfd1a988841823a114d597e2f60974' }
+
+const baselineJob = 'baseline-v038'
+const upgradeJobs = ['upgrade-win', 'upgrade-mac-arm64', 'upgrade-mac-intel']
+const ordinaryCiJobs = ['security-check', 'build-mac', 'e2e-mac', 'e2e-win']
+const fetchDepthZeroJobs = [baselineJob, ...upgradeJobs]
+
 const signedJobs = [
   'release-context',
+  baselineJob,
   'package-mac',
   'package-win',
+  ...upgradeJobs,
   'smoke-mac-arm64',
   'smoke-mac-intel',
   'smoke-win',
@@ -62,6 +75,9 @@ const allSmokeJobs = ['smoke-mac-arm64', 'smoke-mac-intel', 'smoke-win']
 const secretJobEnvironments: Record<string, string> = {
   'package-mac': SIGNING_ENVIRONMENT,
   'package-win': SIGNING_ENVIRONMENT,
+  'upgrade-win': SIGNING_ENVIRONMENT,
+  'upgrade-mac-arm64': SIGNING_ENVIRONMENT,
+  'upgrade-mac-intel': SIGNING_ENVIRONMENT,
   'smoke-win': SIGNING_ENVIRONMENT,
   'release-preflight': PUBLISH_ENVIRONMENT,
   'release-mac': PUBLISH_ENVIRONMENT,
@@ -248,7 +264,86 @@ function workflowErrors(candidate: Workflow): string[] {
     }
   }
 
-  const allSmokeNeeds = ['package-mac', 'package-win', ...allSmokeJobs]
+  const baseline = candidate.jobs[baselineJob]
+  if (!baseline) {
+    errors.push(`missing ${baselineJob}`)
+  } else {
+    if (JSON.stringify(baseline).includes('secrets.')) {
+      errors.push(`${baselineJob} must not consume any signing or release secret`)
+    }
+    const checkout = stepByUse(baseline, 'actions/checkout@v4')[0]
+    if (checkout?.with?.['fetch-depth'] !== 0) {
+      errors.push(`${baselineJob} must check out full history with fetch-depth 0`)
+    }
+    const runText = commands(baseline).join('\n')
+    for (const fragment of [
+      BASELINE_RELEASE_ID, BASELINE_SOURCE_SHA,
+      BASELINE_WIN_ASSET.id, BASELINE_WIN_ASSET.size, BASELINE_WIN_ASSET.sha256,
+      BASELINE_MAC_ASSET.id, BASELINE_MAC_ASSET.size, BASELINE_MAC_ASSET.sha256,
+    ]) {
+      if (!runText.includes(fragment)) errors.push(`${baselineJob} must pin exact baseline identity ${fragment}`)
+    }
+    const upload = stepByUse(baseline, 'actions/upload-artifact@v4')[0]
+    if (upload?.with?.['retention-days'] !== 1 || upload?.with?.['if-no-files-found'] !== 'error') {
+      errors.push(`${baselineJob} artifact must be short-lived and fail when missing`)
+    }
+    const baselineArtifactName = String(upload?.with?.name ?? '')
+    const reservedNames = [MAC_PACKAGE_ARTIFACT, WIN_PACKAGE_ARTIFACT, MAC_VERIFIED_MANIFEST, WIN_VERIFIED_MANIFEST]
+    if (!baselineArtifactName || reservedNames.includes(baselineArtifactName)) {
+      errors.push(`${baselineJob} artifact name must not collide with any release-bound artifact name`)
+    }
+    const baselinePath = String(upload?.with?.path ?? '')
+    if (baselinePath.startsWith('release/') || baselinePath.startsWith('release-upload')) {
+      errors.push(`${baselineJob} artifact must not stage inside a release-upload glob path`)
+    }
+  }
+
+  const upgradeSpecs = [
+    ['upgrade-win', 'windows-latest', 'package-win', WIN_PACKAGE_ARTIFACT, ['WIN_EXPECTED_PUBLISHER', 'WIN_EXPECTED_CERT_SHA256'], 'windows-in-place-upgrade-smoke.ps1'],
+    ['upgrade-mac-arm64', 'macos-15', 'package-mac', MAC_PACKAGE_ARTIFACT, ['MAC_EXPECTED_TEAM_ID'], 'mac-in-place-upgrade-smoke.sh'],
+    ['upgrade-mac-intel', 'macos-15-intel', 'package-mac', MAC_PACKAGE_ARTIFACT, ['MAC_EXPECTED_TEAM_ID'], 'mac-in-place-upgrade-smoke.sh'],
+  ] as const
+  for (const [jobName, runner, packageNeed, packageArtifact, expectedIdentitySecrets, wrapperScript] of upgradeSpecs) {
+    const job = candidate.jobs[jobName]
+    if (!job) {
+      errors.push(`missing ${jobName}`)
+      continue
+    }
+    if (job['runs-on'] !== runner) errors.push(`${jobName} must run on ${runner}`)
+    for (const dependency of ['release-context', packageNeed, baselineJob]) {
+      if (!needs(job).includes(dependency)) errors.push(`${jobName} must need ${dependency}`)
+    }
+    const checkout = stepByUse(job, 'actions/checkout@v4')[0]
+    if (checkout?.with?.['fetch-depth'] !== 0) {
+      errors.push(`${jobName} must check out full history with fetch-depth 0 for the rules tag loader`)
+    }
+    if (!artifactName(job, 'actions/download-artifact@v4').includes(packageArtifact)) {
+      errors.push(`${jobName} must download the signed candidate ${packageArtifact}`)
+    }
+    if (!artifactName(job, 'actions/download-artifact@v4').some(name => name.startsWith('upgrade-baseline-v038-'))) {
+      errors.push(`${jobName} must download the verified v0.3.8 baseline artifact`)
+    }
+    if (!java21(job)) errors.push(`${jobName} must configure Temurin Java 21 for the Firestore rules emulator`)
+    const stepsJson = JSON.stringify(job.steps)
+    for (const name of expectedIdentitySecrets) {
+      if (!stepsJson.includes(`secrets.${name}`)) errors.push(`${jobName} must map ${name}`)
+    }
+    const runText = commands(job).join('\n')
+    if (!runText.includes('upgrade-firestore-rules.mjs')) {
+      errors.push(`${jobName} must prepare the exact v0.3.8 Firestore rules workspace`)
+    }
+    if (!runText.includes('emulators:exec') || !runText.includes('auth,firestore')) {
+      errors.push(`${jobName} must run baseline and candidate phases inside one Auth/Firestore emulator process`)
+    }
+    if (!runText.includes(wrapperScript)) {
+      errors.push(`${jobName} must run the exact in-place upgrade wrapper ${wrapperScript}`)
+    }
+    if (/electron-builder|npm run build|create-release-manifest|upload-release-assets/.test(runText)) {
+      errors.push(`${jobName} must not rebuild, hash for release, or upload release bytes`)
+    }
+  }
+
+  const allSmokeNeeds = ['package-mac', 'package-win', ...allSmokeJobs, ...upgradeJobs]
   for (const [jobName, packageArtifact, manifestArtifact] of [
     ['manifest-mac', MAC_PACKAGE_ARTIFACT, MAC_VERIFIED_MANIFEST],
     ['manifest-win', WIN_PACKAGE_ARTIFACT, WIN_VERIFIED_MANIFEST],
@@ -270,7 +365,7 @@ function workflowErrors(candidate: Workflow): string[] {
 
   const uploadCommonNeeds = [
     'release-context', 'release-preflight', 'e2e-mac', 'e2e-win',
-    'package-mac', 'package-win', ...allSmokeJobs,
+    'package-mac', 'package-win', ...allSmokeJobs, ...upgradeJobs,
   ]
   for (const [jobName, manifestNeed, packageArtifact, manifestArtifact, platform] of [
     ['release-mac', 'manifest-mac', MAC_PACKAGE_ARTIFACT, MAC_VERIFIED_MANIFEST, 'mac'],
@@ -311,6 +406,27 @@ function workflowErrors(candidate: Workflow): string[] {
       if (step.if?.includes('always()')) errors.push(`${jobName} step must not bypass failed dependencies`)
     }
   }
+
+  for (const jobName of ordinaryCiJobs) {
+    const job = candidate.jobs[jobName]
+    if (!job) {
+      errors.push(`missing ordinary CI job ${jobName}`)
+      continue
+    }
+    if (job.if != null) errors.push(`${jobName} must remain unconditional ordinary PR CI`)
+    if (JSON.stringify(job).includes('secrets.')) errors.push(`${jobName} must remain secret-free ordinary PR CI`)
+  }
+
+  for (const [jobName, job] of Object.entries(candidate.jobs)) {
+    const runText = commands(job).join('\n')
+    if (/upgrade-firestore-rules\.mjs|rev-parse\s+v0\.3\.8/.test(runText)) {
+      const checkout = stepByUse(job, 'actions/checkout@v4')[0]
+      if (checkout?.with?.['fetch-depth'] !== 0) {
+        errors.push(`${jobName} calls an upgrade/rules tag loader and must check out with fetch-depth 0`)
+      }
+    }
+  }
+
   return errors
 }
 
@@ -319,13 +435,15 @@ describe('signed platform release workflow', () => {
     expect(workflowErrors(workflow)).toEqual([])
   })
 
-  it('has the exact normal, signed-package, smoke, manifest, upload, and publish jobs', () => {
+  it('has the exact normal, baseline, signed-package, upgrade, smoke, manifest, upload, and publish jobs', () => {
     expect(Object.keys(workflow.jobs).sort()).toEqual([
+      'baseline-v038',
       'build-mac', 'e2e-mac', 'e2e-win',
       'manifest-mac', 'manifest-win', 'package-mac', 'package-win',
       'publish-release', 'release-context', 'release-mac', 'release-preflight', 'release-win',
       'security-check',
       'smoke-mac-arm64', 'smoke-mac-intel', 'smoke-win',
+      'upgrade-mac-arm64', 'upgrade-mac-intel', 'upgrade-win',
     ].sort())
   })
 
@@ -404,7 +522,7 @@ describe('signed platform release workflow', () => {
     expect(workflowErrors(rebuilt)).toContain('release-win must never rebuild after smoke')
   })
 
-  it.each(allSmokeJobs)('rejects removing %s from either manifest gate', smokeJob => {
+  it.each([...allSmokeJobs, ...upgradeJobs])('rejects removing %s from either manifest gate', smokeJob => {
     for (const manifestJob of ['manifest-mac', 'manifest-win']) {
       const mutated = clone()
       mutated.jobs[manifestJob].needs = needs(mutated.jobs[manifestJob]).filter(name => name !== smokeJob)
@@ -412,12 +530,89 @@ describe('signed platform release workflow', () => {
     }
   })
 
-  it('rejects removing ARM, Intel, Windows, package, preflight, or unpacked E2E dependencies from upload', () => {
-    for (const dependency of ['release-preflight', 'e2e-mac', 'e2e-win', 'package-mac', 'package-win', ...allSmokeJobs]) {
+  it('rejects removing ARM, Intel, Windows, upgrade, package, preflight, or unpacked E2E dependencies from upload', () => {
+    for (const dependency of ['release-preflight', 'e2e-mac', 'e2e-win', 'package-mac', 'package-win', ...allSmokeJobs, ...upgradeJobs]) {
       const mutated = clone()
       mutated.jobs['release-mac'].needs = needs(mutated.jobs['release-mac']).filter(name => name !== dependency)
       expect(workflowErrors(mutated)).toContain(`release-mac must need ${dependency}`)
     }
+  })
+
+  it('fails closed: release jobs cannot run after any upgrade job is removed, skipped, or bypassed', () => {
+    for (const upgradeJob of upgradeJobs) {
+      for (const releaseJob of ['release-mac', 'release-win']) {
+        const mutated = clone()
+        mutated.jobs[releaseJob].needs = needs(mutated.jobs[releaseJob]).filter(name => name !== upgradeJob)
+        expect(workflowErrors(mutated)).toContain(`${releaseJob} must need ${upgradeJob}`)
+      }
+    }
+  })
+
+  it('pins the exact historical release/asset identity in baseline-v038 and rejects a moved fetch', () => {
+    expect(workflowErrors(workflow)).toEqual([])
+    const moved = clone()
+    const step = moved.jobs[baselineJob].steps.find(candidateStep => candidateStep.run?.includes(BASELINE_WIN_ASSET.sha256))!
+    step.run = step.run!.replace(BASELINE_WIN_ASSET.sha256, 'f'.repeat(64))
+    expect(workflowErrors(moved)).toContain(`${baselineJob} must pin exact baseline identity ${BASELINE_WIN_ASSET.sha256}`)
+  })
+
+  it('keeps baseline-v038 free of every signing/release secret', () => {
+    const leaked = clone()
+    leaked.jobs[baselineJob].steps.push({
+      run: 'echo leaked',
+      env: { WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}' },
+    })
+    expect(workflowErrors(leaked)).toContain(`${baselineJob} must not consume any signing or release secret`)
+  })
+
+  it('keeps baseline-v038 artifacts unable to satisfy any release-bound download', () => {
+    const collided = clone()
+    const upload = stepByUse(collided.jobs[baselineJob], 'actions/upload-artifact@v4')[0]!
+    upload.with!.name = MAC_PACKAGE_ARTIFACT
+    expect(workflowErrors(collided)).toContain(
+      `${baselineJob} artifact name must not collide with any release-bound artifact name`,
+    )
+
+    const staged = clone()
+    const stagedUpload = stepByUse(staged.jobs[baselineJob], 'actions/upload-artifact@v4')[0]!
+    stagedUpload.with!.path = 'release/*'
+    expect(workflowErrors(staged)).toContain(
+      `${baselineJob} artifact must not stage inside a release-upload glob path`,
+    )
+  })
+
+  it.each(fetchDepthZeroJobs)('requires %s to check out full history for the upgrade/rules tag loaders', jobName => {
+    expect(workflowErrors(workflow)).toEqual([])
+    const shallow = clone()
+    const checkout = stepByUse(shallow.jobs[jobName], 'actions/checkout@v4')[0]!
+    delete checkout.with
+    expect(workflowErrors(shallow)).toContain(
+      `${jobName} calls an upgrade/rules tag loader and must check out with fetch-depth 0`,
+    )
+  })
+
+  it('requires the same protected identity secrets on every upgrade job', () => {
+    const mutated = clone()
+    const gate = mutated.jobs['upgrade-win'].steps.find(step => JSON.stringify(step).includes('WIN_EXPECTED_CERT_SHA256'))!
+    delete gate.env!.WIN_EXPECTED_CERT_SHA256
+    expect(workflowErrors(mutated)).toContain('upgrade-win must map WIN_EXPECTED_CERT_SHA256')
+
+    const macMutated = clone()
+    const macGate = macMutated.jobs['upgrade-mac-arm64'].steps.find(step => JSON.stringify(step).includes('MAC_EXPECTED_TEAM_ID'))!
+    delete macGate.env!.MAC_EXPECTED_TEAM_ID
+    expect(workflowErrors(macMutated)).toContain('upgrade-mac-arm64 must map MAC_EXPECTED_TEAM_ID')
+  })
+
+  it('keeps ordinary PR CI unconditional and free of every secret', () => {
+    expect(workflowErrors(workflow)).toEqual([])
+    for (const jobName of ordinaryCiJobs) {
+      expect(workflow.jobs[jobName].if).toBeUndefined()
+      expect(JSON.stringify(workflow.jobs[jobName])).not.toContain('secrets.')
+    }
+
+    const leaked = clone()
+    leaked.jobs['e2e-mac'].steps.push({ run: 'echo leaked', env: { WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}' } })
+    expect(workflowErrors(leaked)).toContain('e2e-mac must remain secret-free ordinary PR CI')
   })
 
   it('rejects accidental external release mutation from the manual signed dry-run path', () => {

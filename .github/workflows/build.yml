@@ -150,6 +150,70 @@ jobs:
           if(isTag&&tag!=='v'+version) throw new Error('Release tag '+tag+' must equal v'+version);
           fs.appendFileSync(process.env.GITHUB_OUTPUT,'version='+version+'\ntag='+tag+'\n')"
 
+  baseline-v038:
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - name: Verify the pinned v0.3.8 source tag has not moved
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse v0.3.8^{commit})"
+          expected_sha="4ad44829c0de56da33d9123c16f92e6090f0df4a"
+          if [ "${actual_sha}" != "${expected_sha}" ]; then
+            echo "v0.3.8 tag moved from ${expected_sha} to ${actual_sha}" >&2
+            exit 1
+          fi
+      - name: Download and hard-verify the exact historical v0.3.8 release assets by asset ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upgrade-baseline-v0.3.8
+          release_id=352876543
+          expected_tag='v0.3.8'
+          expected_published='2026-07-13T00:17:33Z'
+          release_json="$(curl -fsSL "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/${release_id}")"
+          actual_tag="$(node -e 'console.log(JSON.parse(process.argv[1]).tag_name)' "${release_json}")"
+          actual_published="$(node -e 'console.log(JSON.parse(process.argv[1]).published_at)' "${release_json}")"
+          if [ "${actual_tag}" != "${expected_tag}" ] || [ "${actual_published}" != "${expected_published}" ]; then
+            echo "release ${release_id} tag or published-at metadata changed" >&2
+            exit 1
+          fi
+          verify_asset() {
+            local asset_id="$1" name="$2" size="$3" sha256="$4" out="$5"
+            curl -fsSL -H 'Accept: application/octet-stream' \
+              "https://api.github.com/repos/HB-code-glitch/baby-diary-releases/releases/assets/${asset_id}" \
+              -o "${out}"
+            local actual_size actual_sha256
+            actual_size="$(stat -c%s "${out}")"
+            actual_sha256="$(sha256sum "${out}" | cut -d' ' -f1)"
+            if [ "${actual_size}" != "${size}" ] || [ "${actual_sha256}" != "${sha256}" ]; then
+              echo "asset ${asset_id} (${name}) failed exact size/SHA-256 verification" >&2
+              exit 1
+            fi
+          }
+          verify_asset 474870034 Baby-Diary-Setup-0.3.8.exe 233249330 \
+            edb3a3e2d036f0d16dc8d75948c3f160c35adc9d1277a3dedc41d8671bd6a6de \
+            upgrade-baseline-v0.3.8/Baby-Diary-Setup-0.3.8.exe
+          verify_asset 474869787 Baby-Diary-0.3.8-universal.dmg 351533375 \
+            2793e91c0dc49b436451f150ba0c8dc625cfd1a988841823a114d597e2f60974 \
+            upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg
+      # This job never receives a signing or release-write secret; the assets above are
+      # the immutable public bytes already trusted by every v0.3.8 user.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8/*
+          if-no-files-found: error
+          retention-days: 1
+
   release-preflight:
     needs: [security-check, release-context]
     runs-on: ubuntu-latest
@@ -352,6 +416,224 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  upgrade-win:
+    needs: [release-context, package-win, baseline-v038]
+    runs-on: windows-latest
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8
+      - name: Bind the signed candidate Setup to its release-asset identity and provenance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ needs.release-context.outputs.version }}'
+          $raw = "release/Baby Diary Setup $version.exe"
+          $candidateDir = 'upgrade-baseline-v0.3.8/candidate'
+          New-Item -ItemType Directory -Force -Path $candidateDir | Out-Null
+          $candidatePath = Join-Path $candidateDir "Baby-Diary-Setup-$version.exe"
+          Copy-Item -LiteralPath $raw -Destination $candidatePath
+          $sha256 = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $provenance = [ordered]@{
+            schemaVersion = 1
+            repository = '${{ github.repository }}'
+            workflowRunId = '${{ github.run_id }}'
+            sourceSha = '${{ github.sha }}'
+            releaseTag = '${{ needs.release-context.outputs.tag }}'
+            appVersion = $version
+            platform = 'windows-x64'
+            artifactName = "Baby-Diary-Setup-$version.exe"
+            artifactSha256 = $sha256
+          }
+          $provenancePath = (Resolve-Path 'upgrade-baseline-v0.3.8').Path + '\candidate-provenance.json'
+          ($provenance | ConvertTo-Json) | Set-Content -LiteralPath $provenancePath -Encoding utf8
+          "CANDIDATE_SETUP_PATH=$((Resolve-Path $candidatePath).Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_PACKAGE_SHA256=$sha256" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_PROVENANCE_PATH=$provenancePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prepare the exact v0.3.8 Firestore rules workspace for this run
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runId = [guid]::NewGuid().ToString('N')
+          $rulesRoot = Join-Path $env:RUNNER_TEMP "baby-diary-upgrade-rules-$runId"
+          New-Item -ItemType Directory -Force -Path $rulesRoot | Out-Null
+          node scripts/upgrade-firestore-rules.mjs prepare --root $rulesRoot --run-id $runId --candidate-source-sha '${{ github.sha }}'
+          "BABYDIARY_UPGRADE_RULES_ROOT=$rulesRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BABYDIARY_UPGRADE_RULES_RUN_ID=$runId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run the signed Windows in-place upgrade gate inside one Auth/Firestore emulator process
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inner = 'powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows-in-place-upgrade-smoke.ps1' `
+            + " -BaselineSetupPath upgrade-baseline-v0.3.8/Baby-Diary-Setup-0.3.8.exe" `
+            + " -CandidateSetupPath `"$env:CANDIDATE_SETUP_PATH`"" `
+            + " -ExpectedPublisher `"$env:WIN_EXPECTED_PUBLISHER`"" `
+            + " -ExpectedCertificateSha256 $env:WIN_EXPECTED_CERT_SHA256" `
+            + " -CandidateSourceSha ${{ github.sha }}" `
+            + " -CandidatePackageSha256 $env:CANDIDATE_PACKAGE_SHA256" `
+            + " -CandidateProvenancePath `"$env:CANDIDATE_PROVENANCE_PATH`"" `
+            + " -ExpectedRepository ${{ github.repository }}" `
+            + " -ExpectedWorkflowRunId ${{ github.run_id }}"
+          npx --no-install firebase-tools emulators:exec --project demo-baby-diary --only auth,firestore $inner
+        env:
+          WIN_EXPECTED_PUBLISHER: ${{ secrets.WIN_EXPECTED_PUBLISHER }}
+          WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
+          BABYDIARY_UPGRADE_FIREBASE_EMULATOR: '1'
+          BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID: demo-baby-diary
+
+  upgrade-mac-arm64:
+    needs: [release-context, package-mac, baseline-v038]
+    runs-on: macos-15
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8
+      - name: Bind the signed candidate DMG to its release-asset identity and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.release-context.outputs.version }}'
+          mkdir -p upgrade-baseline-v0.3.8/candidate
+          candidate_path="upgrade-baseline-v0.3.8/candidate/Baby-Diary-${version}-universal.dmg"
+          cp "release/Baby Diary-${version}-universal.dmg" "${candidate_path}"
+          sha256="$(shasum -a 256 "${candidate_path}" | cut -d' ' -f1)"
+          provenance_path="$(pwd)/upgrade-baseline-v0.3.8/candidate-provenance.json"
+          node -e "const fs=require('node:fs');fs.writeFileSync(process.argv[1], JSON.stringify({schemaVersion:1,repository:process.argv[2],workflowRunId:process.argv[3],sourceSha:process.argv[4],releaseTag:process.argv[5],appVersion:process.argv[6],platform:'mac-universal',artifactName:process.argv[7],artifactSha256:process.argv[8]}))" \
+            "${provenance_path}" "${{ github.repository }}" "${{ github.run_id }}" "${{ github.sha }}" \
+            "${{ needs.release-context.outputs.tag }}" "${version}" "Baby-Diary-${version}-universal.dmg" "${sha256}"
+          {
+            echo "CANDIDATE_DMG_PATH=$(pwd)/${candidate_path}"
+            echo "CANDIDATE_PACKAGE_SHA256=${sha256}"
+            echo "CANDIDATE_PROVENANCE_PATH=${provenance_path}"
+          } >> "$GITHUB_ENV"
+      - name: Prepare the exact v0.3.8 Firestore rules workspace for this run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+          rules_root="${RUNNER_TEMP}/baby-diary-upgrade-rules-${run_id}"
+          mkdir -p "${rules_root}"
+          node scripts/upgrade-firestore-rules.mjs prepare --root "${rules_root}" --run-id "${run_id}" --candidate-source-sha "${{ github.sha }}"
+          {
+            echo "BABYDIARY_UPGRADE_RULES_ROOT=${rules_root}"
+            echo "BABYDIARY_UPGRADE_RULES_RUN_ID=${run_id}"
+          } >> "$GITHUB_ENV"
+      - name: Run the signed Apple Silicon in-place upgrade gate inside one Auth/Firestore emulator process
+        shell: bash
+        run: |
+          set -euo pipefail
+          inner="bash ./scripts/mac-in-place-upgrade-smoke.sh --baseline-dmg upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg --candidate-dmg \"${CANDIDATE_DMG_PATH}\" --expected-host-arch arm64 --expected-team-id \"${MAC_EXPECTED_TEAM_ID}\" --candidate-source-sha ${{ github.sha }} --candidate-package-sha256 ${CANDIDATE_PACKAGE_SHA256} --candidate-provenance \"${CANDIDATE_PROVENANCE_PATH}\" --expected-repository ${{ github.repository }} --expected-workflow-run-id ${{ github.run_id }}"
+          npx --no-install firebase-tools emulators:exec --project demo-baby-diary --only auth,firestore "${inner}"
+        env:
+          MAC_EXPECTED_TEAM_ID: ${{ secrets.MAC_EXPECTED_TEAM_ID }}
+          BABYDIARY_UPGRADE_FIREBASE_EMULATOR: '1'
+          BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID: demo-baby-diary
+
+  upgrade-mac-intel:
+    needs: [release-context, package-mac, baseline-v038]
+    runs-on: macos-15-intel
+    environment: platform-release-signing
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-mac-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-baseline-v038-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-baseline-v0.3.8
+      - name: Bind the signed candidate DMG to its release-asset identity and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.release-context.outputs.version }}'
+          mkdir -p upgrade-baseline-v0.3.8/candidate
+          candidate_path="upgrade-baseline-v0.3.8/candidate/Baby-Diary-${version}-universal.dmg"
+          cp "release/Baby Diary-${version}-universal.dmg" "${candidate_path}"
+          sha256="$(shasum -a 256 "${candidate_path}" | cut -d' ' -f1)"
+          provenance_path="$(pwd)/upgrade-baseline-v0.3.8/candidate-provenance.json"
+          node -e "const fs=require('node:fs');fs.writeFileSync(process.argv[1], JSON.stringify({schemaVersion:1,repository:process.argv[2],workflowRunId:process.argv[3],sourceSha:process.argv[4],releaseTag:process.argv[5],appVersion:process.argv[6],platform:'mac-universal',artifactName:process.argv[7],artifactSha256:process.argv[8]}))" \
+            "${provenance_path}" "${{ github.repository }}" "${{ github.run_id }}" "${{ github.sha }}" \
+            "${{ needs.release-context.outputs.tag }}" "${version}" "Baby-Diary-${version}-universal.dmg" "${sha256}"
+          {
+            echo "CANDIDATE_DMG_PATH=$(pwd)/${candidate_path}"
+            echo "CANDIDATE_PACKAGE_SHA256=${sha256}"
+            echo "CANDIDATE_PROVENANCE_PATH=${provenance_path}"
+          } >> "$GITHUB_ENV"
+      - name: Prepare the exact v0.3.8 Firestore rules workspace for this run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+          rules_root="${RUNNER_TEMP}/baby-diary-upgrade-rules-${run_id}"
+          mkdir -p "${rules_root}"
+          node scripts/upgrade-firestore-rules.mjs prepare --root "${rules_root}" --run-id "${run_id}" --candidate-source-sha "${{ github.sha }}"
+          {
+            echo "BABYDIARY_UPGRADE_RULES_ROOT=${rules_root}"
+            echo "BABYDIARY_UPGRADE_RULES_RUN_ID=${run_id}"
+          } >> "$GITHUB_ENV"
+      - name: Run the signed Intel in-place upgrade gate inside one Auth/Firestore emulator process
+        shell: bash
+        run: |
+          set -euo pipefail
+          inner="bash ./scripts/mac-in-place-upgrade-smoke.sh --baseline-dmg upgrade-baseline-v0.3.8/Baby-Diary-0.3.8-universal.dmg --candidate-dmg \"${CANDIDATE_DMG_PATH}\" --expected-host-arch x86_64 --expected-team-id \"${MAC_EXPECTED_TEAM_ID}\" --candidate-source-sha ${{ github.sha }} --candidate-package-sha256 ${CANDIDATE_PACKAGE_SHA256} --candidate-provenance \"${CANDIDATE_PROVENANCE_PATH}\" --expected-repository ${{ github.repository }} --expected-workflow-run-id ${{ github.run_id }}"
+          npx --no-install firebase-tools emulators:exec --project demo-baby-diary --only auth,firestore "${inner}"
+        env:
+          MAC_EXPECTED_TEAM_ID: ${{ secrets.MAC_EXPECTED_TEAM_ID }}
+          BABYDIARY_UPGRADE_FIREBASE_EMULATOR: '1'
+          BABYDIARY_UPGRADE_FIREBASE_PROJECT_ID: demo-baby-diary
+
   smoke-mac-arm64:
     needs: [release-context, package-mac]
     runs-on: macos-15
@@ -437,7 +719,7 @@ jobs:
           WIN_EXPECTED_CERT_SHA256: ${{ secrets.WIN_EXPECTED_CERT_SHA256 }}
 
   manifest-mac:
-    needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win]
+    needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win, upgrade-win, upgrade-mac-arm64, upgrade-mac-intel]
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
@@ -469,7 +751,7 @@ jobs:
           retention-days: 1
 
   manifest-win:
-    needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win]
+    needs: [release-context, package-mac, package-win, smoke-mac-arm64, smoke-mac-intel, smoke-win, upgrade-win, upgrade-mac-arm64, upgrade-mac-intel]
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.signed_package_dry_run == true)
     steps:
@@ -509,6 +791,9 @@ jobs:
       - e2e-win
       - package-mac
       - package-win
+      - upgrade-win
+      - upgrade-mac-arm64
+      - upgrade-mac-intel
       - smoke-mac-arm64
       - smoke-mac-intel
       - smoke-win
@@ -569,6 +854,9 @@ jobs:
       - e2e-win
       - package-mac
       - package-win
+      - upgrade-win
+      - upgrade-mac-arm64
+      - upgrade-mac-intel
       - smoke-mac-arm64
       - smoke-mac-intel
       - smoke-win
