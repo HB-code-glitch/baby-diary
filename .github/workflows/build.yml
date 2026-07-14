@@ -103,6 +103,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The installed regression fixture verifies exact v0.3.8 source bytes.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24.18.0'

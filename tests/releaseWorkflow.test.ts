@@ -676,6 +676,8 @@ describe('release workflow CI gates', () => {
     const job = workflow.jobs['e2e-win']
     expect(job).toBeDefined()
     expect(job.if).toBeUndefined()
+    const checkout = job.steps.find(step => step.uses === 'actions/checkout@v4')
+    expect(checkout?.with?.['fetch-depth']).toBe(0)
 
     const smokeSteps = job.steps.filter(step => (
       normalizedRun(step)?.includes('scripts/windows-installed-release-smoke.ps1')
