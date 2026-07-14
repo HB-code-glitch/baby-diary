@@ -133,7 +133,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(browser.close).not.toHaveBeenCalled()
   })
 
-  it('requests a graceful packaged macOS quit through CDP after closing its windows', async () => {
+  it('requests a guarded graceful packaged macOS quit after closing its windows', async () => {
     const page = { close: vi.fn(async () => undefined) }
     const context = Object.assign(new EventEmitter(), {
       pages: vi.fn(() => [page]),
@@ -148,6 +148,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       exitCode: null as number | null,
       signalCode: null as NodeJS.Signals | null,
       stderr: new EventEmitter(),
+      kill: vi.fn(() => true),
     })
 
     const app = await launchCdpElectronApplication({
@@ -163,7 +164,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
 
     await app.close()
     expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
-    expect(browser.close).toHaveBeenCalledOnce()
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(browser.close).not.toHaveBeenCalled()
   })
 
   it('attests the exact packaged app.asar metadata used by a CDP launch', async () => {

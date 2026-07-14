@@ -50,6 +50,13 @@ const syncE2EGuardConfig = readSyncE2EGuardConfig(process.env, app.getPath('user
 const syncE2EGuard = syncE2EGuardConfig ? createSyncE2EGuard(syncE2EGuardConfig) : null
 const rendererResourceRoot = path.dirname(rendererEntryPath)
 
+// The CDP-based macOS packaged test cannot invoke Electron's main-process
+// app.quit() directly. Accept SIGTERM only for a fully validated isolated E2E
+// guard so the harness can exercise the same before-quit backup path as Cmd+Q.
+if (syncE2EGuardConfig && process.platform === 'darwin') {
+  process.once('SIGTERM', () => app.quit())
+}
+
 // F3: Prevent concurrent instances from writing to the same JSONL files simultaneously.
 // requestSingleInstanceLock() is synchronous and must be called before app is ready.
 // P26: Skip the lock when running under E2E test env so prod and test can coexist.

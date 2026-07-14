@@ -1068,10 +1068,12 @@ export async function launchCdpElectronApplication({
           await page.close({ runBeforeUnload: true })
         }
         // Closing the last window exits the Windows app. macOS intentionally
-        // keeps an app alive with no windows, so Browser.close is required to
-        // request a normal application quit and run the durable backup hook.
+        // keeps an app alive with no windows, so the validated isolated E2E
+        // guard converts SIGTERM into app.quit() and the durable backup hook.
         if (platform === 'darwin' && !childProcessExited(child)) {
-          await browser.close()
+          invariant(typeof child.kill === 'function', 'Packaged macOS Electron process cannot be signaled')
+          const signaled = child.kill('SIGTERM')
+          invariant(signaled || childProcessExited(child), 'Packaged macOS Electron process rejected graceful quit')
         }
         context.off?.('page', forwardWindow)
       })()

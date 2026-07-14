@@ -267,6 +267,13 @@ describe('packaged sync E2E early main-process guard', () => {
     )
   })
 
+  it('maps the isolated macOS harness signal to the normal app quit path', () => {
+    const source = readFileSync(path.resolve('electron', 'main.ts'), 'utf8')
+    expect(source).toMatch(
+      /if \(syncE2EGuardConfig && process\.platform === 'darwin'\) \{\s*process\.once\('SIGTERM', \(\) => app\.quit\(\)\)/,
+    )
+  })
+
   it('refuses to overwrite a pre-existing diagnostic file', () => {
     const userData = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-early-guard-')))
     try {
