@@ -1,10 +1,10 @@
 import { EventEmitter } from 'node:events'
-import { existsSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import type { Session } from 'electron'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type ElectronPermissionRequestHandler = NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>
 type ElectronPermissionCheckHandler = NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>
@@ -81,7 +81,13 @@ class MockBrowserWindow extends EventEmitter {
 }
 
 const ipcHandlers = new Map<string, (...args: any[]) => any>()
-const testPdfPath = join(tmpdir(), 'baby-diary-electron-security-test.pdf')
+const electronPaths = vi.hoisted(() => ({
+  appData: '',
+  userData: '',
+  documents: '',
+}))
+let testRoot = ''
+let testPdfPath = ''
 const settingsStoreMocks = vi.hoisted(() => ({
   construct: vi.fn(),
   get: vi.fn(() => ({})),
@@ -96,8 +102,10 @@ const settingsStoreMocks = vi.hoisted(() => ({
 vi.mock('electron', () => {
   const app = Object.assign(new EventEmitter(), {
     isPackaged: true,
-    getPath: vi.fn(() => tmpdir()),
-    setPath: vi.fn(),
+    getPath: vi.fn((name: 'appData' | 'userData' | 'documents') => electronPaths[name]),
+    setPath: vi.fn((name: 'appData' | 'userData' | 'documents', value: string) => {
+      electronPaths[name] = value
+    }),
     requestSingleInstanceLock: vi.fn(() => true),
     quit: vi.fn(),
     exit: vi.fn(),
@@ -204,10 +212,16 @@ async function finishPrintWindow(task: PrintWindowTask): Promise<void> {
 describe('Electron BrowserWindow security boundary', () => {
   beforeEach(async () => {
     vi.resetModules()
+    testRoot = mkdtempSync(join(tmpdir(), 'baby-diary-electron-security-'))
+    electronPaths.appData = join(testRoot, 'app-data')
+    electronPaths.userData = join(testRoot, 'user-data')
+    electronPaths.documents = join(testRoot, 'documents')
+    mkdirSync(electronPaths.appData, { recursive: true })
+    mkdirSync(electronPaths.documents, { recursive: true })
+    testPdfPath = join(testRoot, 'report.pdf')
     ipcHandlers.clear()
     MockBrowserWindow.instances.length = 0
     MockBrowserWindow.sharedSession = new MockSession()
-    if (existsSync(testPdfPath)) rmSync(testPdfPath, { force: true })
     const electron = await import('electron')
     const app = electron.app as unknown as EventEmitter
     const ipcMain = electron.ipcMain as unknown as EventEmitter & { handle: ReturnType<typeof vi.fn> }
@@ -222,6 +236,22 @@ describe('Electron BrowserWindow security boundary', () => {
     settingsStoreMocks.listPendingBabyInfo.mockReset()
     settingsStoreMocks.getBabyInfoSummary.mockReset()
     settingsStoreMocks.getBabyInfoMutation.mockReset()
+  })
+
+  afterEach(() => {
+    rmSync(testRoot, { recursive: true, force: true })
+  })
+
+  it('isolates Electron storage paths from the shared OS temp root', async () => {
+    const electron = await import('electron')
+
+    expect(electron.app.getPath('appData')).not.toBe(tmpdir())
+    expect(electron.app.getPath('userData')).not.toBe(tmpdir())
+    expect(electron.app.getPath('documents')).not.toBe(tmpdir())
+
+    const appDataPath = electron.app.getPath('appData')
+    await import('../electron/main')
+    expect(electron.app.getPath('userData')).toBe(join(appDataPath, 'baby-diary'))
   })
 
   it('explicitly sandboxes both the main and print windows', async () => {
