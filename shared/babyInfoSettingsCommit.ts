@@ -19,6 +19,7 @@ export type DeepPartial<T> = T extends object
 
 const MAX_OPERATION_BYTES = 512_000
 const MAX_DELTA_ITEMS = 500
+const MAX_STORED_SETTINGS_BYTES = 4 * 1024 * 1024
 
 export class BabyInfoSettingsCommitError extends Error {
   readonly code: BabyInfoCommitErrorCode
@@ -38,6 +39,146 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function assertStoredJsonValue(value: unknown): void {
+  const pending: unknown[] = [value]
+  const visited = new WeakSet<object>()
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (current === null || typeof current === 'string' || typeof current === 'boolean') continue
+    if (typeof current === 'number') {
+      if (!Number.isFinite(current)) invalid('stored settings contain a non-JSON number')
+      continue
+    }
+    if (typeof current !== 'object') invalid('stored settings contain a non-JSON value')
+    if (visited.has(current)) continue
+    visited.add(current)
+
+    if (Array.isArray(current)) {
+      const keys = Reflect.ownKeys(current)
+      if (keys.length !== current.length + 1
+        || Object.keys(current).length !== current.length
+        || !keys.includes('length')) {
+        invalid('stored settings contain a non-JSON array')
+      }
+      for (let index = 0; index < current.length; index += 1) {
+        if (!hasOwn(current, index)) invalid('stored settings contain a sparse array')
+        pending.push(current[index])
+      }
+      continue
+    }
+
+    if (!isRecord(current)) invalid('stored settings contain a non-plain JSON object')
+    for (const key of Reflect.ownKeys(current)) {
+      if (typeof key !== 'string') invalid('stored settings contain a symbol key')
+      const property = Object.getOwnPropertyDescriptor(current, key)
+      if (!property || !property.enumerable || !hasOwn(property, 'value')) {
+        invalid('stored settings contain a non-JSON property')
+      }
+      pending.push(property.value)
+    }
+  }
+
+  let serialized: string | undefined
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    invalid('stored settings are not JSON serializable')
+  }
+  if (typeof serialized !== 'string') invalid('stored settings are not JSON serializable')
+  if (new TextEncoder().encode(serialized).byteLength > MAX_STORED_SETTINGS_BYTES) {
+    invalid('stored settings exceed the settings size limit')
+  }
+}
+
+function managedSettingsCandidate(value: Record<string, unknown>): Record<string, unknown> {
+  const baby = isRecord(value.baby)
+    ? {
+        name: value.baby.name,
+        birthdate: value.baby.birthdate,
+        ...(hasOwn(value.baby, 'gender') ? { gender: value.baby.gender } : {}),
+      }
+    : value.baby
+  const profile = isRecord(value.profile)
+    ? {
+        uid: value.profile.uid,
+        name: value.profile.name,
+        role: value.profile.role,
+      }
+    : value.profile
+  return {
+    baby,
+    profile,
+    familyId: value.familyId,
+    firebase: value.firebase,
+    ...(hasOwn(value, 'language') ? { language: value.language } : {}),
+    ...(hasOwn(value, 'theme') ? { theme: value.theme } : {}),
+    ...(hasOwn(value, 'babyInfoSync') ? { babyInfoSync: value.babyInfoSync } : {}),
+    ...(hasOwn(value, 'babyInfoJournal') ? { babyInfoJournal: value.babyInfoJournal } : {}),
+    ...(hasOwn(value, 'babyInfoRevision') ? { babyInfoRevision: value.babyInfoRevision } : {}),
+  }
+}
+
+function omitUndefinedManagedFields(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const result: Record<string, unknown> = { ...value }
+  if (isRecord(value.baby)) {
+    result.baby = { ...value.baby }
+    if (value.baby.gender === undefined) delete (result.baby as Record<string, unknown>).gender
+  }
+  if (isRecord(value.profile)) result.profile = { ...value.profile }
+  for (const key of [
+    'language',
+    'theme',
+    'babyInfoSync',
+    'babyInfoJournal',
+    'babyInfoRevision',
+  ]) {
+    if (result[key] === undefined) delete result[key]
+  }
+  if (isRecord(result.babyInfoJournal)
+    && result.babyInfoJournal.projectedWinnerKey === undefined) {
+    result.babyInfoJournal = { ...result.babyInfoJournal }
+    delete (result.babyInfoJournal as Record<string, unknown>).projectedWinnerKey
+  }
+  return result
+}
+
+function parseStoredSettingsShape(value: unknown): AppSettings {
+  assertStoredJsonValue(value)
+  if (!isRecord(value)) invalid('settings shape is invalid')
+  const managed = parseAppSettings(managedSettingsCandidate(value))
+  const result: Record<string, unknown> = {
+    ...value,
+    ...managed,
+    baby: {
+      ...(value.baby as Record<string, unknown>),
+      ...managed.baby,
+    },
+    profile: {
+      ...(value.profile as Record<string, unknown>),
+      ...managed.profile,
+    },
+    firebase: managed.firebase ? { ...managed.firebase } : null,
+    ...(hasOwn(value, 'babyInfoSync') ? { babyInfoSync: managed.babyInfoSync } : {}),
+    ...(hasOwn(value, 'babyInfoJournal') ? { babyInfoJournal: managed.babyInfoJournal } : {}),
+    ...(hasOwn(value, 'babyInfoRevision') ? { babyInfoRevision: managed.babyInfoRevision } : {}),
+  }
+  for (const key of [
+    'language',
+    'theme',
+    'babyInfoSync',
+    'babyInfoJournal',
+    'babyInfoRevision',
+  ]) {
+    if (!hasOwn(value, key)) delete result[key]
+  }
+  return omitUndefinedManagedFields(result) as AppSettings
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -166,6 +307,44 @@ export function parseAppSettings(value: unknown): AppSettings {
 }
 
 /**
+ * Parses trusted settings bytes while retaining bounded, uninterpreted legacy
+ * fields. Known fields still pass through the same strict validation used by
+ * the renderer/IPC boundary.
+ */
+export function parseStoredAppSettings(value: unknown): AppSettings {
+  const storedValue = omitUndefinedManagedFields(value)
+  assertStoredJsonValue(storedValue)
+  if (!isRecord(storedValue)
+    || storedValue.babyInfoJournal !== undefined
+    || storedValue.babyInfoRevision !== undefined) {
+    return parseStoredSettingsShape(storedValue)
+  }
+  if (storedValue.baby !== undefined && !isRecord(storedValue.baby)) {
+    return parseStoredSettingsShape(storedValue)
+  }
+  if (storedValue.profile !== undefined && !isRecord(storedValue.profile)) {
+    return parseStoredSettingsShape(storedValue)
+  }
+
+  return parseStoredSettingsShape({
+    ...storedValue,
+    baby: {
+      name: '',
+      birthdate: '',
+      ...(storedValue.baby as Record<string, unknown> | undefined),
+    },
+    profile: {
+      uid: '',
+      name: '',
+      role: 'dad',
+      ...(storedValue.profile as Record<string, unknown> | undefined),
+    },
+    familyId: storedValue.familyId === undefined ? '' : storedValue.familyId,
+    firebase: storedValue.firebase === undefined ? null : storedValue.firebase,
+  })
+}
+
+/**
  * Pre-journal settings were historically partial and deep-merged with these
  * defaults. Journal-aware files stay strict because their pair metadata is an
  * integrity boundary, not a migration hint.
@@ -199,7 +378,7 @@ export function parseAppSettingsWithLegacyDefaults(value: unknown): AppSettings 
 
 /** Generic settings writes can never modify main-owned baby-info fields. */
 export function applyManagedSettingsSave(currentValue: AppSettings, incomingValue: AppSettings): AppSettings {
-  const current = parseAppSettings(currentValue)
+  const current = parseStoredAppSettings(currentValue)
   const incoming = parseAppSettings(incomingValue)
   return {
     ...current,
@@ -221,20 +400,22 @@ export function applyManagedSettingsMerge(
   current: AppSettings,
   partial: DeepPartial<AppSettings>,
 ): AppSettings {
+  const stored = parseStoredAppSettings(current)
+  const managedCurrent = parseAppSettings(managedSettingsCandidate(stored as unknown as Record<string, unknown>))
   const incoming: AppSettings = {
-    ...current,
+    ...managedCurrent,
     ...(partial as Partial<AppSettings>),
     baby: partial.baby != null
-      ? { ...current.baby, ...(partial.baby as Partial<AppSettings['baby']>) }
-      : current.baby,
+      ? { ...managedCurrent.baby, ...(partial.baby as Partial<AppSettings['baby']>) }
+      : managedCurrent.baby,
     profile: partial.profile != null
-      ? { ...current.profile, ...(partial.profile as Partial<AppSettings['profile']>) }
-      : current.profile,
+      ? { ...managedCurrent.profile, ...(partial.profile as Partial<AppSettings['profile']>) }
+      : managedCurrent.profile,
     firebase: 'firebase' in partial
-      ? (partial.firebase as AppSettings['firebase'] ?? current.firebase)
-      : current.firebase,
+      ? (partial.firebase as AppSettings['firebase'] ?? managedCurrent.firebase)
+      : managedCurrent.firebase,
   }
-  return applyManagedSettingsSave(current, incoming)
+  return applyManagedSettingsSave(stored, incoming)
 }
 
 export function parseBabyInfoSettingsCommitOperation(

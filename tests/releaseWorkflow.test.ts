@@ -51,6 +51,7 @@ interface PackagedE2ESpec {
 
 const workflowSource = readFileSync('.github/workflows/build.yml', 'utf8')
 const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as {
+  version?: string
   build?: { publish?: Array<{ provider?: string; releaseType?: string }> }
   scripts?: Record<string, string>
 }
@@ -119,7 +120,7 @@ const PACKAGED_E2E_SPECS: PackagedE2ESpec[] = [
   {
     jobName: 'e2e-win',
     runner: 'windows-latest',
-    packageCommand: 'npx electron-builder --win --dir --x64 --publish never',
+    packageCommand: 'npx electron-builder --win nsis --x64 --publish never',
     executable: '${{ github.workspace }}/release/win-unpacked/Baby Diary.exe',
     syncExecutable: '${{ github.workspace }}/release/win-unpacked/Baby Diary.exe',
   },
@@ -606,6 +607,10 @@ function immutableReleaseOrchestrationErrors(candidate: ReleaseWorkflow): string
 }
 
 describe('release workflow CI gates', () => {
+  it('binds delivery and release contracts to v0.3.10', () => {
+    expect(packageJson.version).toBe('0.3.10')
+  })
+
   it('is valid YAML 1.2 and rejects duplicate mapping keys at nested levels', () => {
     expect(workflow.name).toBe('Build')
     expect(workflow.on).toBeDefined()
@@ -665,6 +670,37 @@ describe('release workflow CI gates', () => {
 
     expect(new Set(unconditionalJobs)).toEqual(new Set(['security-check', 'build-mac', 'e2e-mac', 'e2e-win']))
     expect(new Set(tagOnlyJobs)).toEqual(new Set(['release-preflight', 'release-win', 'release-mac', 'publish-release']))
+  })
+
+  it('cannot silently skip the unsigned Windows packaged recovery smoke', () => {
+    const job = workflow.jobs['e2e-win']
+    expect(job).toBeDefined()
+    expect(job.if).toBeUndefined()
+
+    const smokeSteps = job.steps.filter(step => (
+      normalizedRun(step)?.includes('scripts/windows-installed-release-smoke.ps1')
+    ))
+    expect(smokeSteps).toHaveLength(1)
+    const smokeStep = smokeSteps[0]
+    const command = normalizedRun(smokeStep) ?? ''
+    expect(command).toContain('-SignaturePolicy AllowUnsigned')
+    expect(command).not.toContain('WIN_EXPECTED_PUBLISHER')
+    expect(command).not.toContain('WIN_EXPECTED_CERT_SHA256')
+    expect(smokeStep.if).toBeUndefined()
+    expect(smokeStep['continue-on-error']).toBeUndefined()
+    expect(smokeStep['timeout-minutes']).toBe(20)
+
+    const packageIndex = job.steps.findIndex(step => (
+      normalizedRun(step) === 'npx electron-builder --win nsis --x64 --publish never'
+    ))
+    const smokeIndex = job.steps.indexOf(smokeStep)
+    expect(packageIndex).toBeGreaterThanOrEqual(0)
+    expect(smokeIndex).toBeGreaterThan(packageIndex)
+
+    const signedSmoke = workflow.jobs['smoke-win']?.steps.find(step => (
+      normalizedRun(step)?.includes('scripts/windows-installed-release-smoke.ps1')
+    ))
+    expect(normalizedRun(signedSmoke ?? {})).toContain('-SignaturePolicy RequireTrusted')
   })
 
   it('serializes same-ref workflow reruns without cancelling an in-flight draft upload', () => {

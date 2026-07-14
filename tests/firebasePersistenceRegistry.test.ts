@@ -1215,6 +1215,24 @@ describe('main-owned Firebase persistence registry', () => {
     expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
+  it('rejects a non-JSON opaque value supplied after SettingsStore validation', () => {
+    const root = makeRoot('strict-settings-forbidden-opaque')
+    writeSettingsEvidence(root, customConfig)
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      {
+        ...settingsStore.get(),
+        upgradeOpaque: { forbidden: () => 'not-json' },
+      },
+    )).toThrow(/strict application validation/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
   it('rejects a same-config settings replacement between SettingsStore and detection', () => {
     const root = makeRoot('strict-settings-replaced-before-detection')
     writeSettingsEvidence(root, customConfig)

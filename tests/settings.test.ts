@@ -119,6 +119,67 @@ describe('SettingsStore', () => {
     expect(committed.activePendingCount).toBe(1)
   })
 
+  it('preserves opaque stored values across managed save, merge, and baby-info commit', () => {
+    const legacyContact = { label: 'family-contact', enabled: false }
+    const upgradeOpaque = {
+      deep: { nested: { values: [0, false, null, { marker: 'v0.3.8' }] } },
+    }
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify({
+      baby: { name: '', birthdate: '', gender: 'girl' },
+      profile: {
+        uid: 'opaque-user',
+        name: 'Opaque Parent',
+        role: 'mom',
+        legacyContact,
+      },
+      familyId: '',
+      firebase: null,
+      language: 'ko',
+      theme: 'light',
+      upgradeOpaque,
+    }, null, 2), 'utf8')
+
+    const opened = new SettingsStore(tmpDir)
+    const rendererView = opened.get()
+    expect(rendererView).not.toHaveProperty('upgradeOpaque')
+    expect(rendererView.profile).not.toHaveProperty('legacyContact')
+
+    opened.save({ ...rendererView, theme: 'dark' })
+    opened.merge({ language: 'ja' })
+    const beforeCommit = opened.get()
+    opened.commitBabyInfo({
+      kind: 'user-edit',
+      familyId: '',
+      babyName: 'Local baby',
+      babyBirthdate: '2026-01-15',
+      settings: {
+        ...beforeCommit,
+        baby: {
+          ...beforeCommit.baby,
+          name: 'Local baby',
+          birthdate: '2026-01-15',
+        },
+      },
+    })
+
+    const persisted = JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8'))
+    expect(JSON.stringify(persisted.profile.legacyContact)).toBe(JSON.stringify(legacyContact))
+    expect(JSON.stringify(persisted.upgradeOpaque)).toBe(JSON.stringify(upgradeOpaque))
+    expect(persisted).toMatchObject({ language: 'ja', theme: 'dark' })
+
+    expect(() => opened.save({
+      ...opened.get(),
+      upgradeOpaque: { replaced: true },
+    } as AppSettings)).toThrow(/shape|invalid/i)
+    expect(() => opened.merge({
+      upgradeOpaque: { replaced: true },
+    } as Partial<AppSettings>)).toThrow(/shape|invalid/i)
+
+    const afterInjection = JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8'))
+    expect(afterInjection.profile.legacyContact).toEqual(legacyContact)
+    expect(afterInjection.upgradeOpaque).toEqual(upgradeOpaque)
+  })
+
   // ── BOM handling ────────────────────────────────────────────────────────────
 
   it('BOM read: loads settings.json that has a UTF-8 BOM prefix', () => {

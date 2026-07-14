@@ -18,7 +18,7 @@ import {
   BabyInfoSettingsCommitError,
   incrementBabyInfoRevision,
   parseAppSettings,
-  parseAppSettingsWithLegacyDefaults,
+  parseStoredAppSettings,
   parseBabyInfoSettingsCommitOperation,
   type DeepPartial,
 } from '../../shared/babyInfoSettingsCommit'
@@ -251,7 +251,7 @@ export class SettingsStore {
       throw new SettingsRecoveryError('settings.json became invalid after startup recovery')
     }
     try {
-      this.settings = parseAppSettingsWithLegacyDefaults(parsed)
+      this.settings = parseStoredAppSettings(parsed)
     } catch (error) {
       throw new SettingsRecoveryError(
         `settings.json failed strict validation: ${error instanceof Error ? error.message : String(error)}`,
@@ -260,14 +260,31 @@ export class SettingsStore {
   }
 
   get(): AppSettings {
-    return {
-      ...this.settings,
-      baby: { ...this.settings.baby },
-      profile: { ...this.settings.profile },
-      babyInfoJournal: this.settings.babyInfoJournal
-        ? { ...this.settings.babyInfoJournal }
-        : undefined,
-    }
+    return parseAppSettings({
+      baby: {
+        name: this.settings.baby.name,
+        birthdate: this.settings.baby.birthdate,
+        gender: this.settings.baby.gender,
+      },
+      profile: {
+        uid: this.settings.profile.uid,
+        name: this.settings.profile.name,
+        role: this.settings.profile.role,
+      },
+      familyId: this.settings.familyId,
+      firebase: this.settings.firebase ? { ...this.settings.firebase } : null,
+      ...(this.settings.language !== undefined ? { language: this.settings.language } : {}),
+      ...(this.settings.theme !== undefined ? { theme: this.settings.theme } : {}),
+      ...(this.settings.babyInfoSync !== undefined
+        ? { babyInfoSync: this.settings.babyInfoSync }
+        : {}),
+      ...(this.settings.babyInfoJournal !== undefined
+        ? { babyInfoJournal: { ...this.settings.babyInfoJournal } }
+        : {}),
+      ...(this.settings.babyInfoRevision !== undefined
+        ? { babyInfoRevision: this.settings.babyInfoRevision }
+        : {}),
+    })
   }
 
   private assertStorageWritable(): void {
@@ -367,7 +384,7 @@ export class SettingsStore {
    * recover a possibly interrupted settings projection from the journal index.
    */
   private recoverJournalProjection(): void {
-    const current = parseAppSettings(this.settings)
+    const current = parseStoredAppSettings(this.settings)
     const journalWasEmpty = !this.journal.hasAnyRecords()
     const preserveIntentionalLocalProjection = this.isIntentionalLocalProjection(current)
     let sourceRemoved = false
@@ -524,11 +541,11 @@ export class SettingsStore {
 
   private commitBabyInfoInternal(rawOperation: unknown): BabyInfoSettingsCommitResult {
     const operation = parseBabyInfoSettingsCommitOperation(rawOperation)
-    let current = parseAppSettings(this.settings)
+    let current = parseStoredAppSettings(this.settings)
 
     if (operation.kind === 'family-transition') {
       this.recoverJournalProjection()
-      current = parseAppSettings(this.settings)
+      current = parseStoredAppSettings(this.settings)
       const transitionArchiveId = this.archiveIntentionalLocalProjectionForTransition(
         current,
         operation.familyId,
@@ -562,7 +579,7 @@ export class SettingsStore {
       // A valid user edit may then recover a prior journal-before-projection
       // interruption before deciding whether this pair is a new mutation.
       this.recoverJournalProjection()
-      current = parseAppSettings(this.settings)
+      current = parseStoredAppSettings(this.settings)
       if (operation.familyId !== current.familyId) {
         throw new BabyInfoSettingsCommitError('FAMILY_MISMATCH', 'baby info family mismatch')
       }

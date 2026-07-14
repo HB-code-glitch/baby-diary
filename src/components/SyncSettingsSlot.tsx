@@ -4,7 +4,13 @@ import {
   Users, UserPlus, RefreshCw,
 } from 'lucide-react'
 import { useSyncStatus, restartSync, signIn, signUp, signOutSync, createFamily, joinFamily, DETAIL_FAMILY_GONE } from '../sync/useSync'
-import { DETAIL_FAMILY_NEEDED, DETAIL_FAMILY_NOT_FOUND, ERR_NOT_SIGNED_IN, ERR_PERMISSION_DENIED } from '../sync/syncEngine'
+import {
+  DETAIL_FAMILY_ACCESS_UNCERTAIN,
+  DETAIL_FAMILY_NEEDED,
+  DETAIL_FAMILY_NOT_FOUND,
+  ERR_NOT_SIGNED_IN,
+  ERR_PERMISSION_DENIED,
+} from '../sync/syncEngine'
 import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
@@ -602,6 +608,9 @@ function OnlineView({ detail }: { detail: string }) {
 function ErrorView({ detail }: { detail: string }) {
   const { settings } = useAppStore()
   const { t } = useTranslation()
+  const userDetail = detail === DETAIL_FAMILY_ACCESS_UNCERTAIN
+    ? t('sync.familyAccessUncertain')
+    : t('sync.syncErrorDesc')
 
   const handleRetry = async () => {
     const cfg = settings?.firebase ?? null
@@ -621,7 +630,7 @@ function ErrorView({ detail }: { detail: string }) {
         }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--rose-500)' }}>{t('sync.syncError')}</span>
       </div>
-      <div style={{ fontSize: 12, color: 'var(--stone-500)', lineHeight: 1.6 }}>{detail}</div>
+      <div style={{ fontSize: 12, color: 'var(--stone-500)', lineHeight: 1.6 }}>{userDetail}</div>
       <button
         className="btn-secondary"
         onClick={handleRetry}

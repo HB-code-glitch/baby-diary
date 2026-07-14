@@ -12,6 +12,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import {
   closeSync,
   existsSync,
@@ -27,6 +28,7 @@ import {
   writeSync,
 } from 'node:fs'
 import os from 'node:os'
+import { createServer } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { v5 as uuidv5 } from 'uuid'
@@ -41,8 +43,11 @@ const ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
 const APP_PACKAGE = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 const APP_PACKAGE_NAME = APP_PACKAGE.name
 const APP_VERSION = APP_PACKAGE.version
+const APP_PACKAGE_MAIN = APP_PACKAGE.main
 const E2E_TIMEOUT_MS = 30_000
 const CLOSE_TIMEOUT_MS = 10_000
+const CLOSE_CLEANUP_TIMEOUT_MS = 5_000
+const WINDOWS_PROCESS_POLL_MS = 75
 const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
 const DEFAULT_FILE_SYSTEM = { existsSync, lstatSync, realpathSync }
@@ -169,6 +174,54 @@ export function assertPackagedRuntimeAttestation(attestation, {
     `Expected packaged Baby Diary runtime ${expectedVersion} at ${executablePath}`,
   )
   return attestation
+}
+
+export async function readPackagedArtifactAttestation({
+  executablePath,
+  resourcePath,
+  extractFile,
+  platform = process.platform,
+  fileSystem = DEFAULT_FILE_SYSTEM,
+}) {
+  const realExecutablePath = assertRealRegularFile(
+    executablePath,
+    'Packaged executable',
+    platform,
+    fileSystem,
+  )
+  const realResourcePath = assertRealRegularFile(
+    resourcePath,
+    'Packaged app.asar',
+    platform,
+    fileSystem,
+  )
+  let extract = extractFile
+  if (!extract) {
+    const asar = await import('@electron/asar')
+    extract = asar.extractFile ?? asar.default?.extractFile
+  }
+  invariant(typeof extract === 'function', 'Packaged app.asar reader is unavailable')
+  let metadata
+  try {
+    const raw = await extract(realResourcePath, 'package.json')
+    metadata = JSON.parse(Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw))
+  } catch (error) {
+    throw new Error(`Packaged app.asar metadata could not be read: ${error?.message ?? String(error)}`)
+  }
+  invariant(
+    metadata
+      && typeof metadata.name === 'string'
+      && typeof metadata.version === 'string'
+      && metadata.main === APP_PACKAGE_MAIN,
+    'Packaged app.asar metadata is invalid',
+  )
+  return {
+    name: metadata.name,
+    version: metadata.version,
+    isPackaged: true,
+    appPath: realResourcePath,
+    executablePath: realExecutablePath,
+  }
 }
 
 export function resolveCanonicalUpgradeProfile({
@@ -884,6 +937,159 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+async function reserveLoopbackPort({ createServerImpl = createServer } = {}) {
+  const server = createServerImpl()
+  server.unref?.()
+  return new Promise((resolve, reject) => {
+    const fail = error => {
+      server.close?.(() => undefined)
+      reject(error)
+    }
+    server.once('error', fail)
+    server.listen(0, '127.0.0.1', () => {
+      server.off?.('error', fail)
+      const address = server.address()
+      if (!address || typeof address === 'string' || !Number.isInteger(address.port)) {
+        server.close(() => reject(new Error('Could not reserve a loopback CDP port')))
+        return
+      }
+      server.close(error => error ? reject(error) : resolve(address.port))
+    })
+  })
+}
+
+/**
+ * Launch a packaged Electron executable like a user does, then attach only to
+ * Chromium's remote-debugging endpoint. Playwright's `_electron.launch` also
+ * enables Electron's Node inspector (`--inspect=0`); Electron 43 can race that
+ * inspector startup across rapid relaunches and crash a sandboxed renderer.
+ */
+export async function launchCdpElectronApplication({
+  executablePath,
+  cwd,
+  env,
+  timeoutMs = E2E_TIMEOUT_MS,
+  allocatePort = reserveLoopbackPort,
+  spawnImpl = spawn,
+  connectOverCDP,
+  sleep = delay,
+  cleanupProcess = killOwnedProcessTree,
+}) {
+  invariant(typeof connectOverCDP === 'function', 'CDP connector is required')
+  const port = await allocatePort()
+  invariant(Number.isInteger(port) && port > 0 && port <= 65_535, `Invalid CDP port: ${port}`)
+
+  const childEnv = { ...env }
+  // Never pass a parent Node loader into the packaged Electron main process.
+  // Windows environment keys are case-insensitive, so strip every casing.
+  for (const key of Object.keys(childEnv)) {
+    if (key.toUpperCase() === 'NODE_OPTIONS' || key.toUpperCase() === 'ELECTRON_RUN_AS_NODE') {
+      delete childEnv[key]
+    }
+  }
+  const child = spawnImpl(executablePath, [
+    '--remote-debugging-address=127.0.0.1',
+    `--remote-debugging-port=${port}`,
+  ], {
+    cwd,
+    env: childEnv,
+    windowsHide: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  invariant(child && typeof child === 'object', 'Packaged Electron launch did not return a child process')
+
+  let spawnError
+  let stderr = ''
+  const captureSpawnError = error => { spawnError = error }
+  child.on?.('error', captureSpawnError)
+  child.stderr?.on?.('data', chunk => {
+    if (stderr.length < 8_192) stderr += String(chunk).slice(0, 8_192 - stderr.length)
+  })
+
+  const endpoint = `http://127.0.0.1:${port}`
+  const deadline = Date.now() + timeoutMs
+  let browser
+  let lastConnectError
+  try {
+    while (!browser) {
+      if (spawnError) throw new Error(`Packaged Electron process could not start: ${spawnError.message ?? String(spawnError)}`)
+      if (childProcessExited(child)) {
+        const details = stderr.trim()
+        throw new Error(`Packaged Electron process exited before CDP was ready${details ? `: ${details}` : ''}`)
+      }
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        throw new Error(`Packaged Electron CDP endpoint was not ready: ${lastConnectError?.message ?? 'timeout'}`)
+      }
+      try {
+        browser = await withTimeout(
+          Promise.resolve().then(() => connectOverCDP(endpoint)),
+          remaining,
+          'Packaged Electron CDP connection',
+        )
+      } catch (error) {
+        lastConnectError = error
+        const afterAttempt = deadline - Date.now()
+        if (afterAttempt <= 0) continue
+        await withTimeout(
+          Promise.resolve().then(() => sleep(Math.min(50, afterAttempt))),
+          afterAttempt,
+          'Packaged Electron CDP retry',
+        )
+      }
+    }
+
+    const contexts = browser.contexts()
+    invariant(Array.isArray(contexts) && contexts.length === 1,
+      `Expected exactly one packaged Electron CDP context, got ${contexts?.length ?? 0}`)
+    const context = contexts[0]
+    const app = new EventEmitter()
+    const forwardWindow = page => app.emit('window', page)
+    context.on('page', forwardWindow)
+    let closePromise
+    app.process = () => child
+    app.context = () => context
+    app.firstWindow = async options => {
+      const existing = context.pages()[0]
+      return existing ?? context.waitForEvent('page', options)
+    }
+    app.close = async () => {
+      if (closePromise) return closePromise
+      closePromise = (async () => {
+        const pages = context.pages()
+        invariant(pages.length > 0 || childProcessExited(child),
+          'Packaged Electron CDP context had no window to close gracefully')
+        // Close auxiliary windows first and the main window last. On Windows,
+        // window-all-closed triggers the app's durable backup + quit path.
+        for (const page of [...pages].reverse()) {
+          await page.close({ runBeforeUnload: true })
+        }
+        context.off?.('page', forwardWindow)
+      })()
+      return closePromise
+    }
+    return app
+  } catch (primaryError) {
+    const cleanupErrors = []
+    try {
+      await browser?.close?.()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    if (!childProcessExited(child)) {
+      try {
+        const pid = child.pid
+        invariant(Number.isInteger(pid) && pid > 1 && pid !== process.pid,
+          'Failed CDP launch did not expose a safe owned pid')
+        await cleanupProcess(pid)
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+    throw aggregateErrors(primaryError, cleanupErrors, 'Packaged Electron CDP launch cleanup failed')
+  }
+}
+
 export async function withTimeout(promise, timeoutMs, label) {
   let timeout
   try {
@@ -922,6 +1128,142 @@ export function ownedProcessTreePids(rootPid, rows) {
   return [...new Set(result)]
 }
 
+function normalizeWindowsProcessRows(rows) {
+  invariant(Array.isArray(rows), 'Windows process snapshot must be an array')
+  const seen = new Set()
+  return rows.map(row => {
+    invariant(row && typeof row === 'object', 'Windows process snapshot row is invalid')
+    const pid = Number(row.pid)
+    const parentPid = Number(row.parentPid)
+    const startedAt = String(row.startedAt ?? '')
+    const executablePath = String(row.executablePath ?? '')
+    invariant(Number.isInteger(pid) && pid >= 0, 'Windows process snapshot pid is invalid')
+    invariant(Number.isInteger(parentPid) && parentPid >= 0, 'Windows process snapshot parent pid is invalid')
+    invariant(startedAt === '' || /^\d+$/.test(startedAt),
+      `Windows process snapshot start identity is invalid for pid ${pid}`)
+    invariant(!seen.has(pid), `Windows process snapshot contains duplicate pid ${pid}`)
+    seen.add(pid)
+    return { pid, parentPid, startedAt, executablePath }
+  })
+}
+
+export function queryWindowsProcessTable({ spawnSyncImpl = spawnSync } = {}) {
+  const script = [
+    '$ErrorActionPreference = "Stop"',
+    '$rows = @(Get-CimInstance -ClassName Win32_Process | ForEach-Object {',
+    '  $startedAt = if ($null -eq $_.CreationDate) { "" } else { $_.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture) }',
+    '  [PSCustomObject]@{ pid = [int]$_.ProcessId; parentPid = [int]$_.ParentProcessId; startedAt = $startedAt; executablePath = [string]$_.ExecutablePath }',
+    '})',
+    'ConvertTo-Json -InputObject $rows -Compress',
+  ].join('; ')
+  const result = spawnSyncImpl('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    script,
+  ], {
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 8 * 1024 * 1024,
+  })
+  invariant(!result.error, `Windows process snapshot query failed: ${result.error?.message ?? 'spawn failed'}`)
+  invariant(result.status === 0, `Windows process snapshot query failed: ${String(result.stderr ?? '').trim()}`)
+  let parsed
+  try {
+    parsed = JSON.parse(String(result.stdout ?? ''))
+  } catch (error) {
+    throw new Error(`Windows process snapshot query returned invalid JSON: ${error?.message ?? String(error)}`)
+  }
+  return normalizeWindowsProcessRows(parsed)
+}
+
+function captureWindowsOwnedProcessSnapshot(rootPid, rows) {
+  const normalized = normalizeWindowsProcessRows(rows)
+  const byPid = new Map(normalized.map(row => [row.pid, row]))
+  invariant(byPid.has(rootPid), `Windows process snapshot did not contain owned root pid ${rootPid}`)
+  return ownedProcessTreePids(rootPid, normalized).map(pid => {
+    const identity = byPid.get(pid)
+    invariant(/^\d+$/.test(identity.startedAt),
+      `Windows owned process start identity is missing for pid ${pid}`)
+    return { ...identity }
+  })
+}
+
+function sameWindowsProcessIdentity(expected, actual) {
+  return expected.pid === actual.pid
+    && expected.startedAt === actual.startedAt
+    && (!expected.executablePath
+      || !actual.executablePath
+      || expected.executablePath.toLowerCase() === actual.executablePath.toLowerCase())
+}
+
+function lingeringWindowsOwnedProcesses(snapshot, rows) {
+  const currentByPid = new Map(normalizeWindowsProcessRows(rows).map(row => [row.pid, row]))
+  return snapshot.filter(expected => {
+    const actual = currentByPid.get(expected.pid)
+    invariant(!actual || /^\d+$/.test(actual.startedAt),
+      `Windows owned process start identity became unavailable for pid ${expected.pid}`)
+    return actual && sameWindowsProcessIdentity(expected, actual)
+  })
+}
+
+async function waitForWindowsOwnedProcessExit(snapshot, {
+  queryProcessTable,
+  timeoutMs,
+  pollIntervalMs,
+  sleep,
+  label,
+}) {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    let rows
+    try {
+      rows = queryProcessTable()
+    } catch (error) {
+      throw new Error(`Windows owned process snapshot query failed during ${label}: ${error?.message ?? String(error)}`)
+    }
+    const lingering = lingeringWindowsOwnedProcesses(snapshot, rows)
+    if (lingering.length === 0) return
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      throw new Error(`${label} timed out with owned Windows process identities still live: ${lingering.map(row => row.pid).join(', ')}`)
+    }
+    await withTimeout(
+      Promise.resolve().then(() => sleep(Math.min(pollIntervalMs, remaining))),
+      remaining,
+      `${label} process poll`,
+    )
+  }
+}
+
+async function killAndConfirmWindowsOwnedSnapshot(snapshot, {
+  queryProcessTable,
+  killTree,
+  timeoutMs,
+  pollIntervalMs,
+  sleep,
+  label,
+}) {
+  for (const expected of snapshot) {
+    const lingering = lingeringWindowsOwnedProcesses(snapshot, queryProcessTable())
+    if (!lingering.some(current => sameWindowsProcessIdentity(expected, current))) continue
+    try {
+      await killTree(expected.pid)
+    } catch (error) {
+      const afterFailure = lingeringWindowsOwnedProcesses(snapshot, queryProcessTable())
+      if (afterFailure.some(current => sameWindowsProcessIdentity(expected, current))) throw error
+    }
+  }
+  await waitForWindowsOwnedProcessExit(snapshot, {
+    queryProcessTable,
+    timeoutMs,
+    pollIntervalMs,
+    sleep,
+    label: `${label} forced cleanup`,
+  })
+}
+
 export async function killOwnedProcessTree(
   pid,
   { platform = process.platform, spawnSyncImpl = spawnSync, killImpl = process.kill } = {},
@@ -948,9 +1290,45 @@ export async function killOwnedProcessTree(
   }
 }
 
+function childProcessExited(childProcess) {
+  return childProcess?.exitCode != null || childProcess?.signalCode != null
+}
+
+async function waitForChildProcessExit(childProcess, timeoutMs, label) {
+  if (!childProcess || childProcessExited(childProcess)) return
+  invariant(typeof childProcess.once === 'function', `${label} did not expose an observable child process`)
+  let onExit
+  const exited = new Promise(resolve => {
+    onExit = () => resolve()
+    childProcess.once('exit', onExit)
+    // Close the status/listener race if the process exited between the first
+    // status read and listener registration.
+    if (childProcessExited(childProcess)) resolve()
+  })
+  try {
+    await withTimeout(exited, timeoutMs, `${label} child exit`)
+  } finally {
+    childProcess.off?.('exit', onExit)
+  }
+}
+
+function remainingCloseBudget(deadline, label) {
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) throw new Error(`${label} timed out before teardown completed`)
+  return remaining
+}
+
 export async function closeDevice(
   device,
-  { timeoutMs = CLOSE_TIMEOUT_MS, killTree = killOwnedProcessTree } = {},
+  {
+    timeoutMs = CLOSE_TIMEOUT_MS,
+    cleanupTimeoutMs = CLOSE_CLEANUP_TIMEOUT_MS,
+    killTree = killOwnedProcessTree,
+    platform = process.platform,
+    queryWindowsProcessTable: queryProcessTable = queryWindowsProcessTable,
+    processPollSleep = delay,
+    processPollIntervalMs = WINDOWS_PROCESS_POLL_MS,
+  } = {},
 ) {
   if (!device?.app) return
   const app = device.app
@@ -964,12 +1342,51 @@ export async function closeDevice(
   }
   device.closing = true
   const closeErrors = []
+  const label = `${device.name ?? 'device'} close`
+  const deadline = Date.now() + timeoutMs
+  let windowsSnapshot
   try {
-    await withTimeout(Promise.resolve().then(() => app.close()), timeoutMs, `${device.name ?? 'device'} close`)
+    if (platform === 'win32') {
+      invariant(Number.isInteger(pid) && pid > 1 && pid !== process.pid,
+        `${device.name ?? 'device'} did not expose a safe owned pid`)
+      windowsSnapshot = captureWindowsOwnedProcessSnapshot(pid, queryProcessTable())
+    }
+    await withTimeout(
+      Promise.resolve().then(() => app.close()),
+      remainingCloseBudget(deadline, label),
+      label,
+    )
+    await waitForChildProcessExit(
+      childProcess,
+      remainingCloseBudget(deadline, label),
+      label,
+    )
+    if (windowsSnapshot) {
+      await waitForWindowsOwnedProcessExit(windowsSnapshot, {
+        queryProcessTable,
+        timeoutMs: remainingCloseBudget(deadline, label),
+        pollIntervalMs: processPollIntervalMs,
+        sleep: processPollSleep,
+        label,
+      })
+    }
   } catch (error) {
     closeErrors.push(error)
     const childStillRunning = childProcess?.exitCode == null && childProcess?.signalCode == null
-    if (childStillRunning && Number.isInteger(pid) && pid > 1 && pid !== process.pid) {
+    if (windowsSnapshot) {
+      try {
+        await killAndConfirmWindowsOwnedSnapshot(windowsSnapshot, {
+          queryProcessTable,
+          killTree,
+          timeoutMs: cleanupTimeoutMs,
+          pollIntervalMs: processPollIntervalMs,
+          sleep: processPollSleep,
+          label,
+        })
+      } catch (killError) {
+        closeErrors.push(killError)
+      }
+    } else if (childStillRunning && Number.isInteger(pid) && pid > 1 && pid !== process.pid) {
       try {
         await killTree(pid)
       } catch (killError) {
@@ -1058,7 +1475,7 @@ async function launchDevice({
   blockedRequests,
   diagnosticFiles,
 }) {
-  const { _electron: electron } = await import('playwright')
+  const playwright = await import('playwright')
   const resourcePath = packagedResourcePath(executablePath, process.platform)
   invariant(resourcePath, `${name}: packaged resource path could not be derived`)
   const guardToken = randomBytes(32).toString('hex')
@@ -1073,31 +1490,41 @@ async function launchDevice({
   diagnosticFiles.push({ name, path: diagnosticPath })
   const device = { app: null, page: null, userData: selectedUserData, name, closing: false }
   try {
-    const app = await electron.launch({
-      executablePath,
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        NODE_ENV: 'production',
-        BABYDIARY_TEST_USERDATA: canonicalUpgradeProfile ?? userData,
-        BABYDIARY_SYNC_E2E_EARLY_GUARD: '1',
-        BABYDIARY_SYNC_E2E_GUARD_TOKEN: guardToken,
-        BABYDIARY_SYNC_E2E_DIAGNOSTICS: diagnosticPath,
-        BABYDIARY_FIREBASE_EMULATOR: '1',
-        BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID: FIREBASE_PROJECT_ID,
-        FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${FIREBASE_AUTH_PORT}`,
-        FIRESTORE_EMULATOR_HOST: `127.0.0.1:${FIRESTORE_PORT}`,
-        ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
-      },
-    })
+    const launchEnvironment = {
+      ...process.env,
+      NODE_ENV: 'production',
+      BABYDIARY_TEST_USERDATA: canonicalUpgradeProfile ?? userData,
+      BABYDIARY_SYNC_E2E_EARLY_GUARD: '1',
+      BABYDIARY_SYNC_E2E_GUARD_TOKEN: guardToken,
+      BABYDIARY_SYNC_E2E_DIAGNOSTICS: diagnosticPath,
+      BABYDIARY_FIREBASE_EMULATOR: '1',
+      BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID: FIREBASE_PROJECT_ID,
+      FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${FIREBASE_AUTH_PORT}`,
+      FIRESTORE_EMULATOR_HOST: `127.0.0.1:${FIRESTORE_PORT}`,
+      ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
+    }
+    const app = process.platform === 'win32'
+      ? await launchCdpElectronApplication({
+          executablePath,
+          cwd: ROOT,
+          env: launchEnvironment,
+          connectOverCDP: endpoint => playwright.chromium.connectOverCDP(endpoint),
+        })
+      : await playwright._electron.launch({
+          executablePath,
+          cwd: ROOT,
+          env: launchEnvironment,
+        })
     device.app = app
-    const attestation = await app.evaluate(({ app: electronApp }) => ({
-      name: electronApp.getName(),
-      version: electronApp.getVersion(),
-      isPackaged: electronApp.isPackaged,
-      appPath: electronApp.getAppPath(),
-      executablePath: process.execPath,
-    }))
+    const attestation = process.platform === 'win32'
+      ? await readPackagedArtifactAttestation({ executablePath, resourcePath })
+      : await app.evaluate(({ app: electronApp }) => ({
+          name: electronApp.getName(),
+          version: electronApp.getVersion(),
+          isPackaged: electronApp.isPackaged,
+          appPath: electronApp.getAppPath(),
+          executablePath: process.execPath,
+        }))
     assertPackagedRuntimeAttestation(attestation, {
       executablePath,
       resourcePath,

@@ -18,6 +18,10 @@ import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as contract from '../scripts/upgrade-data-contract.mjs'
 import { V038_DEFAULT_FIREBASE_EVIDENCE } from '../scripts/upgrade-firebase-continuity.mjs'
+import {
+  parseAppSettings,
+  parseStoredAppSettings,
+} from '../shared/babyInfoSettingsCommit'
 
 const roots: string[] = []
 
@@ -75,6 +79,36 @@ afterEach(() => {
 })
 
 describe('v0.3.8 upgrade data contract', () => {
+  it('accepts the exact opaque v0.3.8 fixture only at the trusted stored-data boundary', () => {
+    const fixture = contract.buildV038Fixture()
+
+    expect(() => parseAppSettings(fixture.settings)).toThrow(/shape/i)
+    expect(parseStoredAppSettings(fixture.settings)).toEqual(fixture.settings)
+    expect(parseStoredAppSettings(fixture.settings).profile).toHaveProperty(
+      'legacyContact',
+      fixture.settings.profile.legacyContact,
+    )
+    expect(parseStoredAppSettings(fixture.settings)).toHaveProperty(
+      'upgradeOpaque',
+      fixture.settings.upgradeOpaque,
+    )
+    expect(parseStoredAppSettings(fixture.settings).babyInfoSync)
+      .toEqual(fixture.settings.babyInfoSync)
+  })
+
+  it('rejects non-JSON and oversized opaque stored settings values', () => {
+    const fixture = contract.buildV038Fixture()
+
+    expect(() => parseStoredAppSettings({
+      ...fixture.settings,
+      upgradeOpaque: { nonFinite: Number.NaN },
+    })).toThrow(/JSON|serializable|opaque/i)
+    expect(() => parseStoredAppSettings({
+      ...fixture.settings,
+      upgradeOpaque: { oversized: 'x'.repeat(4 * 1024 * 1024) },
+    })).toThrow(/large|size|bytes/i)
+  })
+
   it('preseeds only the exact v0.3.8 settings schema with emulator config before first launch', async () => {
     const root = tempRoot('firebase-bootstrap')
     await contract.writeV038FirebaseBootstrap(root)

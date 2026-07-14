@@ -6,11 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import i18n from '../src/i18n'
 import ko from '../src/i18n/ko.json'
 import ja from '../src/i18n/ja.json'
+import type { AppSettings } from '../shared/types'
 
 const sync = vi.hoisted(() => ({
   signIn: vi.fn(),
   signUp: vi.fn(),
-  status: { status: 'signed-out', detail: 'not signed in', pendingCount: 0 },
+  restartSync: vi.fn(),
+  status: { status: 'signed-out', detail: 'not signed in', pendingCount: 0 } as {
+    status: string
+    detail: string
+    pendingCount: number
+  },
 }))
 
 const appStore = vi.hoisted(() => ({
@@ -20,13 +26,13 @@ const appStore = vi.hoisted(() => ({
     firebase: null,
     familyId: '',
     language: 'ko' as const,
-  },
+  } as AppSettings,
   saveSettings: vi.fn(async () => undefined),
 }))
 
 vi.mock('../src/sync/useSync', () => ({
   useSyncStatus: () => sync.status,
-  restartSync: vi.fn(),
+  restartSync: sync.restartSync,
   signIn: sync.signIn,
   signUp: sync.signUp,
   signOutSync: vi.fn(),
@@ -57,6 +63,15 @@ describe('keep logged in UI', () => {
     vi.clearAllMocks()
     sync.signIn.mockResolvedValue({ uid: 'same-user' })
     sync.signUp.mockResolvedValue({ uid: 'same-user' })
+    sync.restartSync.mockResolvedValue(undefined)
+    sync.status = { status: 'signed-out', detail: 'not signed in', pendingCount: 0 }
+    appStore.settings = {
+      baby: { name: '아기', birthdate: '2026-01-01' },
+      profile: { uid: 'same-user', name: '보호자', role: 'mom' },
+      firebase: null,
+      familyId: '',
+      language: 'ko',
+    }
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -161,5 +176,35 @@ describe('keep logged in UI', () => {
 
     expect(container.textContent).toContain('persistence unavailable')
     expect(appStore.saveSettings).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['ko', '가족 연결을 지금 확인할 수 없어요. 연결 정보는 그대로 보관했어요. 잠시 후 다시 시도해 주세요.'],
+    ['ja', '家族の接続を現在確認できません。接続情報はそのまま保持しています。しばらくしてから再試行してください。'],
+  ] as const)('localizes uncertain family access and retries with the preserved identity in %s', async (language, copy) => {
+    const firebase = {
+      apiKey: 'key',
+      authDomain: 'example.test',
+      projectId: 'demo-project',
+      storageBucket: 'bucket',
+      messagingSenderId: 'sender',
+      appId: 'app',
+    }
+    sync.status = { status: 'error', detail: 'FAMILY_ACCESS_UNCERTAIN', pendingCount: 0 }
+    appStore.settings = { ...appStore.settings, firebase, familyId: 'family-A', language }
+    await i18n.changeLanguage(language)
+
+    await act(async () => root.render(<SyncSettingsSlot />))
+
+    expect(container.textContent).toContain(copy)
+    expect(container.textContent).not.toContain('FAMILY_ACCESS_UNCERTAIN')
+    const retry = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes(language === 'ko' ? '재시도' : '再試行'))
+    expect(retry).toBeDefined()
+
+    await act(async () => retry!.click())
+
+    expect(sync.restartSync).toHaveBeenCalledWith(firebase, 'family-A')
+    expect(appStore.settings.familyId).toBe('family-A')
   })
 })

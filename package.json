@@ -1,6 +1,6 @@
 {
   "name": "baby-diary",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "author": {
     "name": "HB-code-glitch"
   },
@@ -10,12 +10,14 @@
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "npm run typecheck && npm test && npm run test:firestore-rules",
+    "check": "npm run typecheck && npm run verify:firestore-rules-source && npm test && npm run test:firestore-rules",
     "build": "npm run typecheck && tsc -p tsconfig.node.json && vite build && node scripts/verify-renderer-evidence-boundary.mjs",
     "build:win": "npm run build && electron-builder --win && powershell -ExecutionPolicy Bypass -File scripts/update-shortcut.ps1",
     "build:mac": "npm run build && electron-builder --mac",
     "test": "vitest run --exclude tests/firestoreRulesEmulator.test.ts",
     "test:firestore-rules": "node scripts/run-firestore-rules.mjs",
+    "verify:firestore-rules-source": "node scripts/verify-production-rules.mjs --local-only",
+    "verify:production-rules": "node scripts/verify-production-rules.mjs",
     "test:e2e": "node scripts/mac-e2e.mjs",
     "test:e2e:sync": "node scripts/sync-e2e.mjs",
     "preview": "vite preview"

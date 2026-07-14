@@ -11,7 +11,7 @@ import {
   type FirebasePersistenceClaim,
 } from '../../shared/firebasePersistence'
 import { DEFAULT_FIREBASE_CONFIG } from '../../shared/defaultFirebaseConfig'
-import { parseAppSettingsWithLegacyDefaults } from '../../shared/babyInfoSettingsCommit'
+import { parseAppSettings, parseStoredAppSettings } from '../../shared/babyInfoSettingsCommit'
 import { writeAllSync } from './durableFs'
 
 export const FIREBASE_PERSISTENCE_REGISTRY_FILE = 'firebase-persistence-registry-v1.json'
@@ -2539,7 +2539,7 @@ export function detectPreexistingFirebaseProfile(
   })
 }
 
-type StrictAppSettings = ReturnType<typeof parseAppSettingsWithLegacyDefaults>
+type StrictAppSettings = ReturnType<typeof parseAppSettings>
 
 function canonicalStrictSettings(settings: StrictAppSettings): string {
   const normalize = (value: unknown): unknown => {
@@ -2559,13 +2559,35 @@ function sameStrictSettings(left: StrictAppSettings, right: StrictAppSettings): 
 }
 
 function strictSettings(value: unknown): StrictAppSettings {
-  let settings: ReturnType<typeof parseAppSettingsWithLegacyDefaults>
+  let stored: ReturnType<typeof parseStoredAppSettings>
   try {
-    settings = parseAppSettingsWithLegacyDefaults(value)
+    stored = parseStoredAppSettings(value)
   } catch {
     throw new Error('Firebase validated settings failed strict application validation')
   }
-  return settings
+  return parseAppSettings({
+    baby: {
+      name: stored.baby.name,
+      birthdate: stored.baby.birthdate,
+      gender: stored.baby.gender,
+    },
+    profile: {
+      uid: stored.profile.uid,
+      name: stored.profile.name,
+      role: stored.profile.role,
+    },
+    familyId: stored.familyId,
+    firebase: stored.firebase ? { ...stored.firebase } : null,
+    ...(stored.language !== undefined ? { language: stored.language } : {}),
+    ...(stored.theme !== undefined ? { theme: stored.theme } : {}),
+    ...(stored.babyInfoSync !== undefined ? { babyInfoSync: stored.babyInfoSync } : {}),
+    ...(stored.babyInfoJournal !== undefined
+      ? { babyInfoJournal: { ...stored.babyInfoJournal } }
+      : {}),
+    ...(stored.babyInfoRevision !== undefined
+      ? { babyInfoRevision: stored.babyInfoRevision }
+      : {}),
+  })
 }
 
 function strictSettingsFirebase(value: StrictAppSettings): FirebaseConfig {

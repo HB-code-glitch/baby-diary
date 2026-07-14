@@ -114,7 +114,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       # Normal branch/PR E2E remains unsigned-capable.
-      - run: npx electron-builder --win --dir --x64 --publish never
+      - run: npx electron-builder --win nsis --x64 --publish never
       - run: npm run test:e2e
         env:
           BABYDIARY_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
@@ -122,6 +122,14 @@ jobs:
         timeout-minutes: 12
         env:
           BABYDIARY_SYNC_E2E_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/Baby Diary.exe
+      - name: Install and verify the unsigned Windows recovery regression package
+        shell: powershell
+        run: >-
+          ./scripts/windows-installed-release-smoke.ps1
+          -SetupPath "release/Baby Diary Setup $((Get-Content -Raw package.json | ConvertFrom-Json).version).exe"
+          -SignaturePolicy AllowUnsigned
+          -EvidenceDirectory ".artifacts/installed-release-smoke"
+        timeout-minutes: 20
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -129,7 +137,9 @@ jobs:
           path: |
             screenshots/
             e2e-result.json
+            .artifacts/installed-release-smoke/**
           if-no-files-found: warn
+          include-hidden-files: true
 
   release-context:
     runs-on: ubuntu-latest
@@ -718,6 +728,7 @@ jobs:
         run: >-
           ./scripts/windows-installed-release-smoke.ps1
           -SetupPath "release/Baby Diary Setup ${{ needs.release-context.outputs.version }}.exe"
+          -SignaturePolicy RequireTrusted
           -ExpectedPublisher "${env:WIN_EXPECTED_PUBLISHER}"
           -ExpectedCertificateSha256 "${env:WIN_EXPECTED_CERT_SHA256}"
         timeout-minutes: 20

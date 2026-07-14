@@ -299,6 +299,20 @@ function forensicFootprint(root: string): { archives: number; bytes: number } {
   return { archives: archiveNames.length, bytes }
 }
 
+function prepareWindowsPrePublicationEvidence(root: string, index: number, prefix: string) {
+  const snapshot = writeSnapshot(root, '2026-07-13_10-20-30', [mutation(index)])
+  writeCorruptLivePair(root)
+  expect(() => recoverSettingsAndJournalPair(root, {
+    platform: 'win32',
+    startupId: `${prefix}-boot-0`,
+  })).toThrow(expect.objectContaining({ restartRequired: true, primaryUntouched: true }))
+  return {
+    snapshot,
+    intentPath: path.join(root, RESTORE_INTENT_FILE),
+    stagingPath: path.join(root, RESTORE_STAGING_DIR),
+  }
+}
+
 function reachPrimaryVerifiedWindowsRestore(
   root: string,
   index: number,
@@ -1520,6 +1534,168 @@ describe('verified settings/journal pair recovery', () => {
       expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(original.journal)
     },
   )
+
+  it.each([
+    'allocated',
+    'awaiting-windows-confirmation',
+    'prepared',
+  ] as const)('retires mutually consistent %s controls when an opaque v0.3.8 live pair is readable', phase => {
+    const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(250)])
+    writeCorruptLivePair(tmpDir)
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: `cancel-${phase}-boot-0`,
+    })).toThrow(expect.objectContaining({ restartRequired: true }))
+
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const stagingPath = path.join(tmpDir, RESTORE_STAGING_DIR)
+    const metadataPath = path.join(stagingPath, 'restore-transaction.json')
+    const transaction = JSON.parse(fs.readFileSync(intentPath, 'utf8'))
+    transaction.phase = phase
+    transaction.windowsVerifiedStartups = phase === 'awaiting-windows-confirmation' ? 1 : 0
+    transaction.lastWindowsStartupId = phase === 'awaiting-windows-confirmation'
+      ? `cancel-${phase}-prior-boot`
+      : ''
+    const transactionBytes = Buffer.from(JSON.stringify(transaction, null, 2), 'utf8')
+    fs.writeFileSync(intentPath, transactionBytes)
+    fs.writeFileSync(metadataPath, transactionBytes)
+
+    const opaque = {
+      ...snapshot.settings,
+      profile: {
+        ...snapshot.settings.profile,
+        legacyContact: { label: 'family-contact', enabled: false },
+      },
+      upgradeOpaque: {
+        deep: { nested: { values: [0, false, null, { marker: 'v0.3.8' }] } },
+      },
+    }
+    const liveSettings = Buffer.from(JSON.stringify(opaque, null, 2), 'utf8')
+    const liveJournal = snapshot.journal
+    const stagedSettings = fs.readFileSync(path.join(stagingPath, 'settings.json'))
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), liveSettings)
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), liveJournal)
+    const forensicBefore = forensicFootprint(tmpDir)
+
+    const opened = new SettingsStore(tmpDir, {
+      platform: 'win32',
+      startupId: `cancel-${phase}-live-boot`,
+    })
+
+    expect(opened.get()).toMatchObject({ baby: snapshot.settings.baby })
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).not.toEqual(stagedSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))).toEqual(liveJournal)
+    expect(fs.existsSync(intentPath)).toBe(false)
+    expect(fs.existsSync(stagingPath)).toBe(false)
+    expect(forensicFootprint(tmpDir)).toEqual(forensicBefore)
+    expect(forensicBefore.archives).toBe(1)
+  })
+
+  it('retires a same-size different-SHA opaque live pair instead of publishing staging', () => {
+    const prepared = prepareWindowsPrePublicationEvidence(tmpDir, 251, 'cancel-same-size')
+    const transaction = JSON.parse(fs.readFileSync(prepared.intentPath, 'utf8'))
+    const opaque = {
+      ...prepared.snapshot.settings,
+      upgradeOpaque: '',
+    }
+    const unpadded = Buffer.from(JSON.stringify(opaque), 'utf8')
+    expect(unpadded.byteLength).toBeLessThan(transaction.settings.size)
+    opaque.upgradeOpaque = 'x'.repeat(transaction.settings.size - unpadded.byteLength)
+    const liveSettings = Buffer.from(JSON.stringify(opaque), 'utf8')
+    expect(liveSettings.byteLength).toBe(transaction.settings.size)
+    expect(digest(liveSettings)).not.toBe(transaction.settings.sha256)
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), liveSettings)
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), prepared.snapshot.journal)
+    const forensicBefore = forensicFootprint(tmpDir)
+
+    expect(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'cancel-same-size-live-boot',
+    })).not.toThrow()
+
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE)))
+      .toEqual(prepared.snapshot.journal)
+    expect(fs.existsSync(prepared.intentPath)).toBe(false)
+    expect(fs.existsSync(prepared.stagingPath)).toBe(false)
+    expect(forensicFootprint(tmpDir)).toEqual(forensicBefore)
+  })
+
+  it('keeps recovery authority when opaque settings diverge from the live journal projection', () => {
+    const prepared = prepareWindowsPrePublicationEvidence(tmpDir, 252, 'cancel-divergent')
+    const divergent = {
+      ...prepared.snapshot.settings,
+      babyInfoJournal: {
+        ...prepared.snapshot.settings.babyInfoJournal,
+        projectedWinnerKey: getBabyInfoMutationKey(mutation(999)),
+      },
+      upgradeOpaque: { marker: 'v0.3.8' },
+    }
+    const liveSettings = Buffer.from(JSON.stringify(divergent, null, 2), 'utf8')
+    fs.writeFileSync(path.join(tmpDir, 'settings.json'), liveSettings)
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), prepared.snapshot.journal)
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'cancel-divergent-live-boot',
+    }))
+
+    expect(error).toMatchObject({ restartRequired: true, primaryUntouched: true })
+    expect(fs.readFileSync(path.join(tmpDir, 'settings.json'))).toEqual(liveSettings)
+    expect(fs.existsSync(prepared.intentPath)).toBe(true)
+    expect(fs.existsSync(prepared.stagingPath)).toBe(true)
+  })
+
+  it('fails closed when the readable opaque live pair is replaced during retirement checks', () => {
+    const prepared = prepareWindowsPrePublicationEvidence(tmpDir, 253, 'cancel-live-swap')
+    const initial = {
+      ...prepared.snapshot.settings,
+      profile: {
+        ...prepared.snapshot.settings.profile,
+        name: 'Parent',
+        legacyContact: { enabled: false },
+      },
+      upgradeOpaque: { marker: 'v0.3.8' },
+    }
+    const replacement = {
+      ...initial,
+      profile: { ...initial.profile, name: 'Swap!!' },
+    }
+    const initialBytes = Buffer.from(JSON.stringify(initial, null, 2), 'utf8')
+    const replacementBytes = Buffer.from(JSON.stringify(replacement, null, 2), 'utf8')
+    expect(replacementBytes.byteLength).toBe(initialBytes.byteLength)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    fs.writeFileSync(settingsPath, initialBytes)
+    fs.writeFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE), prepared.snapshot.journal)
+
+    const realOpen = fs.openSync.bind(fs)
+    let swapped = false
+    const durableFs: DurableFileOps = {
+      ...fs,
+      openSync(target, flags, mode) {
+        if (!swapped
+          && path.basename(String(target)) === 'manifest.json'
+          && String(target).includes('recovery-forensics')) {
+          swapped = true
+          fs.writeFileSync(settingsPath, replacementBytes)
+        }
+        return realOpen(target, flags, mode)
+      },
+    }
+
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'win32',
+      startupId: 'cancel-live-swap-live-boot',
+      durableFs,
+    }))
+
+    expect(swapped).toBe(true)
+    expect(error).toMatchObject({ restartRequired: true, primaryUntouched: true })
+    expect(fs.readFileSync(settingsPath)).toEqual(replacementBytes)
+    expect(fs.existsSync(prepared.intentPath)).toBe(true)
+    expect(fs.existsSync(prepared.stagingPath)).toBe(true)
+  })
 
   it('requires a final independent Windows startup after publishing the restored primaries', () => {
     const snapshot = writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(3)])

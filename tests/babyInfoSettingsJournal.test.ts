@@ -155,6 +155,37 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     expect(fs.readFileSync(path.join(tmpDir, 'baby-info-journal-v1.jsonl'), 'utf8')).toBe(journalBefore)
   })
 
+  it('removes only imported babyInfoSync while retaining adjacent opaque legacy settings', () => {
+    const pending = mutation(31)
+    const legacyContact = { label: 'legacy-contact', enabled: false }
+    const upgradeOpaque = {
+      deep: { nested: { ko: '보존', ja: '保存', values: [0, false, null] } },
+    }
+    writeSettings(tmpDir, {
+      ...baseSettings({
+        babyInfoSync: {
+          version: 1,
+          mutations: [pending],
+          pendingMutationKeys: [getBabyInfoMutationKey(pending)],
+        },
+      }),
+      profile: {
+        ...baseSettings().profile,
+        legacyContact,
+      },
+      upgradeOpaque,
+    } as AppSettings)
+
+    const store = new SettingsStore(tmpDir)
+    const persisted = JSON.parse(fs.readFileSync(path.join(tmpDir, 'settings.json'), 'utf8'))
+
+    expect(store.get().babyInfoSync).toBeUndefined()
+    expect(listPending(store).items).toEqual([pending])
+    expect(persisted.babyInfoSync).toBeUndefined()
+    expect(persisted.profile.legacyContact).toEqual(legacyContact)
+    expect(persisted.upgradeOpaque).toEqual(upgradeOpaque)
+  })
+
   it('keeps the legacy source on disk when the sidecar import cannot become durable', () => {
     const pending = mutation(3)
     const settings = baseSettings({

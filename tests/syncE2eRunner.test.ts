@@ -38,6 +38,7 @@ import {
   finalizeRun,
   installNetworkGuards,
   isAllowedNetworkUrl,
+  launchCdpElectronApplication,
   makeMutationDocId,
   matchesExpectedLocalOperationMutation,
   nextExpectedHybridLogicalClock,
@@ -47,6 +48,7 @@ import {
   parseEmulatorAddress,
   readCloudEventDocuments,
   readJavaMajor,
+  readPackagedArtifactAttestation,
   signInExistingAuthEmulatorAccount,
   resolveCanonicalUpgradeProfile,
   resolvePackagedExecutable,
@@ -58,6 +60,106 @@ import {
 } from '../scripts/sync-e2e.mjs'
 
 describe('packaged cross-platform sync E2E runner contract', () => {
+  it('launches packaged Windows Electron through CDP without the Node inspector injection', async () => {
+    const page = {
+      close: vi.fn(async () => undefined),
+    }
+    const context = Object.assign(new EventEmitter(), {
+      pages: vi.fn(() => [page]),
+      waitForEvent: vi.fn(),
+    })
+    const browser = {
+      contexts: vi.fn(() => [context]),
+    }
+    const child = Object.assign(new EventEmitter(), {
+      pid: 8123,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      stderr: new EventEmitter(),
+    })
+    const spawnImpl = vi.fn(() => child)
+    const connectOverCDP = vi.fn()
+      .mockRejectedValueOnce(new Error('endpoint is not ready'))
+      .mockResolvedValue(browser)
+    const sleep = vi.fn(async () => undefined)
+
+    const app = await launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: {
+        TEST_SENTINEL: 'yes',
+        Node_Options: '--require injected-loader.js',
+        electron_run_as_node: '1',
+      },
+      timeoutMs: 1_000,
+      allocatePort: async () => 49211,
+      spawnImpl,
+      connectOverCDP,
+      sleep,
+    })
+
+    expect(spawnImpl).toHaveBeenCalledOnce()
+    const [command, args, options] = spawnImpl.mock.calls[0]
+    expect(command).toBe('C:\\Baby Diary\\Baby Diary.exe')
+    expect(args).toEqual([
+      '--remote-debugging-address=127.0.0.1',
+      '--remote-debugging-port=49211',
+    ])
+    expect(args.join(' ')).not.toMatch(/--inspect|--require|loader/i)
+    expect(options).toMatchObject({
+      cwd: 'C:\\Baby Diary',
+      windowsHide: true,
+      env: { TEST_SENTINEL: 'yes' },
+    })
+    expect(Object.keys(options.env).map(key => key.toUpperCase())).not.toContain('NODE_OPTIONS')
+    expect(Object.keys(options.env).map(key => key.toUpperCase())).not.toContain('ELECTRON_RUN_AS_NODE')
+    expect(connectOverCDP).toHaveBeenCalledTimes(2)
+    expect(connectOverCDP).toHaveBeenLastCalledWith('http://127.0.0.1:49211')
+    expect(sleep).toHaveBeenCalledOnce()
+    expect(app.process()).toBe(child)
+    expect(app.context()).toBe(context)
+    await expect(app.firstWindow({ timeout: 50 })).resolves.toBe(page)
+
+    const nextPage = { close: vi.fn(async () => undefined) }
+    const windows: unknown[] = []
+    app.on('window', candidate => windows.push(candidate))
+    context.emit('page', nextPage)
+    expect(windows).toEqual([nextPage])
+
+    await app.close()
+    expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
+  })
+
+  it('attests the exact packaged app.asar metadata used by a CDP launch', async () => {
+    const extractFile = vi.fn(() => Buffer.from(JSON.stringify({
+      name: 'baby-diary',
+      version: '0.3.10',
+      main: 'dist-electron/electron/main.js',
+    })))
+    const fileSystem = {
+      existsSync: vi.fn(() => true),
+      lstatSync: vi.fn(() => ({ isFile: () => true, isSymbolicLink: () => false })),
+      realpathSync: vi.fn((candidate: string) => candidate),
+    }
+    await expect(readPackagedArtifactAttestation({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      resourcePath: 'C:\\Baby Diary\\resources\\app.asar',
+      extractFile,
+      platform: 'win32',
+      fileSystem,
+    })).resolves.toEqual({
+      name: 'baby-diary',
+      version: '0.3.10',
+      isPackaged: true,
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      appPath: 'C:\\Baby Diary\\resources\\app.asar',
+    })
+    expect(extractFile).toHaveBeenCalledWith(
+      'C:\\Baby Diary\\resources\\app.asar',
+      'package.json',
+    )
+  })
+
   it('uses a real Auth emulator ID token for Firestore REST reads without exposing secrets in failures', async () => {
     const idToken = 'secret-id-token-that-must-not-be-logged'
     const authFetch = vi.fn(async () => ({
@@ -820,18 +922,122 @@ describe('packaged cross-platform sync E2E runner contract', () => {
 
   it('closes with a timeout, kills only the registered app pid tree, and reports cleanup failure', async () => {
     const killed: number[] = []
+    let snapshotRows = [
+      { pid: 4242, parentPid: 1, startedAt: '100', executablePath: 'C:\\Baby Diary.exe' },
+    ]
+    let queryCount = 0
     const device = {
       name: 'A',
       app: {
         close: () => new Promise(() => undefined),
-        process: () => ({ pid: 4242 }),
+        process: () => ({ pid: 4242, exitCode: null, signalCode: null }),
       },
     }
     await expect(closeDevice(device, {
-      timeoutMs: 10,
-      killTree: async (pid: number) => { killed.push(pid) },
+      timeoutMs: 20,
+      cleanupTimeoutMs: 100,
+      platform: 'win32',
+      queryWindowsProcessTable: () => {
+        queryCount += 1
+        return snapshotRows
+      },
+      processPollSleep: async () => undefined,
+      killTree: async (pid: number) => {
+        killed.push(pid)
+        snapshotRows = []
+      },
     })).rejects.toThrow(/timed out/i)
     expect(killed).toEqual([4242])
+    expect(queryCount).toBeGreaterThanOrEqual(3)
+    expect(device.app).toBeNull()
+  })
+
+  it('does not release a Windows profile while a snapshotted renderer descendant still exists', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4243,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+    })
+    const order: string[] = []
+    let rows = [
+      { pid: 0, parentPid: 0, startedAt: '', executablePath: '' },
+      { pid: 4243, parentPid: 1, startedAt: '200', executablePath: 'C:\\Baby Diary.exe' },
+      { pid: 4244, parentPid: 4243, startedAt: '201', executablePath: 'C:\\Baby Diary.exe' },
+    ]
+    let releasePoll: (() => void) | undefined
+    const poll = new Promise<void>(resolve => { releasePoll = resolve })
+    const device = {
+      name: 'B-relaunch',
+      app: {
+        close: async () => {
+          order.push('app-close-resolved')
+          child.exitCode = 0
+          child.emit('exit', 0, null)
+        },
+        process: () => child,
+      },
+    }
+
+    let closeResolved = false
+    const closing = closeDevice(device, {
+      timeoutMs: 1_000,
+      platform: 'win32',
+      queryWindowsProcessTable: () => rows,
+      processPollSleep: async () => {
+        order.push('descendant-poll-wait')
+        await poll
+      },
+      killTree: async () => undefined,
+      // Makes this test fail against the old time-only gate immediately.
+      waitForRelaunchSettle: async () => undefined,
+    }).then(() => { closeResolved = true })
+
+    await new Promise(resolve => setImmediate(resolve))
+    expect(order).toEqual(['app-close-resolved', 'descendant-poll-wait'])
+    expect(closeResolved).toBe(false)
+
+    // The PID may be reused immediately; a different CreationDate identity is
+    // not the captured renderer and must not block the isolated profile.
+    rows = [
+      { pid: 4244, parentPid: 1, startedAt: '999', executablePath: 'C:\\Baby Diary.exe' },
+    ]
+    releasePoll?.()
+    await closing
+    expect(device.app).toBeNull()
+  })
+
+  it('fails closed when a Windows owned-process snapshot query errors', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4245,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+    })
+    let queryCount = 0
+    const device = {
+      name: 'B-conflict',
+      app: {
+        close: async () => {
+          child.exitCode = 0
+          child.emit('exit', 0, null)
+        },
+        process: () => child,
+      },
+    }
+
+    await expect(closeDevice(device, {
+      timeoutMs: 1_000,
+      platform: 'win32',
+      queryWindowsProcessTable: () => {
+        queryCount += 1
+        if (queryCount === 1) {
+          return [{ pid: 4245, parentPid: 1, startedAt: '300', executablePath: 'C:\\Baby Diary.exe' }]
+        }
+        if (queryCount === 2) throw new Error('injected process snapshot query failure')
+        return []
+      },
+      processPollSleep: async () => undefined,
+      waitForRelaunchSettle: async () => undefined,
+    })).rejects.toThrow(/process snapshot query failure/i)
     expect(device.app).toBeNull()
   })
 

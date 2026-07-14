@@ -361,7 +361,7 @@ describe('packaged in-place upgrade driver', () => {
         }
       },
     })).rejects.toThrow(/auth|signup|restore/i)
-  })
+  }, 30_000)
 
   it('accepts exactly the three planned modes and rejects secret-bearing/unknown CLI input', () => {
     expect(UPGRADE_MODES).toEqual([

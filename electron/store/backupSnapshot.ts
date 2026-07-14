@@ -2,7 +2,10 @@ import { createHash, randomBytes, randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { AppSettings } from '../../shared/types'
-import { parseAppSettingsWithLegacyDefaults } from '../../shared/babyInfoSettingsCommit'
+import {
+  parseAppSettingsWithLegacyDefaults,
+  parseStoredAppSettings,
+} from '../../shared/babyInfoSettingsCommit'
 import { getBabyInfoMutationKey } from '../../shared/babyInfoResolver'
 import {
   BABY_INFO_JOURNAL_FILE,
@@ -246,14 +249,29 @@ function stripBom(value: string): string {
   return value.charCodeAt(0) === 0xFEFF ? value.slice(1) : value
 }
 
-function parseSettingsBytes(bytes: Buffer): AppSettings {
+function parseSettingsJson(bytes: Buffer): unknown {
   let value: unknown
   try {
     value = JSON.parse(stripBom(bytes.toString('utf8')))
   } catch {
     throw new Error('settings JSON is invalid')
   }
-  return parseAppSettingsWithLegacyDefaults(value)
+  return value
+}
+
+function parseSettingsBytes(bytes: Buffer): AppSettings {
+  return parseStoredAppSettings(parseSettingsJson(bytes))
+}
+
+function settingsBytesRequireStoredParser(bytes: Buffer): boolean {
+  const value = parseSettingsJson(bytes)
+  parseStoredAppSettings(value)
+  try {
+    parseAppSettingsWithLegacyDefaults(value)
+    return false
+  } catch {
+    return true
+  }
 }
 
 function isLegacySettings(settings: AppSettings): boolean {
@@ -426,6 +444,13 @@ interface OpenRegularFile {
   relativePath: string
 }
 
+class FileAuthorityChangedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'FileAuthorityChangedError'
+  }
+}
+
 interface HeldEvidence<T> {
   value: T
   assertStable(): void
@@ -476,7 +501,7 @@ function openRegularFileOnce(
   try {
     const opened = ops.fstatSync(fd)
     if (!opened.isFile() || !sameFileIdentity(before, opened)) {
-      throw new Error(`backup path identity changed while opening: ${relativePath}`)
+      throw new FileAuthorityChangedError(`backup path identity changed while opening: ${relativePath}`)
     }
     if (opened.size > maximumFor(normalized)) {
       throw new Error(`backup file exceeds its size bound: ${relativePath}`)
@@ -497,15 +522,15 @@ function assertOpenFileUnchanged(source: OpenRegularFile): void {
     current = fs.lstatSync(source.absolute)
     afterReal = fs.realpathSync.native(source.absolute)
   } catch {
-    throw new Error(`backup file or path changed during read: ${source.relativePath}`)
+    throw new FileAuthorityChangedError(`backup file or path changed during read: ${source.relativePath}`)
   }
   if (!sameFileIdentity(source.opened, after)
     || current.isSymbolicLink()
     || !sameFileIdentity(source.opened, current)) {
-    throw new Error(`backup file changed during read: ${source.relativePath}`)
+    throw new FileAuthorityChangedError(`backup file changed during read: ${source.relativePath}`)
   }
   if (afterReal !== source.beforeReal) {
-    throw new Error(`backup path changed during read: ${source.relativePath}`)
+    throw new FileAuthorityChangedError(`backup path changed during read: ${source.relativePath}`)
   }
 }
 
@@ -527,7 +552,7 @@ function readOpenRegularFile(
     const requested = buffer.byteLength - offset
     const count = readSync(source.fd, buffer, offset, requested, offset)
     if (!Number.isInteger(count) || count <= 0 || count > requested) {
-      throw new Error(`backup file changed during read: ${source.relativePath}`)
+      throw new FileAuthorityChangedError(`backup file changed during read: ${source.relativePath}`)
     }
     offset += count
   }
@@ -546,7 +571,7 @@ function hashOpenRegularFilePass(
     const requested = Math.min(chunk.byteLength, source.opened.size - offset)
     const count = readSync(source.fd, chunk, 0, requested, offset)
     if (!Number.isInteger(count) || count <= 0 || count > requested) {
-      throw new Error(`backup file changed during read: ${source.relativePath}`)
+      throw new FileAuthorityChangedError(`backup file changed during read: ${source.relativePath}`)
     }
     hash.update(chunk.subarray(0, count))
     offset += count
@@ -563,7 +588,7 @@ function stableHashOpenRegularFile(
   const second = hashOpenRegularFilePass(source, options)
   assertOpenFileUnchanged(source)
   if (!sameDescriptor(first, second)) {
-    throw new Error(`backup file changed between descriptor passes: ${source.relativePath}`)
+    throw new FileAuthorityChangedError(`backup file changed between descriptor passes: ${source.relativePath}`)
   }
   return first
 }
@@ -574,7 +599,7 @@ function assertOpenRegularFileContent(
 ): void {
   const actual = hashOpenRegularFilePass(evidence.source, options)
   if (!sameDescriptor(actual, evidence.expected)) {
-    throw new Error(`backup file content changed: ${evidence.source.relativePath}`)
+    throw new FileAuthorityChangedError(`backup file content changed: ${evidence.source.relativePath}`)
   }
 }
 
@@ -660,7 +685,7 @@ function streamOpenJournal(
     const requested = Math.min(chunk.byteLength, source.opened.size - offset)
     const count = readSync(source.fd, chunk, 0, requested, offset)
     if (!Number.isInteger(count) || count <= 0 || count > requested) {
-      throw new Error(`backup file changed during read: ${BABY_INFO_JOURNAL_FILE}`)
+      throw new FileAuthorityChangedError(`backup file changed during read: ${BABY_INFO_JOURNAL_FILE}`)
     }
     const bytes = chunk.subarray(0, count)
     replayOptions.onChunk?.(bytes)
@@ -682,7 +707,7 @@ function streamOpenJournal(
   const second = hashOpenRegularFilePass(source, options)
   assertOpenFileUnchanged(source)
   if (!sameDescriptor(first, second)) {
-    throw new Error(`backup file changed between descriptor passes: ${BABY_INFO_JOURNAL_FILE}`)
+    throw new FileAuthorityChangedError(`backup file changed between descriptor passes: ${BABY_INFO_JOURNAL_FILE}`)
   }
   return { descriptor: first, journal }
 }
@@ -2427,18 +2452,18 @@ function holdTransactionVerifiedBackup(
 
 function holdVerifiedStreamedPair(
   directory: string,
-  transaction: RestoreTransactionFile,
+  transaction: RestoreTransactionFile | undefined,
   options: RecoveryOptions,
   allowTornFinal: boolean,
 ): HeldEvidence<{
   settingsDescriptor: DigestDescriptor
   journalDescriptor: DigestDescriptor
+  settingsRequireStoredParser: boolean
 }> {
   const absolute = path.resolve(directory)
-  const parentReal = fs.realpathSync.native(path.dirname(absolute))
   const directoryIdentity = bindDirectChildDirectory(
     absolute,
-    parentReal,
+    fs.realpathSync.native(path.dirname(absolute)),
     'settings/journal verification directory',
   )
   const settingsSource = openRegularFileOnce(directory, SETTINGS_FILE, options)
@@ -2452,12 +2477,12 @@ function holdVerifiedStreamedPair(
     evidenceSources.push(journalSource)
     const journalResult = streamOpenJournal(journalSource, options, {
       allowTornFinal,
-      requiredPrefix: transaction.journal,
+      requiredPrefix: transaction?.journal,
     })
     const settingsAfterJournal = readOpenRegularFile(settingsSource, options)
     assertOpenFileUnchanged(settingsSource)
     if (!settingsAfterJournal.equals(settingsBytes)) {
-      throw new Error('settings changed while the journal was scanned')
+      throw new FileAuthorityChangedError('settings changed while the journal was scanned')
     }
     assertOpenFileUnchanged(journalSource)
     assertBoundDirectory(directoryIdentity)
@@ -2465,6 +2490,7 @@ function holdVerifiedStreamedPair(
     const value = {
       settingsDescriptor: descriptor(settingsBytes),
       journalDescriptor: journalResult.descriptor,
+      settingsRequireStoredParser: settingsBytesRequireStoredParser(settingsBytes),
     }
     let closed = false
     return {
@@ -2474,11 +2500,11 @@ function holdVerifiedStreamedPair(
         const finalSettings = readOpenRegularFile(settingsSource, options)
         if (!sameDescriptor(descriptor(finalSettings), value.settingsDescriptor)
           || !finalSettings.equals(settingsBytes)) {
-          throw new Error('settings changed before cleanup')
+          throw new FileAuthorityChangedError('settings changed before cleanup')
         }
         const finalJournal = hashOpenRegularFilePass(journalSource!, options)
         if (!sameDescriptor(finalJournal, value.journalDescriptor)) {
-          throw new Error('journal changed before cleanup')
+          throw new FileAuthorityChangedError('journal changed before cleanup')
         }
         assertBoundDirectory(directoryIdentity)
         for (const source of evidenceSources) assertOpenFileUnchanged(source)
@@ -3101,24 +3127,79 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
   }
 }
 
-function livePairIsReadable(userDataPath: string, options: BackupReadOptions): boolean {
+interface ReadableLivePair {
+  settingsDescriptor: DigestDescriptor
+  journalDescriptor?: DigestDescriptor
+  settingsRequireStoredParser: boolean
+}
+
+function holdReadableLivePair(
+  userDataPath: string,
+  options: RecoveryOptions,
+): HeldEvidence<ReadableLivePair> | undefined {
+  const settingsPath = path.join(userDataPath, SETTINGS_FILE)
+  const journalPath = path.join(userDataPath, BABY_INFO_JOURNAL_FILE)
+  const settingsExists = fs.existsSync(settingsPath)
+  const journalExists = fs.existsSync(journalPath)
+  if (!settingsExists && !journalExists) return undefined
+  if (!settingsExists) throw new Error('live journal exists without settings')
+  if (journalExists) {
+    return holdVerifiedStreamedPair(userDataPath, undefined, options, true)
+  }
+
+  const settingsSource = openRegularFileOnce(userDataPath, SETTINGS_FILE, options)
+  try {
+    const settingsBytes = readOpenRegularFile(settingsSource, options)
+    assertOpenFileUnchanged(settingsSource)
+    const settings = parseSettingsBytes(settingsBytes)
+    if (!isLegacySettings(settings)) {
+      throw new Error('journal-aware live settings are missing their journal')
+    }
+    const value: ReadableLivePair = {
+      settingsDescriptor: descriptor(settingsBytes),
+      settingsRequireStoredParser: settingsBytesRequireStoredParser(settingsBytes),
+    }
+    const evidence = [{ source: settingsSource, expected: value.settingsDescriptor }]
+    let closed = false
+    return {
+      value,
+      assertStable() {
+        if (closed) throw new Error('readable live settings evidence is already closed')
+        assertHeldRegularFilesStable(evidence, options)
+      },
+      close() {
+        if (closed) return
+        closed = true
+        settingsSource.ops.closeSync(settingsSource.fd)
+      },
+    }
+  } catch (error) {
+    settingsSource.ops.closeSync(settingsSource.fd)
+    throw error
+  }
+}
+
+function livePairIsReadable(userDataPath: string, options: RecoveryOptions): boolean {
   const settingsPath = path.join(userDataPath, SETTINGS_FILE)
   const journalPath = path.join(userDataPath, BABY_INFO_JOURNAL_FILE)
   if (!fs.existsSync(settingsPath) && !fs.existsSync(journalPath)) return true
   let settings: AppSettings
   try {
     settings = parseSettingsBytes(readRegularFileOnce(userDataPath, SETTINGS_FILE, options))
-  } catch {
+  } catch (error) {
+    if (error instanceof FileAuthorityChangedError) throw error
     return false
   }
   if (!fs.existsSync(journalPath)) return isLegacySettings(settings)
   try {
-    // Live journals retain their established final-torn-record repair behavior.
+    // SettingsStore owns projection reconciliation. This startup gate only
+    // establishes that both live files are structurally readable.
     new BabyInfoJournal('', {
       sourceBuffer: readRegularFileOnce(userDataPath, BABY_INFO_JOURNAL_FILE, options),
     })
     return true
-  } catch {
+  } catch (error) {
+    if (error instanceof FileAuthorityChangedError) throw error
     return false
   }
 }
@@ -3786,6 +3867,121 @@ function verifyForensicEvidence(
   }
 }
 
+function retirePrePublicationRestoreForReadableLivePair(
+  userDataPath: string,
+  options: RecoveryOptions,
+): boolean {
+  const platform = options.platform ?? process.platform
+  const ops = options.durableFs ?? DEFAULT_DURABLE_OPS
+  const readOptions: RecoveryOptions = { ...options, platform, durableFs: ops }
+  const intentPath = path.join(userDataPath, RESTORE_INTENT_FILE)
+  const stagingPath = path.join(userDataPath, RESTORE_STAGING_DIR)
+  const metadataPath = path.join(stagingPath, RESTORE_STAGE_METADATA_FILE)
+  if (!fs.existsSync(intentPath)
+    || !fs.existsSync(stagingPath)
+    || !fs.existsSync(metadataPath)) return false
+
+  let intentSource: OpenRegularFile | undefined
+  let metadataSource: OpenRegularFile | undefined
+  let live: HeldEvidence<ReadableLivePair> | undefined
+  let staged: HeldEvidence<{
+    settingsDescriptor: DigestDescriptor
+    journalDescriptor: DigestDescriptor
+    settingsRequireStoredParser: boolean
+  }> | undefined
+  let forensic: HeldEvidence<ForensicArchiveAuthority> | undefined
+  let expectedIntentBytes: Buffer | undefined
+  let authorized = false
+  try {
+    intentSource = openRegularFileOnce(userDataPath, RESTORE_INTENT_FILE, readOptions)
+    expectedIntentBytes = readOpenRegularFile(intentSource, readOptions)
+    assertOpenFileUnchanged(intentSource)
+    const parsedIntent = parseRestoreIntent(expectedIntentBytes)
+    if (parsedIntent.version !== 3) return false
+    const intent = normalizeTransaction(parsedIntent)
+
+    metadataSource = openRegularFileOnce(stagingPath, RESTORE_STAGE_METADATA_FILE, readOptions)
+    const metadataBytes = readOpenRegularFile(metadataSource, readOptions)
+    assertOpenFileUnchanged(metadataSource)
+    const staging = normalizeTransaction(parseRestoreIntent(metadataBytes))
+    if (intent.phase === 'primary-verified'
+      || staging.phase === 'primary-verified'
+      || !sameTransactionIdentity(intent, staging)) return false
+
+    const transaction = sameTransactionControls(intent, staging)
+      ? intent
+      : stagingIsExactlyOnePublicationAhead(intent, staging, platform)
+        ? staging
+        : undefined
+    if (!transaction || transaction.phase === 'primary-verified') return false
+
+    live = holdReadableLivePair(userDataPath, readOptions)
+    if (!live?.value.settingsRequireStoredParser) return false
+    staged = holdVerifiedStreamedPair(stagingPath, transaction, readOptions, false)
+    if (!sameDescriptor(staged.value.settingsDescriptor, transaction.settings)
+      || !sameDescriptor(staged.value.journalDescriptor, transaction.journal)) {
+      throw new Error('pre-publication staging pair checksum mismatch')
+    }
+    forensic = holdForensicEvidence(userDataPath, transaction, readOptions)
+
+    const controls: ExpectedOpenRegularFile[] = [
+      { source: intentSource, expected: descriptor(expectedIntentBytes) },
+      { source: metadataSource, expected: descriptor(metadataBytes) },
+    ]
+    live.assertStable()
+    staged.assertStable()
+    forensic.assertStable()
+    assertHeldRegularFilesStable(controls, readOptions)
+    // Repeat the live check last so a replacement during staging/forensic
+    // validation is observed before any publication source is removed.
+    live.assertStable()
+    authorized = true
+  } catch {
+    // Malformed or unverifiable evidence retains the existing fail-closed path.
+    return false
+  } finally {
+    if (!authorized) {
+      staged?.close()
+      forensic?.close()
+      live?.close()
+      if (metadataSource) metadataSource.ops.closeSync(metadataSource.fd)
+      if (intentSource) intentSource.ops.closeSync(intentSource.fd)
+    }
+  }
+
+  // Remove the publication source before its intent authority. A crash between
+  // these durable operations can leave controls behind, but cannot reconstruct
+  // staged bytes and publish them over the readable live pair.
+  try {
+    // Windows cannot remove staged files while their handles are open. Their
+    // exact identity was held through the cleanup decision above; the readable
+    // live pair and forensic authority remain held throughout both removals.
+    staged!.close()
+    staged = undefined
+    metadataSource!.ops.closeSync(metadataSource!.fd)
+    metadataSource = undefined
+    removeStagingDurably(userDataPath, platform, ops)
+
+    live!.assertStable()
+    forensic!.assertStable()
+    assertHeldRegularFilesStable([
+      { source: intentSource!, expected: descriptor(expectedIntentBytes!) },
+    ], readOptions)
+    intentSource!.ops.closeSync(intentSource!.fd)
+    intentSource = undefined
+    removeMatchingIntentDurably(userDataPath, expectedIntentBytes!, platform, ops)
+    live!.assertStable()
+    forensic!.assertStable()
+    return true
+  } finally {
+    staged?.close()
+    forensic?.close()
+    live?.close()
+    if (metadataSource) metadataSource.ops.closeSync(metadataSource.fd)
+    if (intentSource) intentSource.ops.closeSync(intentSource.fd)
+  }
+}
+
 interface HeldOriginalSourceLease {
   assertPrecommitStable(): void
   assertDescriptorsStable(): void
@@ -4062,6 +4258,7 @@ export function recoverSettingsAndJournalPair(
       true,
     )
   }
+  if (retirePrePublicationRestoreForReadableLivePair(userDataPath, options)) return
   if (resumeRestoreIntent(userDataPath, options)) return
   if (handleOrphanStaging(userDataPath, options)) return
   if (livePairIsReadable(userDataPath, options)) return

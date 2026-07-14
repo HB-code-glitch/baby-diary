@@ -423,6 +423,8 @@
     "inviteCodeInstruction": "相手のデバイスでこの6桁のコードを「招待コードで参加」画面に入力してください。",
     "syncing": "同期中",
     "syncError": "同期エラー",
+    "syncErrorDesc": "同期を完了できませんでした。しばらくしてから再試行してください。",
+    "familyAccessUncertain": "家族の接続を現在確認できません。接続情報はそのまま保持しています。しばらくしてから再試行してください。",
     "retry": "再試行",
     "signOut": "ログアウト",
     "signingOut": "ログアウト中…",
