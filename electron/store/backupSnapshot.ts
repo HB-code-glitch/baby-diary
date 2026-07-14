@@ -3008,6 +3008,7 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
   }
   let completedRestoreWasPublished = false
   let forensicConfirmed = false
+  let preparedForVerification: RestoreTransactionFile | undefined
   try {
     const parsed = normalizeTransaction(
       readTransactionFile(stagingPath, RESTORE_STAGE_METADATA_FILE, { platform }),
@@ -3053,7 +3054,9 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
           windowsVerifiedStartups: 0,
           lastWindowsStartupId: '',
         }
+    preparedForVerification = prepared
     verifyForensicEvidence(userDataPath, prepared, { platform, now: options.now })
+    forensicConfirmed = true
     writeDurably(metadataPath, transactionBytes(prepared), platform, ops)
     writeDurably(
       path.join(userDataPath, RESTORE_INTENT_FILE),
@@ -3068,10 +3071,21 @@ function handleOrphanStaging(userDataPath: string, options: RecoveryOptions): bo
     if (completedRestoreWasPublished) {
       throw new SettingsRestoreFollowUpError(message, forensicConfirmed)
     }
+    // A failure here (e.g. writing the staging metadata or intent marker)
+    // must not overwrite a forensic confirmation already obtained above:
+    // re-derive the truth at report time instead of assuming failure.
+    if (preparedForVerification) {
+      try {
+        verifyForensicEvidence(userDataPath, preparedForVerification, { platform, now: options.now })
+        forensicConfirmed = true
+      } catch {
+        forensicConfirmed = false
+      }
+    }
     throw new SettingsRecoveryError(
       message,
       [],
-      false,
+      forensicConfirmed,
       platform === 'win32',
       false,
     )

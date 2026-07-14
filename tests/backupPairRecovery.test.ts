@@ -3464,6 +3464,66 @@ describe('verified settings/journal pair recovery', () => {
     )
   })
 
+  it('reports truthful originalsPreserved when orphan staging re-verification succeeds but the intent republish fails', () => {
+    writeSnapshot(tmpDir, '2026-07-13_10-20-30', [mutation(126)])
+    writeCorruptLivePair(tmpDir)
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const intentPath = path.join(tmpDir, RESTORE_INTENT_FILE)
+    const beforeSettings = fs.readFileSync(settingsPath)
+    const beforeJournal = fs.readFileSync(journalPath)
+    const posixOps = simulatedPosixOps()
+
+    // Boot 0: crash the very first POSIX primary publication so the staging
+    // directory survives at phase 'prepared' with a durable forensic archive,
+    // and neither live primary file is ever touched.
+    let blockPrimaryRename = true
+    const bootZeroOps: DurableFileOps = {
+      ...posixOps,
+      renameSync(oldPath, newPath) {
+        if (blockPrimaryRename && path.resolve(String(newPath)) === path.resolve(settingsPath)) {
+          blockPrimaryRename = false
+          throw new Error('simulated crash before the first POSIX primary publication')
+        }
+        posixOps.renameSync(oldPath, newPath)
+      },
+    }
+    expect(() => recoverSettingsAndJournalPair(tmpDir, { platform: 'linux', durableFs: bootZeroOps }))
+      .toThrow(/simulated crash before the first POSIX primary publication/)
+    expect(fs.existsSync(path.join(tmpDir, RESTORE_STAGING_DIR))).toBe(true)
+    expect(fs.readFileSync(settingsPath)).toEqual(beforeSettings)
+    expect(fs.readFileSync(journalPath)).toEqual(beforeJournal)
+
+    // Orphan the staging directory: the intent marker is lost while the
+    // staging directory and its forensic archive remain fully intact.
+    fs.unlinkSync(intentPath)
+
+    // Boot 1: handleOrphanStaging re-verifies the forensic archive (which
+    // succeeds) and then republishes the staging metadata and intent marker.
+    // Crash only the intent-marker republish, after forensic re-verification
+    // already succeeded.
+    const bootOneOps: DurableFileOps = {
+      ...posixOps,
+      renameSync(oldPath, newPath) {
+        if (path.resolve(String(newPath)) === path.resolve(intentPath)) {
+          throw new Error('simulated crash republishing the orphan recovery intent marker')
+        }
+        posixOps.renameSync(oldPath, newPath)
+      },
+    }
+    const error = captureThrown(() => recoverSettingsAndJournalPair(tmpDir, {
+      platform: 'linux',
+      durableFs: bootOneOps,
+    }))
+    expect(error.message).toMatch(/orphan|intent marker/i)
+    // The forensic archive was durably re-verified as intact immediately
+    // before the failed intent-marker republish, so originalsPreserved must
+    // report that truthfully instead of a hardcoded false.
+    expect(error).toMatchObject({ originalsPreserved: true, restartRequired: false })
+    expect(fs.readFileSync(settingsPath)).toEqual(beforeSettings)
+    expect(fs.readFileSync(journalPath)).toEqual(beforeJournal)
+  })
+
   it.each([
     ['same-inode rewrite', false],
     ['atomic path swap', true],
