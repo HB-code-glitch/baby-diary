@@ -11,7 +11,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import {
   closeSync,
@@ -50,6 +50,9 @@ const CDP_CONNECT_ATTEMPT_TIMEOUT_MS = 2_000
 const CLOSE_TIMEOUT_MS = 10_000
 const CLOSE_CLEANUP_TIMEOUT_MS = 5_000
 const WINDOWS_PROCESS_POLL_MS = 75
+const LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS = 30_000
+const LISTEN_SHUTDOWN_ERROR = 'net::ERR_NO_BUFFER_SPACE'
+const LISTEN_SHUTDOWN_TARGET = 'firestore-listen-channel'
 const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
 const DEFAULT_FILE_SYSTEM = { existsSync, lstatSync, realpathSync }
@@ -765,11 +768,9 @@ export function isExpectedFirestoreListenShutdownResourceExhaustion(
   rawUrl,
   errorText,
   method,
-  closing,
 ) {
-  return closing === true
-    && method === 'GET'
-    && errorText === 'net::ERR_NO_BUFFER_SPACE'
+  return (method === 'GET' || method === 'POST')
+    && errorText === LISTEN_SHUTDOWN_ERROR
     && isExactFirestoreWebChannelUrl(rawUrl, 'Listen')
 }
 
@@ -811,6 +812,7 @@ export function attachRendererDiagnostics({
   blockedRequests,
   isClosing,
   resourcePath,
+  listenShutdownCandidates,
 }) {
   const attached = new WeakSet()
   const recordUnexpected = rawUrl => {
@@ -821,15 +823,29 @@ export function attachRendererDiagnostics({
   const attach = page => {
     if (!page || attached.has(page)) return
     attached.add(page)
-    let pendingListenShutdownConsoleErrors = 0
+    const pendingListenRequests = []
+    const pendingListenConsoles = []
     page.on('console', message => {
       if (message.type() !== 'error') return
       const text = message.text()
-      const expectedListenShutdownConsole = isClosing()
-        && pendingListenShutdownConsoleErrors > 0
-        && text === 'Failed to load resource: net::ERR_NO_BUFFER_SPACE'
-      if (expectedListenShutdownConsole) {
-        pendingListenShutdownConsoleErrors -= 1
+      const isListenShutdownConsole = text === `Failed to load resource: ${LISTEN_SHUTDOWN_ERROR}`
+      if (isListenShutdownConsole && Array.isArray(listenShutdownCandidates)) {
+        const observedAtMs = Date.now()
+        const candidate = pendingListenRequests.shift()
+        if (candidate) {
+          candidate.consoleObservedAtMs = observedAtMs
+        } else {
+          const consoleFirstCandidate = {
+            target: LISTEN_SHUTDOWN_TARGET,
+            method: null,
+            error: LISTEN_SHUTDOWN_ERROR,
+            urlSha256: null,
+            requestObservedAtMs: null,
+            consoleObservedAtMs: observedAtMs,
+          }
+          listenShutdownCandidates.push(consoleFirstCandidate)
+          pendingListenConsoles.push(consoleFirstCandidate)
+        }
         return
       }
       rendererErrors.push(`${name}: console ${text}`)
@@ -849,12 +865,30 @@ export function attachRendererDiagnostics({
         url,
         errorText,
         method,
-        isClosing(),
       )
-      if (expectedListenShutdownResourceExhaustion) pendingListenShutdownConsoleErrors += 1
+      if (expectedListenShutdownResourceExhaustion && Array.isArray(listenShutdownCandidates)) {
+        const requestObservedAtMs = Date.now()
+        const candidate = pendingListenConsoles.shift()
+        if (candidate) {
+          candidate.method = method
+          candidate.urlSha256 = createHash('sha256').update(url).digest('hex')
+          candidate.requestObservedAtMs = requestObservedAtMs
+        } else {
+          const requestFirstCandidate = {
+            target: LISTEN_SHUTDOWN_TARGET,
+            method,
+            error: errorText,
+            urlSha256: createHash('sha256').update(url).digest('hex'),
+            requestObservedAtMs,
+            consoleObservedAtMs: null,
+          }
+          listenShutdownCandidates.push(requestFirstCandidate)
+          pendingListenRequests.push(requestFirstCandidate)
+        }
+      }
       if (!expectedCloseAbort
         && !expectedWriteChannelCancellation
-        && !expectedListenShutdownResourceExhaustion) {
+        && !(expectedListenShutdownResourceExhaustion && Array.isArray(listenShutdownCandidates))) {
         rendererErrors.push(`${name}: requestfailed ${url} ${errorText}`)
       }
     })
@@ -909,6 +943,16 @@ export function collectPersistentGuardDiagnostics(
     if (summary.length > 240) summary = `${summary.slice(0, 239).trimEnd()}…`
     return summary || 'unavailable'
   }
+  const parseCanonicalTimestamp = (value, label) => {
+    invariant(typeof value === 'string', `${label}: timestamp is missing`)
+    const timestampMs = Date.parse(value)
+    invariant(
+      Number.isFinite(timestampMs) && new Date(timestampMs).toISOString() === value,
+      `${label}: timestamp is invalid`,
+    )
+    return timestampMs
+  }
+  const listenFingerprint = ({ method, error, urlSha256 }) => `${method}|${error}|${urlSha256}`
   for (const diagnosticFile of diagnosticFiles) {
     invariant(
       diagnosticFile
@@ -928,10 +972,41 @@ export function collectPersistentGuardDiagnostics(
       `${diagnosticFile.name}: persistent guard diagnostic path traversed a symbolic link`,
     )
 
+    const listenShutdownCandidates = diagnosticFile.listenShutdownCandidates ?? []
+    invariant(
+      Array.isArray(listenShutdownCandidates),
+      `${diagnosticFile.name}: pending Listen shutdown candidates are invalid`,
+    )
+    const candidateFingerprints = new Set()
+    const candidates = listenShutdownCandidates.map((candidate, index) => {
+      const label = `${diagnosticFile.name}: pending Listen shutdown candidate ${index + 1}`
+      invariant(candidate && typeof candidate === 'object' && !Array.isArray(candidate), `${label} is invalid`)
+      invariant(candidate.target === LISTEN_SHUTDOWN_TARGET, `${label} target is invalid`)
+      invariant(candidate.method === 'GET' || candidate.method === 'POST', `${label} method is invalid`)
+      invariant(candidate.error === LISTEN_SHUTDOWN_ERROR, `${label} error is invalid`)
+      invariant(/^[0-9a-f]{64}$/.test(candidate.urlSha256), `${label} URL digest is invalid`)
+      invariant(
+        Number.isSafeInteger(candidate.requestObservedAtMs) && candidate.requestObservedAtMs > 0,
+        `${label} request observation is missing`,
+      )
+      invariant(
+        Number.isSafeInteger(candidate.consoleObservedAtMs) && candidate.consoleObservedAtMs > 0,
+        `${label} console observation is missing`,
+      )
+      const fingerprint = listenFingerprint(candidate)
+      invariant(!candidateFingerprints.has(fingerprint), `${label} duplicates another candidate`)
+      candidateFingerprints.add(fingerprint)
+      return { ...candidate, fingerprint, index }
+    })
+
     const lines = readFileSync(diagnosticFile.path, 'utf8')
       .split(/\r?\n/)
       .filter(line => line.length > 0)
     let readyCount = 0
+    let previousTimestampMs = -Infinity
+    const teardownsByWebContents = new Map()
+    const networkErrors = []
+    const closingListenConsoles = []
     for (let index = 0; index < lines.length; index += 1) {
       let record
       try {
@@ -940,8 +1015,37 @@ export function collectPersistentGuardDiagnostics(
         throw new Error(`${diagnosticFile.name}: malformed persistent guard diagnostic at line ${index + 1}`)
       }
       invariant(record && typeof record === 'object' && !Array.isArray(record), `${diagnosticFile.name}: invalid persistent guard diagnostic at line ${index + 1}`)
+      const lineLabel = `${diagnosticFile.name}: persistent guard diagnostic at line ${index + 1}`
+      invariant(record.sequence === index + 1, `${lineLabel} sequence is not canonical`)
+      const timestampMs = parseCanonicalTimestamp(record.timestamp, lineLabel)
+      invariant(timestampMs >= previousTimestampMs, `${lineLabel} timestamp moved backwards`)
+      previousTimestampMs = timestampMs
       if (record.kind === 'guard-ready') {
         readyCount += 1
+        continue
+      }
+      if (record.kind === 'teardown-start' || record.kind === 'network-error') {
+        const label = `${diagnosticFile.name}: ${record.kind} at line ${index + 1}`
+        invariant(
+          Number.isSafeInteger(record.webContentsId) && record.webContentsId > 0,
+          `${label} webContents id is invalid`,
+        )
+        if (record.kind === 'teardown-start') {
+          invariant(record.phase === 'closing', `${label} phase is invalid`)
+          invariant(record.source === 'window-close', `${label} source is invalid`)
+          invariant(!teardownsByWebContents.has(record.webContentsId), `${label} is duplicated`)
+          teardownsByWebContents.set(record.webContentsId, { ...record, timestampMs })
+          continue
+        }
+        invariant(record.phase === 'active' || record.phase === 'closing', `${label} phase is invalid`)
+        invariant(typeof record.method === 'string' && /^[A-Z]{1,16}$/.test(record.method), `${label} method is invalid`)
+        invariant(
+          record.error === 'unknown' || (typeof record.error === 'string' && /^net::ERR_[A-Z0-9_]{1,48}$/.test(record.error)),
+          `${label} error is invalid`,
+        )
+        invariant(record.target === LISTEN_SHUTDOWN_TARGET || record.target === 'other', `${label} target is invalid`)
+        invariant(/^[0-9a-f]{64}$/.test(record.urlSha256), `${label} URL digest is invalid`)
+        networkErrors.push({ ...record, timestampMs, line: index + 1 })
         continue
       }
       if (record.kind === 'network-blocked' || record.kind === 'navigation-blocked') {
@@ -957,12 +1061,23 @@ export function collectPersistentGuardDiagnostics(
         continue
       }
       if (record.kind === 'console-error') {
-        if (record.phase === 'closing') continue
         const protocol = typeof record.protocol === 'string' ? record.protocol : 'unknown'
         const destination = typeof record.destination === 'string' ? record.destination : 'unknown'
         const port = typeof record.port === 'number' ? ` port=${record.port}` : ''
         const line = typeof record.line === 'number' ? ` line=${record.line}` : ''
         const summary = safeConsoleSummary(record.summary)
+        if (record.phase === 'closing' && summary === `Failed to load resource: ${LISTEN_SHUTDOWN_ERROR}`) {
+          invariant(
+            Number.isSafeInteger(record.webContentsId) && record.webContentsId > 0,
+            `${diagnosticFile.name}: closing Listen console at line ${index + 1} has invalid webContents id`,
+          )
+          closingListenConsoles.push({
+            ...record,
+            timestampMs,
+            diagnosticLine: index + 1,
+          })
+          continue
+        }
         rendererErrors.push(`${diagnosticFile.name}: early console-error ${protocol} ${destination}${port}${line} summary=${summary}`)
         continue
       }
@@ -973,6 +1088,54 @@ export function collectPersistentGuardDiagnostics(
       throw new Error(`${diagnosticFile.name}: unknown persistent guard diagnostic kind at line ${index + 1}`)
     }
     invariant(readyCount === 1, `${diagnosticFile.name}: expected exactly one guard-ready diagnostic, got ${readyCount}`)
+
+    const matchedCandidates = new Set()
+    const matchedClosingConsoles = new Set()
+    const durableFingerprints = new Set()
+    for (const networkError of networkErrors) {
+      const label = `${diagnosticFile.name}: network-error at line ${networkError.line}`
+      invariant(networkError.phase === 'closing', `${label} was observed before teardown`)
+      invariant(networkError.target === LISTEN_SHUTDOWN_TARGET, `${label} target was not an exact Listen channel`)
+      invariant(networkError.method === 'GET' || networkError.method === 'POST', `${label} method is not eligible`)
+      invariant(networkError.error === LISTEN_SHUTDOWN_ERROR, `${label} error is not eligible`)
+      const teardown = teardownsByWebContents.get(networkError.webContentsId)
+      invariant(teardown, `${label} has no same-window teardown evidence`)
+      invariant(teardown.sequence < networkError.sequence, `${label} did not follow teardown sequence`)
+      invariant(teardown.timestampMs <= networkError.timestampMs, `${label} predates teardown timestamp`)
+
+      const fingerprint = listenFingerprint(networkError)
+      invariant(!durableFingerprints.has(fingerprint), `${label} duplicates durable Listen evidence`)
+      durableFingerprints.add(fingerprint)
+      const candidate = candidates.find(item => item.fingerprint === fingerprint)
+      invariant(candidate, `${label} has no matching runner candidate`)
+      invariant(!matchedCandidates.has(candidate.index), `${label} reuses a runner candidate`)
+      const earliestObservation = Math.min(candidate.requestObservedAtMs, candidate.consoleObservedAtMs)
+      const latestObservation = Math.max(candidate.requestObservedAtMs, candidate.consoleObservedAtMs)
+      invariant(
+        networkError.timestampMs >= earliestObservation - LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS
+          && networkError.timestampMs <= latestObservation + LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS,
+        `${label} is outside the runner correlation window`,
+      )
+      const closingConsoleIndex = closingListenConsoles.findIndex((consoleRecord, index) => (
+        !matchedClosingConsoles.has(index)
+        && consoleRecord.webContentsId === networkError.webContentsId
+        && teardown.sequence < consoleRecord.sequence
+        && teardown.timestampMs <= consoleRecord.timestampMs
+        && Math.abs(consoleRecord.timestampMs - candidate.consoleObservedAtMs)
+          <= LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS
+      ))
+      invariant(closingConsoleIndex >= 0, `${label} has no matching durable closing console`)
+      matchedClosingConsoles.add(closingConsoleIndex)
+      matchedCandidates.add(candidate.index)
+    }
+    invariant(
+      matchedCandidates.size === candidates.length,
+      `${diagnosticFile.name}: pending Listen shutdown evidence was not settled one-to-one`,
+    )
+    invariant(
+      matchedClosingConsoles.size === closingListenConsoles.length,
+      `${diagnosticFile.name}: durable closing Listen consoles were not settled one-to-one`,
+    )
   }
 }
 
@@ -1120,18 +1283,24 @@ export async function launchCdpElectronApplication({
         const pages = context.pages()
         invariant(pages.length > 0 || childProcessExited(child),
           'Packaged Electron CDP context had no window to close gracefully')
+        // On macOS the validated E2E signal maps to app.quit(). Electron emits
+        // before-quit before it starts closing windows, so the guard can mark
+        // teardown and the app can finish its durable backup before renderer
+        // destruction. Closing CDP pages first bypasses that ordering and can
+        // race Electron's sandboxed preload teardown.
+        if (platform === 'darwin') {
+          if (!childProcessExited(child)) {
+            invariant(typeof child.kill === 'function', 'Packaged macOS Electron process cannot be signaled')
+            const signaled = child.kill('SIGTERM')
+            invariant(signaled || childProcessExited(child), 'Packaged macOS Electron process rejected graceful quit')
+          }
+          context.off?.('page', forwardWindow)
+          return
+        }
         // Close auxiliary windows first and the main window last. On Windows,
         // window-all-closed triggers the app's durable backup + quit path.
         for (const page of [...pages].reverse()) {
           await page.close({ runBeforeUnload: true })
-        }
-        // Closing the last window exits the Windows app. macOS intentionally
-        // keeps an app alive with no windows, so the validated isolated E2E
-        // guard converts SIGTERM into app.quit() and the durable backup hook.
-        if (platform === 'darwin' && !childProcessExited(child)) {
-          invariant(typeof child.kill === 'function', 'Packaged macOS Electron process cannot be signaled')
-          const signaled = child.kill('SIGTERM')
-          invariant(signaled || childProcessExited(child), 'Packaged macOS Electron process rejected graceful quit')
         }
         context.off?.('page', forwardWindow)
       })()
@@ -1556,7 +1725,8 @@ async function launchDevice({
     )
   }
   const diagnosticPath = path.join(selectedUserData, `sync-e2e-diagnostics-${guardToken}.jsonl`)
-  diagnosticFiles.push({ name, path: diagnosticPath })
+  const diagnosticFile = { name, path: diagnosticPath, listenShutdownCandidates: [] }
+  diagnosticFiles.push(diagnosticFile)
   const device = { app: null, page: null, userData: selectedUserData, name, closing: false }
   try {
     const launchEnvironment = {
@@ -1598,6 +1768,7 @@ async function launchDevice({
       blockedRequests,
       isClosing: () => device.closing,
       resourcePath,
+      listenShutdownCandidates: diagnosticFile.listenShutdownCandidates,
     })
     const page = await app.firstWindow({ timeout: E2E_TIMEOUT_MS })
     device.page = page

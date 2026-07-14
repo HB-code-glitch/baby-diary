@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppSettings, DiaryEvent } from '../shared/types'
 
 type Scenario = 'healthy' | 'permission-denied' | 'unavailable' | 'unauthenticated' | 'missing' | 'no-member'
+type SyncEngineModule = typeof import('../src/sync/syncEngine')
+
+const connectedEngines = new Set<SyncEngineModule>()
 
 const harness = vi.hoisted(() => ({
   scenario: 'healthy' as Scenario,
@@ -180,6 +183,7 @@ function familyData(scenario = harness.scenario) {
 
 async function connect() {
   const engine = await import('../src/sync/syncEngine')
+  connectedEngines.add(engine)
   await engine.configure(config, harness.settings.familyId)
   await engine.start()
   await vi.waitFor(() => expect(harness.authCallbacks).toHaveLength(1))
@@ -245,8 +249,15 @@ describe('non-destructive family identity reconciliation', () => {
     })
   })
 
-  afterEach(() => {
-    vi.useRealTimers()
+  afterEach(async () => {
+    const engines = Array.from(connectedEngines)
+    connectedEngines.clear()
+    try {
+      await Promise.all(engines.map(engine => engine.stop()))
+    } finally {
+      if (vi.isFakeTimers()) vi.clearAllTimers()
+      vi.useRealTimers()
+    }
   })
 
   it.each(['permission-denied', 'unavailable', 'unauthenticated'] as const)(

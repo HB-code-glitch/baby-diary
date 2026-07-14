@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
   mkdirSync,
@@ -165,8 +166,13 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(spawnImpl).not.toHaveBeenCalled()
   })
 
-  it('requests a guarded graceful packaged macOS quit after closing its windows', async () => {
-    const page = { close: vi.fn(async () => undefined) }
+  it('requests a guarded graceful packaged macOS quit before renderer teardown and waits for exit', async () => {
+    const closeOrder: string[] = []
+    const page = {
+      close: vi.fn(async () => {
+        closeOrder.push('page-close')
+      }),
+    }
     const context = Object.assign(new EventEmitter(), {
       pages: vi.fn(() => [page]),
       waitForEvent: vi.fn(),
@@ -180,7 +186,10 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       exitCode: null as number | null,
       signalCode: null as NodeJS.Signals | null,
       stderr: new EventEmitter(),
-      kill: vi.fn(() => true),
+      kill: vi.fn(() => {
+        closeOrder.push('guarded-sigterm')
+        return true
+      }),
     })
 
     const app = await launchCdpElectronApplication({
@@ -194,9 +203,25 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       connectOverCDP: vi.fn(async () => browser),
     })
 
-    await app.close()
-    expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
+    const device = { name: 'mac-device', app, closing: false }
+    let closeResolved = false
+    const closing = closeDevice(device, {
+      platform: 'darwin',
+      timeoutMs: 1_000,
+      killTree: vi.fn(async () => undefined),
+    }).then(() => { closeResolved = true })
+
+    await new Promise(resolve => setImmediate(resolve))
     expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(page.close).not.toHaveBeenCalled()
+    expect(closeOrder).toEqual(['guarded-sigterm'])
+    expect(closeResolved).toBe(false)
+
+    child.signalCode = 'SIGTERM'
+    child.emit('exit', null, 'SIGTERM')
+    await closing
+    expect(closeResolved).toBe(true)
+    expect(device.app).toBeNull()
     expect(browser.close).not.toHaveBeenCalled()
   })
 
@@ -571,17 +596,19 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     ])
   })
 
-  it('ignores only a correlated closing Firestore Listen buffer exhaustion', () => {
+  it('holds exact Firestore Listen buffer exhaustion candidates across both event orders', () => {
     const page = new EventEmitter() as EventEmitter & { url(): string }
     page.url = () => 'file:///packaged/index.html'
     const rendererErrors: string[] = []
-    let closing = true
+    const listenShutdownCandidates: Array<Record<string, unknown>> = []
+    let closing = false
     attachRendererDiagnostics({
       app: new EventEmitter(),
       context: { pages: () => [page] },
       name: 'B-conflict',
       rendererErrors,
       isClosing: () => closing,
+      listenShutdownCandidates,
     })
     const params = new URLSearchParams({
       VER: '8',
@@ -609,18 +636,35 @@ describe('packaged cross-platform sync E2E runner contract', () => {
 
     emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE')
     emitBufferConsoleError()
-    expect(rendererErrors).toEqual([])
-
-    emitBufferConsoleError()
-    closing = false
-    emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE')
-    emitBufferConsoleError()
     closing = true
+    emitBufferConsoleError()
+    emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE', 'POST')
+    expect(rendererErrors).toEqual([])
+    expect(listenShutdownCandidates).toEqual([
+      expect.objectContaining({
+        target: 'firestore-listen-channel',
+        method: 'GET',
+        error: 'net::ERR_NO_BUFFER_SPACE',
+        urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        requestObservedAtMs: expect.any(Number),
+        consoleObservedAtMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        target: 'firestore-listen-channel',
+        method: 'POST',
+        error: 'net::ERR_NO_BUFFER_SPACE',
+        urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        requestObservedAtMs: expect.any(Number),
+        consoleObservedAtMs: expect.any(Number),
+      }),
+    ])
+    expect(JSON.stringify(listenShutdownCandidates)).not.toContain(listenUrl)
+    expect(JSON.stringify(listenShutdownCandidates)).not.toContain('UFXnPhvNwaSuYxv6trvQ3w')
 
     const extraParam = new URL(listenUrl)
     extraParam.searchParams.set('unexpected', '1')
     const rejected: Array<[string, string, string]> = [
-      [listenUrl, 'net::ERR_NO_BUFFER_SPACE', 'POST'],
+      [listenUrl, 'net::ERR_NO_BUFFER_SPACE', 'PUT'],
       [listenUrl, 'ERR_NO_BUFFER_SPACE', 'GET'],
       [listenUrl.replace('/Listen/channel', '/Write/channel'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
       [listenUrl.replace('127.0.0.1', 'localhost'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
@@ -630,9 +674,6 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     for (const [url, errorText, method] of rejected) emitRequestFailed(url, errorText, method)
 
     expect(rendererErrors).toEqual([
-      'B-conflict: console Failed to load resource: net::ERR_NO_BUFFER_SPACE',
-      `B-conflict: requestfailed ${listenUrl} net::ERR_NO_BUFFER_SPACE`,
-      'B-conflict: console Failed to load resource: net::ERR_NO_BUFFER_SPACE',
       ...rejected.map(([url, errorText]) => `B-conflict: requestfailed ${url} ${errorText}`),
     ])
   })
@@ -1333,9 +1374,9 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     try {
       const diagnosticPath = path.join(root, 'guard.jsonl')
       writeFileSync(diagnosticPath, [
-        JSON.stringify({ kind: 'guard-ready', timestamp: '2026-07-13T08:00:00.000Z' }),
-        JSON.stringify({ kind: 'network-blocked', protocol: 'https:', destination: 'external' }),
-        JSON.stringify({ kind: 'renderer-gone', reason: 'crashed', exitCode: 9 }),
+        JSON.stringify({ kind: 'guard-ready', sequence: 1, timestamp: '2026-07-13T08:00:00.000Z' }),
+        JSON.stringify({ kind: 'network-blocked', sequence: 2, timestamp: '2026-07-13T08:00:01.000Z', protocol: 'https:', destination: 'external' }),
+        JSON.stringify({ kind: 'renderer-gone', sequence: 3, timestamp: '2026-07-13T08:00:02.000Z', reason: 'crashed', exitCode: 9 }),
       ].join('\n') + '\n')
       const blockedRequests: string[] = []
       const rendererErrors: string[] = []
@@ -1347,7 +1388,11 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       expect(blockedRequests).toEqual(['A: early network-blocked https: external'])
       expect(rendererErrors).toEqual(['A: early renderer-gone crashed (9)'])
 
-      writeFileSync(diagnosticPath, `${JSON.stringify({ kind: 'network-blocked' })}\n`)
+      writeFileSync(diagnosticPath, `${JSON.stringify({
+        kind: 'network-blocked',
+        sequence: 1,
+        timestamp: '2026-07-13T08:00:00.000Z',
+      })}\n`)
       expect(() => collectPersistentGuardDiagnostics(
         [{ name: 'A', path: diagnosticPath }],
         [],
@@ -1358,14 +1403,84 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     }
   })
 
-  it('fails active and legacy console diagnostics with safe locations but ignores closing noise', () => {
+  it('settles one pending Listen shutdown only with one later durable closing record', () => {
+    const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-persistent-guard-')))
+    try {
+      const diagnosticPath = path.join(root, 'guard.jsonl')
+      const listenUrl = `http://127.0.0.1:${FIRESTORE_PORT}/google.firestore.v1.Firestore/Listen/channel?private-token-must-not-leak`
+      const urlSha256 = createHash('sha256').update(listenUrl).digest('hex')
+      const observedAtMs = Date.parse('2026-07-13T08:00:05.000Z')
+      writeFileSync(diagnosticPath, [
+        { kind: 'guard-ready', sequence: 1, timestamp: '2026-07-13T08:00:00.000Z' },
+        {
+          kind: 'teardown-start',
+          sequence: 2,
+          timestamp: '2026-07-13T08:00:04.000Z',
+          phase: 'closing',
+          source: 'window-close',
+          webContentsId: 101,
+        },
+        {
+          kind: 'network-error',
+          sequence: 3,
+          timestamp: '2026-07-13T08:00:05.000Z',
+          phase: 'closing',
+          webContentsId: 101,
+          method: 'GET',
+          error: 'net::ERR_NO_BUFFER_SPACE',
+          target: 'firestore-listen-channel',
+          urlSha256,
+        },
+        {
+          kind: 'console-error',
+          sequence: 4,
+          timestamp: '2026-07-13T08:00:05.001Z',
+          phase: 'closing',
+          webContentsId: 101,
+          protocol: 'http:',
+          destination: 'loopback',
+          port: FIRESTORE_PORT,
+          summary: 'Failed to load resource: net::ERR_NO_BUFFER_SPACE',
+        },
+      ].map(record => JSON.stringify(record)).join('\n') + '\n')
+      const blockedRequests: string[] = []
+      const rendererErrors: string[] = []
+
+      expect(() => collectPersistentGuardDiagnostics(
+        [{
+          name: 'B',
+          path: diagnosticPath,
+          listenShutdownCandidates: [{
+            target: 'firestore-listen-channel',
+            method: 'GET',
+            error: 'net::ERR_NO_BUFFER_SPACE',
+            urlSha256,
+            requestObservedAtMs: observedAtMs,
+            consoleObservedAtMs: observedAtMs,
+          }],
+        }],
+        blockedRequests,
+        rendererErrors,
+      )).not.toThrow()
+      expect(blockedRequests).toEqual([])
+      expect(rendererErrors).toEqual([])
+      expect(readFileSync(diagnosticPath, 'utf8')).not.toContain(listenUrl)
+      expect(readFileSync(diagnosticPath, 'utf8')).not.toContain('private-token-must-not-leak')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails active, legacy, and unrelated closing console diagnostics with safe locations', () => {
     const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-persistent-guard-')))
     try {
       const diagnosticPath = path.join(root, 'guard.jsonl')
       writeFileSync(diagnosticPath, [
-        JSON.stringify({ kind: 'guard-ready', timestamp: '2026-07-13T08:00:00.000Z' }),
+        JSON.stringify({ kind: 'guard-ready', sequence: 1, timestamp: '2026-07-13T08:00:00.000Z' }),
         JSON.stringify({
           kind: 'console-error',
+          sequence: 2,
+          timestamp: '2026-07-13T08:00:01.000Z',
           phase: 'active',
           protocol: 'file:',
           destination: 'packaged',
@@ -1374,6 +1489,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         }),
         JSON.stringify({
           kind: 'console-error',
+          sequence: 3,
+          timestamp: '2026-07-13T08:00:02.000Z',
           protocol: 'http:',
           destination: 'loopback',
           port: 8080,
@@ -1382,6 +1499,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         }),
         JSON.stringify({
           kind: 'console-error',
+          sequence: 4,
+          timestamp: '2026-07-13T08:00:03.000Z',
           phase: 'closing',
           protocol: 'file:',
           destination: 'packaged',
@@ -1400,6 +1519,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       expect(rendererErrors).toEqual([
         'B-relaunch: early console-error file: packaged line=17 summary=Auth restore failed for [email] password=[redacted] [path] [uuid]',
         'B-relaunch: early console-error http: loopback port=8080 line=23 summary=Firestore write rejected token=[redacted]',
+        'B-relaunch: early console-error file: packaged line=99 summary=Teardown [email] password=[redacted]',
       ])
       expect(rendererErrors.join(' ')).not.toContain('private-account')
       expect(rendererErrors.join(' ')).not.toContain('wife-private-password')
