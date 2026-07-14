@@ -19,7 +19,10 @@ function Get-BabyDiaryInstall {
   )
   $entries = foreach ($root in $registryRoots) {
     Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-      Where-Object { $_.DisplayName -eq 'Baby Diary' }
+      Where-Object {
+        $displayName = $_.PSObject.Properties['DisplayName']
+        $null -ne $displayName -and $displayName.Value -eq 'Baby Diary'
+      }
   }
   return @($entries)
 }

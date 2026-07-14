@@ -275,7 +275,9 @@ describe('installed Windows release smoke script', () => {
   })
 
   it('fails on a pre-existing install and performs a silent install with deterministic registry discovery', () => {
-    expect(script).toContain("DisplayName -eq 'Baby Diary'")
+    expect(script).toContain("PSObject.Properties['DisplayName']")
+    expect(script).toContain("$displayName.Value -eq 'Baby Diary'")
+    expect(script).not.toContain("$_.DisplayName -eq 'Baby Diary'")
     expect(script).toMatch(/pre-existing Baby Diary installation/i)
     expect(script).toMatch(/Start-Process[^\n]*SetupPath/)
     expect(script).toContain("'/S'")
