@@ -571,6 +571,72 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     ])
   })
 
+  it('ignores only a correlated closing Firestore Listen buffer exhaustion', () => {
+    const page = new EventEmitter() as EventEmitter & { url(): string }
+    page.url = () => 'file:///packaged/index.html'
+    const rendererErrors: string[] = []
+    let closing = true
+    attachRendererDiagnostics({
+      app: new EventEmitter(),
+      context: { pages: () => [page] },
+      name: 'B-conflict',
+      rendererErrors,
+      isClosing: () => closing,
+    })
+    const params = new URLSearchParams({
+      VER: '8',
+      database: 'projects/demo-baby-diary/databases/(default)',
+      RID: 'rpc',
+      SID: 'UFXnPhvNwaSuYxv6trvQ3w==',
+      AID: '66',
+      CI: '1',
+      TYPE: 'xmlhttp',
+      zx: '8vuv3kzhejg9',
+      t: '1',
+    })
+    const listenUrl = `http://127.0.0.1:${FIRESTORE_PORT}/google.firestore.v1.Firestore/Listen/channel?${params}`
+    const emitRequestFailed = (url: string, errorText: string, method = 'GET') => {
+      page.emit('requestfailed', {
+        url: () => url,
+        method: () => method,
+        failure: () => ({ errorText }),
+      })
+    }
+    const emitBufferConsoleError = () => page.emit('console', {
+      type: () => 'error',
+      text: () => 'Failed to load resource: net::ERR_NO_BUFFER_SPACE',
+    })
+
+    emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE')
+    emitBufferConsoleError()
+    expect(rendererErrors).toEqual([])
+
+    emitBufferConsoleError()
+    closing = false
+    emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE')
+    emitBufferConsoleError()
+    closing = true
+
+    const extraParam = new URL(listenUrl)
+    extraParam.searchParams.set('unexpected', '1')
+    const rejected: Array<[string, string, string]> = [
+      [listenUrl, 'net::ERR_NO_BUFFER_SPACE', 'POST'],
+      [listenUrl, 'ERR_NO_BUFFER_SPACE', 'GET'],
+      [listenUrl.replace('/Listen/channel', '/Write/channel'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+      [listenUrl.replace('127.0.0.1', 'localhost'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+      [listenUrl.replace('demo-baby-diary', 'other-project'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+      [extraParam.href, 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+    ]
+    for (const [url, errorText, method] of rejected) emitRequestFailed(url, errorText, method)
+
+    expect(rendererErrors).toEqual([
+      'B-conflict: console Failed to load resource: net::ERR_NO_BUFFER_SPACE',
+      `B-conflict: requestfailed ${listenUrl} net::ERR_NO_BUFFER_SPACE`,
+      'B-conflict: console Failed to load resource: net::ERR_NO_BUFFER_SPACE',
+      ...rejected.map(([url, errorText]) => `B-conflict: requestfailed ${url} ${errorText}`),
+    ])
+  })
+
   it('ignores only the exact Firestore write backchannel supersede cancellation', () => {
     const page = new EventEmitter() as EventEmitter & { url(): string }
     page.url = () => 'file:///packaged/index.html'

@@ -1,8 +1,31 @@
 import * as path from 'path'
 import { lstatSync, realpathSync } from 'fs'
 
+type TestUserDataFileSystem = {
+  lstatSync(candidate: string): {
+    isDirectory(): boolean
+    isSymbolicLink(): boolean
+  }
+  realpathSync(candidate: string): string
+}
+
+const DEFAULT_FILE_SYSTEM: TestUserDataFileSystem = { lstatSync, realpathSync }
+
+function pathFor(platform: NodeJS.Platform) {
+  if (platform === 'win32') return path.win32
+  if (platform === 'darwin') return path.posix
+  return path
+}
+
 function comparable(value: string, platform: NodeJS.Platform): string {
-  const resolved = path.resolve(value)
+  let resolved = pathFor(platform).resolve(value)
+  if (platform === 'darwin') {
+    if (resolved === '/var' || resolved.startsWith('/var/')) {
+      resolved = `/private${resolved}`
+    } else if (resolved === '/tmp' || resolved.startsWith('/tmp/')) {
+      resolved = `/private${resolved}`
+    }
+  }
   return platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
@@ -10,7 +33,7 @@ function isEqualOrDescendant(parent: string, child: string, platform: NodeJS.Pla
   const normalizedParent = comparable(parent, platform)
   const normalizedChild = comparable(child, platform)
   return normalizedChild === normalizedParent
-    || normalizedChild.startsWith(`${normalizedParent}${path.sep}`)
+    || normalizedChild.startsWith(`${normalizedParent}${pathFor(platform).sep}`)
 }
 
 export function resolveIsolatedTestUserData(
@@ -19,18 +42,22 @@ export function resolveIsolatedTestUserData(
     interactiveProfileRoot,
     tempRoot,
     platform = process.platform,
+    fileSystem = DEFAULT_FILE_SYSTEM,
   }: {
     interactiveProfileRoot: string
     tempRoot: string
     platform?: NodeJS.Platform
+    fileSystem?: TestUserDataFileSystem
   },
 ): string | undefined {
   if (!requestedPath) return undefined
 
-  const isolated = path.resolve(requestedPath)
-  const temporary = path.resolve(tempRoot)
-  const interactive = path.resolve(interactiveProfileRoot)
-  const insideTemp = isolated !== temporary && isEqualOrDescendant(temporary, isolated, platform)
+  const platformPath = pathFor(platform)
+  const isolated = platformPath.resolve(requestedPath)
+  const temporary = platformPath.resolve(tempRoot)
+  const interactive = platformPath.resolve(interactiveProfileRoot)
+  const insideTemp = comparable(isolated, platform) !== comparable(temporary, platform)
+    && isEqualOrDescendant(temporary, isolated, platform)
   const overlapsInteractive = isEqualOrDescendant(interactive, isolated, platform)
     || isEqualOrDescendant(isolated, interactive, platform)
 
@@ -42,16 +69,16 @@ export function resolveIsolatedTestUserData(
   let realTemporary
   let realIsolated
   try {
-    isolatedEntry = lstatSync(isolated)
-    realTemporary = realpathSync(temporary)
-    realIsolated = realpathSync(isolated)
+    isolatedEntry = fileSystem.lstatSync(isolated)
+    realTemporary = fileSystem.realpathSync(temporary)
+    realIsolated = fileSystem.realpathSync(isolated)
   } catch {
     throw new Error('Isolated test userData must be an existing real directory')
   }
   if (!isolatedEntry.isDirectory() || isolatedEntry.isSymbolicLink()) {
     throw new Error('Isolated test userData must be an existing real directory without links')
   }
-  const realTemporaryEntry = lstatSync(realTemporary)
+  const realTemporaryEntry = fileSystem.lstatSync(realTemporary)
   if (!realTemporaryEntry.isDirectory()
     || comparable(realTemporary, platform) === comparable(realIsolated, platform)
     || !isEqualOrDescendant(realTemporary, realIsolated, platform)) {

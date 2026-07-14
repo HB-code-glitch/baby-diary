@@ -711,8 +711,7 @@ export function isAllowedNetworkUrl(rawUrl, { resourcePath } = {}) {
   return false
 }
 
-export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, method) {
-  if (method !== 'GET' || errorText !== 'net::ERR_ABORTED') return false
+function isExactFirestoreWebChannelUrl(rawUrl, channel) {
   let url
   try {
     url = new URL(rawUrl)
@@ -726,7 +725,7 @@ export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, m
     || url.protocol !== 'http:'
     || url.hostname !== '127.0.0.1'
     || url.port !== String(FIRESTORE_PORT)
-    || url.pathname !== '/google.firestore.v1.Firestore/Write/channel'
+    || url.pathname !== `/google.firestore.v1.Firestore/${channel}/channel`
   ) return false
 
   const expectedKeys = ['VER', 'database', 'RID', 'SID', 'AID', 'CI', 'TYPE', 'zx', 't']
@@ -754,6 +753,24 @@ export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, m
     && url.searchParams.get('TYPE') === 'xmlhttp'
     && /^[a-z0-9]{1,64}$/.test(zx)
     && canonicalPositiveInteger(attempt)
+}
+
+export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, method) {
+  return method === 'GET'
+    && errorText === 'net::ERR_ABORTED'
+    && isExactFirestoreWebChannelUrl(rawUrl, 'Write')
+}
+
+export function isExpectedFirestoreListenShutdownResourceExhaustion(
+  rawUrl,
+  errorText,
+  method,
+  closing,
+) {
+  return closing === true
+    && method === 'GET'
+    && errorText === 'net::ERR_NO_BUFFER_SPACE'
+    && isExactFirestoreWebChannelUrl(rawUrl, 'Listen')
 }
 
 export async function installNetworkGuards(context, {
@@ -804,9 +821,18 @@ export function attachRendererDiagnostics({
   const attach = page => {
     if (!page || attached.has(page)) return
     attached.add(page)
+    let pendingListenShutdownConsoleErrors = 0
     page.on('console', message => {
       if (message.type() !== 'error') return
-      rendererErrors.push(`${name}: console ${message.text()}`)
+      const text = message.text()
+      const expectedListenShutdownConsole = isClosing()
+        && pendingListenShutdownConsoleErrors > 0
+        && text === 'Failed to load resource: net::ERR_NO_BUFFER_SPACE'
+      if (expectedListenShutdownConsole) {
+        pendingListenShutdownConsoleErrors -= 1
+        return
+      }
+      rendererErrors.push(`${name}: console ${text}`)
     })
     page.on('pageerror', error => {
       rendererErrors.push(`${name}: pageerror ${error?.message ?? String(error)}`)
@@ -819,7 +845,16 @@ export function attachRendererDiagnostics({
         && isAllowedNetworkUrl(url, { resourcePath })
         && /ERR_ABORTED|ERR_CANCELED|ERR_CONNECTION_CLOSED/i.test(errorText)
       const expectedWriteChannelCancellation = isExpectedFirestoreWriteChannelCancellation(url, errorText, method)
-      if (!expectedCloseAbort && !expectedWriteChannelCancellation) {
+      const expectedListenShutdownResourceExhaustion = isExpectedFirestoreListenShutdownResourceExhaustion(
+        url,
+        errorText,
+        method,
+        isClosing(),
+      )
+      if (expectedListenShutdownResourceExhaustion) pendingListenShutdownConsoleErrors += 1
+      if (!expectedCloseAbort
+        && !expectedWriteChannelCancellation
+        && !expectedListenShutdownResourceExhaustion) {
         rendererErrors.push(`${name}: requestfailed ${url} ${errorText}`)
       }
     })
