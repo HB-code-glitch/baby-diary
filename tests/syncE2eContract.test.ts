@@ -37,6 +37,20 @@ describe('packaged sync E2E selector contract', () => {
     expect(firstWindow).toBeGreaterThan(diagnostics)
   })
 
+  it('uses a dedicated cold-launch budget and forwards a bounded Playwright CDP timeout', () => {
+    const runner = source('scripts/sync-e2e.mjs')
+    expect(runner).toContain('const PACKAGED_LAUNCH_TIMEOUT_MS = 60_000')
+    expect(runner).toContain('const CDP_CONNECT_ATTEMPT_TIMEOUT_MS = 2_000')
+
+    const launchStart = runner.indexOf('async function launchDevice')
+    const launchEnd = runner.indexOf('device.app = app', launchStart)
+    const launch = runner.slice(launchStart, launchEnd)
+    expect(launch).toContain('timeoutMs: PACKAGED_LAUNCH_TIMEOUT_MS')
+    expect(launch).toContain(
+      'connectOverCDP: (endpoint, options) => playwright.chromium.connectOverCDP(endpoint, options)',
+    )
+  })
+
   it('uses exact semantic event polling for every normal cross-device transfer', () => {
     const runner = source('scripts/sync-e2e.mjs')
     expect(runner).toContain('async function waitForSemanticEvent')

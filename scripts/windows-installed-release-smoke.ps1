@@ -203,7 +203,8 @@ import { execFile } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { _electron as electron } from 'playwright'
+import { chromium } from 'playwright'
+import { closeDevice, launchCdpElectronApplication } from './scripts/sync-e2e.mjs'
 
 const [executablePath, profileRoot, runtimeEvidencePath] = process.argv.slice(1)
 const execFileAsync = promisify(execFile)
@@ -222,6 +223,11 @@ let processExitObserved = false
 let processExitCode = null
 let processExitSignal = null
 let probeFailure
+const probeDevice = {
+  app: null,
+  name: 'installed packaged recovery probe',
+  closing: false,
+}
 
 async function readMainProcessWindowTitle(pid) {
   try {
@@ -244,8 +250,12 @@ async function readMainProcessWindowTitle(pid) {
 }
 
 try {
-  application = await electron.launch({
+  application = await launchCdpElectronApplication({
     executablePath,
+    cwd: process.cwd(),
+    platform: 'win32',
+    timeoutMs: 60_000,
+    connectOverCDP: (endpoint, options) => chromium.connectOverCDP(endpoint, options),
     env: {
       ...process.env,
       BABYDIARY_TEST_USERDATA: profileRoot,
@@ -255,12 +265,13 @@ try {
       FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
       NODE_ENV: 'production',
     },
-    args: [
+    extraArgs: [
       '--proxy-server=127.0.0.1:9',
       '--proxy-bypass-list=<-loopback>',
       '--disable-background-networking',
     ],
   })
+  probeDevice.app = application
   launchedProcess = application.process()
   launchedProcess.once('exit', (code, signal) => {
     processExitObserved = true
@@ -268,7 +279,7 @@ try {
     processExitSignal = signal
   })
   application.on('window', window => observedBrowserWindows.add(window))
-  for (const window of application.windows()) observedBrowserWindows.add(window)
+  for (const window of application.context().pages()) observedBrowserWindows.add(window)
   observeWindowTitles = true
   titleMonitor = (async () => {
     while (observeWindowTitles && !processExitObserved) {
@@ -303,7 +314,7 @@ try {
   if (titleMonitor) await titleMonitor.catch(() => {})
   if (application) {
     try {
-      for (const window of application.windows()) observedBrowserWindows.add(window)
+      for (const window of application.context().pages()) observedBrowserWindows.add(window)
       browserWindowCount = observedBrowserWindows.size
     } catch {
       browserWindowCount = 0
@@ -329,7 +340,15 @@ try {
     publicState,
     probeFailure: probeFailure instanceof Error ? probeFailure.message : probeFailure ? String(probeFailure) : null,
   }, null, 2)}\n`, 'utf8')
-  if (application) await application.close().catch(() => {})
+  if (application) {
+    try {
+      await closeDevice(probeDevice)
+    } catch (error) {
+      probeFailure = probeFailure
+        ? new AggregateError([probeFailure, error], 'installed packaged recovery probe and cleanup failed')
+        : error
+    }
+  }
   if (recoveryDialogCount > 0) {
     throw new Error(`packaged application displayed a recovery/startup dialog: ${recoveryDialogTitles.join(', ')}`)
   }

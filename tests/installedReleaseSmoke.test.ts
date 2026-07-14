@@ -143,9 +143,30 @@ describe('installed Windows release smoke script', () => {
     expect(script).toContain('restore-transaction.json')
     expect(script).toContain("phase: 'awaiting-windows-confirmation'")
     expect(script).toContain('BABYDIARY_TEST_USERDATA')
-    expect(script).toContain('_electron')
+    expect(script).toContain('launchCdpElectronApplication')
     expect(script).toContain('firstWindow')
     expect(script).toContain('window.babyDiary')
+  })
+
+  it('attaches to the installed recovery probe over Chromium CDP without the Electron Node inspector', () => {
+    const probe = embeddedNodeSource(script, 'Invoke-PackagedRecoveryProbe')
+
+    expect(probe).toContain("import { chromium } from 'playwright'")
+    expect(probe).toContain(
+      "import { closeDevice, launchCdpElectronApplication } from './scripts/sync-e2e.mjs'",
+    )
+    expect(probe).toContain('application = await launchCdpElectronApplication({')
+    expect(probe).toContain(
+      'connectOverCDP: (endpoint, options) => chromium.connectOverCDP(endpoint, options)',
+    )
+    expect(probe).toContain("'--proxy-server=127.0.0.1:9'")
+    expect(probe).toContain("'--proxy-bypass-list=<-loopback>'")
+    expect(probe).toContain("'--disable-background-networking'")
+    expect(probe).toContain('application.context().pages()')
+    expect(probe).toContain('await closeDevice(')
+    expect(probe).not.toContain('_electron')
+    expect(probe).not.toMatch(/\belectron\.launch\s*\(/)
+    expect(probe).not.toContain('application.close().catch(() => {})')
   })
 
   it('executes the fixture helper and proves production recovery retires only verified pre-publication controls', async () => {

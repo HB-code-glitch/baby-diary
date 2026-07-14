@@ -45,6 +45,8 @@ const APP_PACKAGE_NAME = APP_PACKAGE.name
 const APP_VERSION = APP_PACKAGE.version
 const APP_PACKAGE_MAIN = APP_PACKAGE.main
 const E2E_TIMEOUT_MS = 30_000
+const PACKAGED_LAUNCH_TIMEOUT_MS = 60_000
+const CDP_CONNECT_ATTEMPT_TIMEOUT_MS = 2_000
 const CLOSE_TIMEOUT_MS = 10_000
 const CLOSE_CLEANUP_TIMEOUT_MS = 5_000
 const WINDOWS_PROCESS_POLL_MS = 75
@@ -152,7 +154,19 @@ export function packagedResourcePath(executablePath, platform) {
 }
 
 function comparablePath(value, platform) {
-  const normalized = path.normalize(path.resolve(value))
+  const pathApi = platform === 'win32'
+    ? path.win32
+    : platform === 'darwin'
+      ? path.posix
+      : path
+  let normalized = pathApi.normalize(pathApi.resolve(value))
+  if (platform === 'darwin') {
+    if (normalized === '/var' || normalized.startsWith('/var/')) {
+      normalized = `/private${normalized}`
+    } else if (normalized === '/tmp' || normalized.startsWith('/tmp/')) {
+      normalized = `/private${normalized}`
+    }
+  }
   return platform === 'win32' ? normalized.toLowerCase() : normalized
 }
 
@@ -969,16 +983,27 @@ export async function launchCdpElectronApplication({
   executablePath,
   cwd,
   env,
-  timeoutMs = E2E_TIMEOUT_MS,
+  timeoutMs = PACKAGED_LAUNCH_TIMEOUT_MS,
   platform = process.platform,
   allocatePort = reserveLoopbackPort,
   spawnImpl = spawn,
   connectOverCDP,
   sleep = delay,
   cleanupProcess = killOwnedProcessTree,
+  extraArgs = [],
 }) {
   invariant(typeof connectOverCDP === 'function', 'CDP connector is required')
   invariant(platform === 'win32' || platform === 'darwin', `Unsupported CDP launch platform: ${platform}`)
+  invariant(
+    Array.isArray(extraArgs) && extraArgs.every(argument => typeof argument === 'string'),
+    'Packaged Electron extra arguments must be strings',
+  )
+  for (const argument of extraArgs) {
+    invariant(
+      !/^--(?:inspect(?:[-=]|$)|remote-debugging-(?:address|port)(?:=|$)|user-data-dir(?:=|$))/i.test(argument),
+      `Reserved packaged Electron argument cannot be overridden: ${argument}`,
+    )
+  }
   const port = await allocatePort()
   invariant(Number.isInteger(port) && port > 0 && port <= 65_535, `Invalid CDP port: ${port}`)
 
@@ -993,6 +1018,7 @@ export async function launchCdpElectronApplication({
   const child = spawnImpl(executablePath, [
     '--remote-debugging-address=127.0.0.1',
     `--remote-debugging-port=${port}`,
+    ...extraArgs,
   ], {
     cwd,
     env: childEnv,
@@ -1025,8 +1051,9 @@ export async function launchCdpElectronApplication({
         throw new Error(`Packaged Electron CDP endpoint was not ready: ${lastConnectError?.message ?? 'timeout'}`)
       }
       try {
+        const connectTimeoutMs = Math.min(CDP_CONNECT_ATTEMPT_TIMEOUT_MS, remaining)
         browser = await withTimeout(
-          Promise.resolve().then(() => connectOverCDP(endpoint)),
+          Promise.resolve().then(() => connectOverCDP(endpoint, { timeout: connectTimeoutMs })),
           remaining,
           'Packaged Electron CDP connection',
         )
@@ -1034,11 +1061,7 @@ export async function launchCdpElectronApplication({
         lastConnectError = error
         const afterAttempt = deadline - Date.now()
         if (afterAttempt <= 0) continue
-        await withTimeout(
-          Promise.resolve().then(() => sleep(Math.min(50, afterAttempt))),
-          afterAttempt,
-          'Packaged Electron CDP retry',
-        )
+        await sleep(Math.min(50, afterAttempt))
       }
     }
 
@@ -1518,8 +1541,9 @@ async function launchDevice({
       executablePath,
       cwd: ROOT,
       env: launchEnvironment,
+      timeoutMs: PACKAGED_LAUNCH_TIMEOUT_MS,
       platform: process.platform,
-      connectOverCDP: endpoint => playwright.chromium.connectOverCDP(endpoint),
+      connectOverCDP: (endpoint, options) => playwright.chromium.connectOverCDP(endpoint, options),
     })
     device.app = app
     const attestation = await readPackagedArtifactAttestation({ executablePath, resourcePath })

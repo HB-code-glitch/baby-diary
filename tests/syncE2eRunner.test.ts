@@ -98,6 +98,11 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       spawnImpl,
       connectOverCDP,
       sleep,
+      extraArgs: [
+        '--proxy-server=127.0.0.1:9',
+        '--proxy-bypass-list=<-loopback>',
+        '--disable-background-networking',
+      ],
     })
 
     expect(spawnImpl).toHaveBeenCalledOnce()
@@ -106,6 +111,9 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(args).toEqual([
       '--remote-debugging-address=127.0.0.1',
       '--remote-debugging-port=49211',
+      '--proxy-server=127.0.0.1:9',
+      '--proxy-bypass-list=<-loopback>',
+      '--disable-background-networking',
     ])
     expect(args.join(' ')).not.toMatch(/--inspect|--require|loader/i)
     expect(options).toMatchObject({
@@ -116,7 +124,12 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(Object.keys(options.env).map(key => key.toUpperCase())).not.toContain('NODE_OPTIONS')
     expect(Object.keys(options.env).map(key => key.toUpperCase())).not.toContain('ELECTRON_RUN_AS_NODE')
     expect(connectOverCDP).toHaveBeenCalledTimes(2)
-    expect(connectOverCDP).toHaveBeenLastCalledWith('http://127.0.0.1:49211')
+    for (const [endpoint, connectOptions] of connectOverCDP.mock.calls) {
+      expect(endpoint).toBe('http://127.0.0.1:49211')
+      expect(connectOptions).toEqual({ timeout: expect.any(Number) })
+      expect(connectOptions.timeout).toBeGreaterThan(0)
+      expect(connectOptions.timeout).toBeLessThanOrEqual(2_000)
+    }
     expect(sleep).toHaveBeenCalledOnce()
     expect(app.process()).toBe(child)
     expect(app.context()).toBe(context)
@@ -131,6 +144,25 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     await app.close()
     expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
     expect(browser.close).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '--inspect=0',
+    '--remote-debugging-port=9222',
+    '--user-data-dir=C:\\unsafe-profile',
+  ])('rejects the reserved packaged Electron argument %s before spawn', async reservedArg => {
+    const spawnImpl = vi.fn()
+    await expect(launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: { TEST_SENTINEL: 'yes' },
+      platform: 'win32',
+      allocatePort: async () => 49214,
+      spawnImpl,
+      connectOverCDP: vi.fn(),
+      extraArgs: [reservedArg],
+    })).rejects.toThrow(/reserved packaged Electron argument/i)
+    expect(spawnImpl).not.toHaveBeenCalled()
   })
 
   it('requests a guarded graceful packaged macOS quit after closing its windows', async () => {
@@ -168,6 +200,48 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(browser.close).not.toHaveBeenCalled()
   })
 
+  it('reports the CDP endpoint deadline instead of racing the final retry delay', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 8125,
+        exitCode: null as number | null,
+        signalCode: null as NodeJS.Signals | null,
+        stderr: new EventEmitter(),
+      })
+      const cleanupProcess = vi.fn(async () => {
+        child.exitCode = 0
+      })
+      let launchError: unknown
+      const launch = launchCdpElectronApplication({
+        executablePath: '/Applications/Baby Diary.app/Contents/MacOS/Baby Diary',
+        cwd: '/Applications/Baby Diary.app',
+        env: { TEST_SENTINEL: 'yes' },
+        timeoutMs: 24,
+        platform: 'darwin',
+        allocatePort: async () => 49213,
+        spawnImpl: vi.fn(() => child),
+        connectOverCDP: vi.fn(async () => {
+          throw new Error('endpoint is not ready')
+        }),
+        sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+        cleanupProcess,
+      }).catch(error => {
+        launchError = error
+      })
+
+      await vi.runAllTimersAsync()
+      await launch
+      expect(launchError).toBeInstanceOf(Error)
+      expect((launchError as Error).message).toBe(
+        'Packaged Electron CDP endpoint was not ready: endpoint is not ready',
+      )
+      expect(cleanupProcess).toHaveBeenCalledWith(8125)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('attests the exact packaged app.asar metadata used by a CDP launch', async () => {
     const extractFile = vi.fn(() => Buffer.from(JSON.stringify({
       name: 'baby-diary',
@@ -196,6 +270,53 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       'C:\\Baby Diary\\resources\\app.asar',
       'package.json',
     )
+  })
+
+  it('accepts only the canonical macOS /var and /tmp aliases for packaged files', async () => {
+    const metadata = Buffer.from(JSON.stringify({
+      name: 'baby-diary',
+      version: '0.3.11',
+      main: 'dist-electron/electron/main.js',
+    }))
+    const regularFile = { isFile: () => true, isSymbolicLink: () => false }
+
+    for (const [visibleRoot, canonicalRoot] of [
+      ['/var', '/private/var'],
+      ['/tmp', '/private/tmp'],
+    ]) {
+      const executablePath = `${visibleRoot}/baby-diary-smoke/Baby Diary.app/Contents/MacOS/Baby Diary`
+      const resourcePath = `${visibleRoot}/baby-diary-smoke/Baby Diary.app/Contents/Resources/app.asar`
+      await expect(readPackagedArtifactAttestation({
+        executablePath,
+        resourcePath,
+        platform: 'darwin',
+        extractFile: vi.fn(() => metadata),
+        fileSystem: {
+          existsSync: vi.fn(() => true),
+          lstatSync: vi.fn(() => regularFile),
+          realpathSync: vi.fn((candidate: string) => candidate.replace(visibleRoot, canonicalRoot)),
+        },
+      })).resolves.toMatchObject({
+        executablePath: executablePath.replace(visibleRoot, canonicalRoot),
+        appPath: resourcePath.replace(visibleRoot, canonicalRoot),
+      })
+    }
+
+    const executablePath = '/var/baby-diary-smoke/Baby Diary.app/Contents/MacOS/Baby Diary'
+    const resourcePath = '/var/baby-diary-smoke/Baby Diary.app/Contents/Resources/app.asar'
+    await expect(readPackagedArtifactAttestation({
+      executablePath,
+      resourcePath,
+      platform: 'darwin',
+      extractFile: vi.fn(() => metadata),
+      fileSystem: {
+        existsSync: vi.fn(() => true),
+        lstatSync: vi.fn(() => regularFile),
+        realpathSync: vi.fn((candidate: string) => candidate === executablePath
+          ? '/private/var/escaped/Baby Diary'
+          : candidate.replace('/var', '/private/var')),
+      },
+    })).rejects.toThrow(/real path must not escape/i)
   })
 
   it('uses a real Auth emulator ID token for Firestore REST reads without exposing secrets in failures', async () => {
