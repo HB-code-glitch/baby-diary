@@ -9,6 +9,7 @@ import type {
   BabyInfoPendingPageRequest,
   DataInfo,
   DiaryEvent,
+  EventFamilyConfirmationResult,
   ExportFormat,
   FirebaseEmulatorBridge,
   SavePdfResult,
@@ -175,14 +176,17 @@ const babyDiaryAPI = {
   openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> =>
     ipcRenderer.invoke(EVIDENCE_SOURCE_OPEN_CHANNEL, sourceId),
 
-  listEvents: (): Promise<DiaryEvent[]> =>
-    ipcRenderer.invoke('events:list'),
+  listEvents: (expectedFamilyId?: string): Promise<DiaryEvent[]> =>
+    ipcRenderer.invoke('events:list', expectedFamilyId),
 
-  listEventMutations: (): Promise<DiaryEvent[]> =>
-    ipcRenderer.invoke('events:listMutations'),
+  listEventMutations: (expectedFamilyId?: string): Promise<DiaryEvent[]> =>
+    ipcRenderer.invoke('events:listMutations', expectedFamilyId),
 
-  appendEvent: (event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> =>
-    ipcRenderer.invoke('events:append', event),
+  appendEvent: (event: DiaryEvent, expectedFamilyId?: string): Promise<'ok' | 'duplicate' | 'error'> =>
+    ipcRenderer.invoke('events:append', event, expectedFamilyId),
+
+  confirmEventFamily: (familyId: string, allowLegacyAdoption = true): Promise<EventFamilyConfirmationResult> =>
+    ipcRenderer.invoke('events:confirmFamily', familyId, allowLegacyAdoption),
 
   getSettings: (): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:get'),
@@ -222,10 +226,16 @@ const babyDiaryAPI = {
   getDataInfo: (): Promise<DataInfo> =>
     ipcRenderer.invoke('data:getInfo'),
 
-  onEventAppended: (callback: (event: DiaryEvent) => void): (() => void) => {
-    const handler = (_: Electron.IpcRendererEvent, event: DiaryEvent) => callback(event)
+  onEventAppended: (callback: (event: DiaryEvent, familyId: string) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, event: DiaryEvent, familyId: string) => callback(event, familyId)
     ipcRenderer.on('event:appended', handler)
     return () => ipcRenderer.removeListener('event:appended', handler)
+  },
+
+  onEventScopeChanged: (callback: () => void): (() => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('events:scopeChanged', handler)
+    return () => ipcRenderer.removeListener('events:scopeChanged', handler)
   },
 
   onSettingsChanged: (callback: (payload: { sequence: number; settings: AppSettings }) => void): (() => void) => {

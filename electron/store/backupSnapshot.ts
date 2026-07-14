@@ -17,6 +17,7 @@ import {
   writeAllSync,
   type DurableFileOps,
 } from './durableFs'
+import { EventFamilyOwnership } from './eventFamilyOwnership'
 
 export const BACKUP_MANIFEST_FILE = 'manifest.json'
 export const RESTORE_INTENT_FILE = '.baby-info-pair-restore-v1.json'
@@ -29,6 +30,9 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/
 const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/
 const LEGACY_SNAPSHOT_NAME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/
 const DATA_PATH_PATTERN = /^data\/[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl$/
+const EVENT_DATA_PATH_PATTERN = /^data\/events-[A-Za-z0-9._-]+\.jsonl$/
+const EVENT_FAMILY_OWNERSHIP_SIDECAR_PATH = 'data/event-family-ownership-v1.jsonl'
+const EVENT_FAMILY_OWNERSHIP_MARKER_PATH = 'data/event-family-ownership-initialized-v1.jsonl'
 const RESTORE_INTENT_TOMBSTONE_PATTERN = /^\.baby-info-pair-restore-v1\.json\.cleanup-[0-9a-f]{32}$/i
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024
@@ -2089,17 +2093,62 @@ export function stageVerifiedBackupSnapshot(
   if (dataSources.length > 0) {
     const dataDestination = path.join(stagingPath, 'data')
     fs.mkdirSync(dataDestination)
-    for (const source of dataSources) {
+    const copyPriority = (relativePath: string): number => {
+      if (EVENT_DATA_PATH_PATTERN.test(relativePath)) return 0
+      if (relativePath === EVENT_FAMILY_OWNERSHIP_SIDECAR_PATH) return 2
+      if (relativePath === EVENT_FAMILY_OWNERSHIP_MARKER_PATH) return 3
+      return 1
+    }
+    const copySources = [...dataSources].sort((left, right) => (
+      copyPriority(left.relativePath) - copyPriority(right.relativePath)
+      || left.relativePath.localeCompare(right.relativePath)
+    ))
+    for (const source of copySources) {
       const streamed = streamRegularFileToStaging(
         userDataPath,
         source.relativePath,
         path.join(stagingPath, ...source.relativePath.split('/')),
         readOptions,
       )
-      if (streamed.size !== source.size) throw new Error(`event data source changed: ${source.relativePath}`)
+      const isOwnershipControlFile = source.relativePath === EVENT_FAMILY_OWNERSHIP_SIDECAR_PATH
+        || source.relativePath === EVENT_FAMILY_OWNERSHIP_MARKER_PATH
+      // The first write creates the initialization marker; each linked append
+      // then commits sidecar -> checkpoint marker -> event. Once every event
+      // file has been sealed above, a newer ownership pair can contain only
+      // harmless dangling bindings. Event files themselves must still match
+      // discovery exactly or the snapshot is rejected.
+      if (!isOwnershipControlFile && streamed.size !== source.size) {
+        throw new Error(`event data source changed: ${source.relativePath}`)
+      }
       dataDescriptors.set(source.relativePath, streamed)
     }
     syncDirectory(dataDestination, platform)
+
+    const hasOwnershipSidecar = dataDescriptors.has(EVENT_FAMILY_OWNERSHIP_SIDECAR_PATH)
+    const hasOwnershipMarker = dataDescriptors.has(EVENT_FAMILY_OWNERSHIP_MARKER_PATH)
+    if (hasOwnershipSidecar !== hasOwnershipMarker) {
+      throw new Error('event-family ownership snapshot is missing its sidecar/marker pair')
+    }
+    if (hasOwnershipSidecar) {
+      const ownership = new EventFamilyOwnership({ dataDir: dataDestination })
+      if (ownership.integrity !== 'ok') {
+        throw new Error('event-family ownership snapshot checkpoint is inconsistent')
+      }
+    }
+  }
+
+  aggregateBytes = addSnapshotBytes(0, settingsBytes.byteLength, limits.maxTotalSnapshotBytes)
+  aggregateBytes = addSnapshotBytes(
+    aggregateBytes,
+    journalBytes.byteLength,
+    limits.maxTotalSnapshotBytes,
+  )
+  for (const source of dataSources) {
+    aggregateBytes = addSnapshotBytes(
+      aggregateBytes,
+      dataDescriptors.get(source.relativePath)!.size,
+      limits.maxTotalSnapshotBytes,
+    )
   }
 
   const dataPaths = dataSources.map(source => source.relativePath)

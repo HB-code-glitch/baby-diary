@@ -4,7 +4,7 @@ import { useAppStore, formatTime, getDDay } from '../store/useAppStore'
 import { useToast } from '../components/Toast'
 import { EventTimeline } from '../components/EventTimeline'
 import { TimeEditModal } from '../components/TimeEditModal'
-import { DiaryEvent, BreastData, FormulaData, TempData, DataInfo } from '../../shared/types'
+import { DiaryEvent, BreastData, FormulaData, TempData, DataInfo, SleepData } from '../../shared/types'
 import { differenceInMinutes, format, parseISO, isSameDay, subDays, isToday } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import { ja } from 'date-fns/locale'
@@ -24,6 +24,7 @@ import { useSyncStatus } from '../sync/useSync'
 import {
   getVisibleHomeMetrics,
   partitionHomeInsights,
+  selectTodaySummaryEvents,
   type HomeInsightKey,
   type HomeMetricKey,
 } from '../lib/progressiveDisclosure'
@@ -152,6 +153,7 @@ function MilestoneAlertBanners({ birthdate, gender, lang }: MilestoneAlertBanner
 interface InsightsPanelProps {
   lastFeeding: DiaryEvent | null
   lastBreastSide: 'L' | 'R' | 'both' | null
+  recentTemp: DiaryEvent | null
   todayPeeCount: number
   todayPoopCount: number
   dataInfo: DataInfo | null
@@ -161,6 +163,7 @@ interface InsightsPanelProps {
 function InsightsPanel({
   lastFeeding,
   lastBreastSide,
+  recentTemp,
   todayPeeCount,
   todayPoopCount,
   dataInfo,
@@ -200,12 +203,6 @@ function InsightsPanel({
       : lastBreastSide === 'both'
         ? t('breast.both')
         : '–'
-
-  // Last temp (recent)
-  const recentTemp: DiaryEvent | null = useAppStore(s => {
-    const temps = s.events.filter(e => !e.deleted && e.type === 'temp')
-    return latestValidEvent(temps)
-  })
 
   const tempLabel = recentTemp
     ? `${(recentTemp.data as TempData).celsius.toFixed(1)}℃`
@@ -1355,10 +1352,6 @@ export function HomePage({ onNavigate }: HomePageProps) {
   const { addPee, addPoop, addTemp, addBreast, addFormula, addSleep, addGrowth, editEvent, softDeleteEvent, todayEvents, events } = useAppStore()
   const settings = useAppStore(s => s.settings)
   const dataInfo = useAppStore(s => s.dataInfo)
-  const lastFeeding = useAppStore(s => s.lastFeeding())
-  const peeCount = useAppStore(s => s.todayPeeCount())
-  const poopCount = useAppStore(s => s.todayPoopCount())
-  const todaySleepMin = useAppStore(s => s.todaySleepMinutes())
   const { showToast } = useToast()
   const { t, i18n: i18nInstance } = useTranslation()
   const [popover, setPopover] = useState<{
@@ -1424,6 +1417,28 @@ export function HomePage({ onNavigate }: HomePageProps) {
     if (!last) return null
     return (last.data as BreastData).side ?? null
   }, [events])
+
+  const todaySummaryEvents = React.useMemo(
+    () => selectTodaySummaryEvents(events, { birthdate }),
+    [events, birthdate],
+  )
+  const summaryLastFeeding = React.useMemo(
+    () => latestValidEvent(todaySummaryEvents.filter(event => event.type === 'breast' || event.type === 'formula')),
+    [todaySummaryEvents],
+  )
+  const summaryLastBreastSide = React.useMemo((): 'L' | 'R' | 'both' | null => {
+    const event = latestValidEvent(todaySummaryEvents.filter(item => item.type === 'breast'))
+    return event ? (event.data as BreastData).side ?? null : null
+  }, [todaySummaryEvents])
+  const summaryRecentTemp = React.useMemo(
+    () => latestValidEvent(todaySummaryEvents.filter(event => event.type === 'temp')),
+    [todaySummaryEvents],
+  )
+  const summaryPeeCount = todaySummaryEvents.filter(event => event.type === 'pee').length
+  const summaryPoopCount = todaySummaryEvents.filter(event => event.type === 'poop').length
+  const summarySleepMinutes = todaySummaryEvents
+    .filter(event => event.type === 'sleep')
+    .reduce((sum, event) => sum + ((event.data as SleepData).minutes ?? 0), 0)
 
   const onTimerChange = useCallback(() => setTimerTick(t => t + 1), [])
 
@@ -1741,20 +1756,24 @@ export function HomePage({ onNavigate }: HomePageProps) {
           </div>
         </div>
 
-        {/* RIGHT: current-stage guidance + today's concise insights */}
-        <aside className="home-insight-stack" aria-label={t('ageGuidance.title')}>
+        {/* RIGHT: today's concise insights + current-stage guidance */}
+        <aside
+          className="home-insight-stack"
+          aria-label={`${t('home.insightsTitle')} · ${t('ageGuidance.title')}`}
+        >
+          <InsightsPanel
+            lastFeeding={summaryLastFeeding}
+            lastBreastSide={summaryLastBreastSide}
+            recentTemp={summaryRecentTemp}
+            todayPeeCount={summaryPeeCount}
+            todayPoopCount={summaryPoopCount}
+            dataInfo={dataInfo}
+            todaySleepMinutes={summarySleepMinutes}
+          />
           <AgeGuidancePanel
             birthdate={birthdate}
             variant="home"
             onRequestBirthdate={onNavigate ? () => onNavigate('settings') : undefined}
-          />
-          <InsightsPanel
-            lastFeeding={lastFeeding}
-            lastBreastSide={lastBreastSide}
-            todayPeeCount={peeCount}
-            todayPoopCount={poopCount}
-            dataInfo={dataInfo}
-            todaySleepMinutes={todaySleepMin}
           />
         </aside>
       </div>

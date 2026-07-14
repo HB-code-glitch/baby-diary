@@ -56,6 +56,7 @@ interface GetDocInterceptor {
 
 const harness = vi.hoisted(() => ({
   mutations: new Map<string, unknown>(),
+  mutationFamilies: new Map<string, string>(),
   store: new Map<string, unknown>(),
   appendEventQueue: [] as AppendFault[],
   listMutationsQueue: [] as ListFault[],
@@ -152,21 +153,46 @@ vi.mock('../src/sync/firebase', () => ({
 
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
+    getFirebaseEmulator: vi.fn(async () => null),
     listEvents: vi.fn(async () => []),
-    listEventMutations: vi.fn(async () => {
+    listEventMutations: vi.fn(async (expectedFamilyId?: string) => {
       const fault = harness.listMutationsQueue.shift()
       if (fault?.kind === 'throw') throw new Error(fault.message ?? 'simulated durable read-back crash')
       if (fault?.kind === 'omit-all') return []
-      return Array.from(harness.mutations.values()).map(event => structuredClone(event))
+      return Array.from(harness.mutations.entries())
+        .filter(([key]) => expectedFamilyId === undefined || harness.mutationFamilies.get(key) === expectedFamilyId)
+        .map(([, event]) => structuredClone(event))
     }),
-    appendEvent: vi.fn(async (event: DiaryEvent) => {
+    appendEvent: vi.fn(async (event: DiaryEvent, expectedFamilyId?: string) => {
       const fault = harness.appendEventQueue.shift()
       if (fault?.kind === 'throw') throw new Error(fault.message ?? 'simulated durable append crash')
       if (fault?.kind === 'error') return 'error' as const
+      if (expectedFamilyId !== undefined
+        && harness.settings.familyId
+        && expectedFamilyId !== harness.settings.familyId) return 'error' as const
       const key = getEventStorageKey(event)
+      const familyId = expectedFamilyId ?? harness.settings.familyId
+      const existingFamilyId = harness.mutationFamilies.get(key)
+      if (familyId && existingFamilyId && existingFamilyId !== familyId) return 'error' as const
+      if (familyId) harness.mutationFamilies.set(key, familyId)
       if (harness.mutations.has(key)) return 'duplicate' as const
       harness.mutations.set(key, structuredClone(event))
       return 'ok' as const
+    }),
+    confirmEventFamily: vi.fn(async (familyId: string, allowLegacyAdoption = true) => {
+      if (!familyId || harness.settings.familyId !== familyId) {
+        return { status: 'error' as const, adoptedCount: 0 }
+      }
+      let adoptedCount = 0
+      if (allowLegacyAdoption) {
+        for (const key of harness.mutations.keys()) {
+          if (!harness.mutationFamilies.has(key)) {
+            harness.mutationFamilies.set(key, familyId)
+            adoptedCount += 1
+          }
+        }
+      }
+      return { status: 'ok' as const, adoptionFamilyId: familyId, adoptedCount }
     }),
     getSettings: vi.fn(async () => structuredClone(harness.settings)),
     mergeSettings: (...args: unknown[]) => harness.mergeSettings(...args),
@@ -271,6 +297,7 @@ async function importFreshEngine() {
 
 async function connect(uid: string, email: string, familyId: string, engineModule?: Awaited<ReturnType<typeof importFreshEngine>>) {
   const engine = engineModule ?? await importFreshEngine()
+  harness.settings = { ...harness.settings, familyId }
   await engine.configure(config, familyId)
   await engine.start()
   await vi.waitFor(() => expect(harness.authCallbacks.length).toBeGreaterThan(0))
@@ -288,6 +315,7 @@ function eventDocPath(familyId: string, event: DiaryEvent): string {
 
 function readPendingFromLocalStorage(): Array<{
   event: DiaryEvent
+  familyId: string
   attempts: number
   nextRetry: number
 }> {
@@ -302,6 +330,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
     vi.clearAllMocks()
     localStorage.clear()
     harness.mutations.clear()
+    harness.mutationFamilies.clear()
     harness.store.clear()
     harness.appendEventQueue = []
     harness.listMutationsQueue = []
@@ -330,6 +359,8 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
   // ──────────────────────────────────────────────────────────
 
   describe('ensureDurableUploadDerivative', () => {
+    const familyId = 'family-unit'
+
     it('canonically projects an owned native event and durably appends it before upload', async () => {
       const engine = await importFreshEngine()
       const uid = 'writer-uid'
@@ -338,10 +369,10 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const ready = deriveUploadReadyEvent(source, uid)
       expect(ready).not.toBe(source)
 
-      const result = await engine.ensureDurableUploadDerivative(source, uid)
+      const result = await engine.ensureDurableUploadDerivative(source, uid, familyId)
       expect(result).toEqual(ready)
       const { ipc } = await import('../src/lib/ipc')
-      expect(ipc.appendEvent).toHaveBeenCalledWith(ready)
+      expect(ipc.appendEvent).toHaveBeenCalledWith(ready, familyId)
       expect(harness.mutations.has(getEventStorageKey(ready))).toBe(true)
     })
 
@@ -351,7 +382,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const source = makeEvent()
       const before = structuredClone(source)
 
-      const result = await engine.ensureDurableUploadDerivative(source, uid)
+      const result = await engine.ensureDurableUploadDerivative(source, uid, familyId)
 
       expect(source).toEqual(before) // source is never mutated
       expect(result).not.toBe(source)
@@ -360,8 +391,9 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
 
       const { ipc } = await import('../src/lib/ipc')
       expect(ipc.appendEvent).toHaveBeenCalledTimes(1)
-      expect(ipc.appendEvent).toHaveBeenCalledWith(result)
+      expect(ipc.appendEvent).toHaveBeenCalledWith(result, familyId)
       expect(ipc.listEventMutations).toHaveBeenCalledTimes(1)
+      expect(ipc.listEventMutations).toHaveBeenCalledWith(familyId)
       expect(harness.mutations.has(getEventStorageKey(result))).toBe(true)
     })
 
@@ -371,7 +403,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const source = makeEvent()
       harness.appendEventQueue.push({ kind: 'error' })
 
-      await expect(engine.ensureDurableUploadDerivative(source, uid)).rejects.toThrow(/durably append/i)
+      await expect(engine.ensureDurableUploadDerivative(source, uid, familyId)).rejects.toThrow(/durably append/i)
       expect(harness.mutations.size).toBe(0)
     })
 
@@ -381,7 +413,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const source = makeEvent()
       harness.appendEventQueue.push({ kind: 'throw', message: 'main process crashed mid-append' })
 
-      await expect(engine.ensureDurableUploadDerivative(source, uid)).rejects.toThrow(/crashed mid-append/)
+      await expect(engine.ensureDurableUploadDerivative(source, uid, familyId)).rejects.toThrow(/crashed mid-append/)
       expect(harness.mutations.size).toBe(0)
     })
 
@@ -391,7 +423,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const source = makeEvent()
       harness.listMutationsQueue.push({ kind: 'throw', message: 'read-back crashed' })
 
-      await expect(engine.ensureDurableUploadDerivative(source, uid)).rejects.toThrow(/read-back crashed/)
+      await expect(engine.ensureDurableUploadDerivative(source, uid, familyId)).rejects.toThrow(/read-back crashed/)
       // The append itself DID durably land — a crash here must not be "fixed" by
       // silently discarding the physical record.
       const expectedDerivative = deriveUploadReadyEvent(source, uid)
@@ -404,7 +436,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const source = makeEvent()
       harness.listMutationsQueue.push({ kind: 'omit-all' })
 
-      await expect(engine.ensureDurableUploadDerivative(source, uid))
+      await expect(engine.ensureDurableUploadDerivative(source, uid, familyId))
         .rejects.toThrow(/missing from the durable local mutation log/i)
     })
 
@@ -414,11 +446,11 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const source = makeEvent()
       harness.listMutationsQueue.push({ kind: 'throw' })
 
-      await expect(engine.ensureDurableUploadDerivative(source, uid)).rejects.toThrow()
+      await expect(engine.ensureDurableUploadDerivative(source, uid, familyId)).rejects.toThrow()
       const { ipc } = await import('../src/lib/ipc')
       expect(harness.mutations.size).toBe(1) // durably landed despite the thrown read-back
 
-      const retried = await engine.ensureDurableUploadDerivative(source, uid)
+      const retried = await engine.ensureDurableUploadDerivative(source, uid, familyId)
       expect(retried).toEqual(deriveUploadReadyEvent(source, uid))
       expect(harness.mutations.size).toBe(1) // no duplicate physical record
       // Second append call observed 'duplicate', not a fresh write.
@@ -558,8 +590,8 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       const derivative2 = deriveUploadReadyEvent(second, uid)
       expect(makeCloudEventDocId(derivative1)).not.toBe(makeCloudEventDocId(derivative2))
 
-      engine.enqueue(first)
-      engine.enqueue(second)
+      engine.enqueue(first, familyId)
+      engine.enqueue(second, familyId)
       await vi.waitFor(() => expect(engine.getStatus().pendingCount).toBe(0))
 
       expect(harness.store.get(eventDocPath(familyId, derivative1))).toEqual({ event: derivative1 })
@@ -586,13 +618,39 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
       expect(getEventStorageKey(ensureEventMutationIdentity(first)))
         .not.toBe(getEventStorageKey(ensureEventMutationIdentity(second)))
 
-      engine.enqueue(first)
-      engine.enqueue(second)
+      engine.enqueue(first, 'family-queue-test')
+      engine.enqueue(second, 'family-queue-test')
 
       const pending = readPendingFromLocalStorage()
       expect(pending).toHaveLength(2)
       expect(pending.map(item => item.event)).toEqual([first, second])
       expect(pending.every(item => item.event.mutationId === undefined)).toBe(true)
+    })
+
+    it('drops a familyless legacy pending cache and recovers the event only from the confirmed-family durable log', async () => {
+      const familyId = 'family-legacy-pending'
+      const uid = 'legacy-pending-writer'
+      const source = makeEvent()
+      const derivative = deriveUploadReadyEvent(source, uid)
+      seedFamily(familyId, uid)
+      localStorage.setItem('babydiary.pendingUploads', JSON.stringify([
+        { event: source, attempts: 0, nextRetry: 0 },
+      ]))
+
+      const cacheOnlyEngine = await connect(uid, 'legacy@example.test', familyId)
+      await vi.waitFor(() => expect(cacheOnlyEngine.getStatus().status).toBe('online'))
+      expect(readPendingFromLocalStorage()).toEqual([])
+      expect(harness.store.has(eventDocPath(familyId, derivative))).toBe(false)
+      await cacheOnlyEngine.stop()
+
+      harness.mutations.set(getEventStorageKey(source), structuredClone(source))
+      vi.resetModules()
+      const durableLogEngine = await connect(uid, 'legacy@example.test', familyId)
+      await vi.waitFor(() => {
+        expect(harness.store.get(eventDocPath(familyId, derivative))).toEqual({ event: derivative })
+      })
+      expect(readPendingFromLocalStorage()).toEqual([])
+      await durableLogEngine.stop()
     })
 
     it('persists a reconcile-discovered source with backoff and retries it after restart', async () => {

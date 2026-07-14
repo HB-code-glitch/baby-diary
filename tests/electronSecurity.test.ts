@@ -6,6 +6,9 @@ import { pathToFileURL } from 'node:url'
 import type { Session } from 'electron'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const ORIGINAL_PLATFORM = process.platform
+const ORIGINAL_TEST_USERDATA = process.env.BABYDIARY_TEST_USERDATA
+
 type ElectronPermissionRequestHandler = NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>
 type ElectronPermissionCheckHandler = NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>
 
@@ -63,6 +66,7 @@ class MockBrowserWindow extends EventEmitter {
     this.webContents.currentUrl = `${pathToFileURL(filePath)}${options?.hash ? `#${options.hash}` : ''}`
   })
   show = vi.fn()
+  removeMenu = vi.fn()
   destroy = vi.fn(() => {
     if (this.destroyed) return
     this.destroyed = true
@@ -212,6 +216,7 @@ async function finishPrintWindow(task: PrintWindowTask): Promise<void> {
 describe('Electron BrowserWindow security boundary', () => {
   beforeEach(async () => {
     vi.resetModules()
+    delete process.env.BABYDIARY_TEST_USERDATA
     testRoot = mkdtempSync(join(tmpdir(), 'baby-diary-electron-security-'))
     electronPaths.appData = join(testRoot, 'app-data')
     electronPaths.userData = join(testRoot, 'user-data')
@@ -239,7 +244,33 @@ describe('Electron BrowserWindow security boundary', () => {
   })
 
   afterEach(() => {
+    Object.defineProperty(process, 'platform', { configurable: true, value: ORIGINAL_PLATFORM })
+    if (ORIGINAL_TEST_USERDATA === undefined) delete process.env.BABYDIARY_TEST_USERDATA
+    else process.env.BABYDIARY_TEST_USERDATA = ORIGINAL_TEST_USERDATA
     rmSync(testRoot, { recursive: true, force: true })
+  })
+
+  it('removes the Windows native menu so Alt cannot reveal it', async () => {
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+
+    const mainWindow = await loadMainWindow()
+
+    expect(mainWindow.options.autoHideMenuBar).toBe(true)
+    expect(mainWindow.removeMenu).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves the native application menu on macOS', async () => {
+    const initialWindow = await loadMainWindow()
+    initialWindow.emit('closed')
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'darwin' })
+    const electron = await import('electron')
+
+    ;(electron.app as unknown as EventEmitter).emit('activate')
+    await vi.waitFor(() => expect(MockBrowserWindow.instances).toHaveLength(2))
+    const macWindow = MockBrowserWindow.instances[1]
+
+    expect(macWindow.options.autoHideMenuBar).not.toBe(true)
+    expect(macWindow.removeMenu).not.toHaveBeenCalled()
   })
 
   it('isolates Electron storage paths from the shared OS temp root', async () => {
@@ -252,6 +283,14 @@ describe('Electron BrowserWindow security boundary', () => {
     const appDataPath = electron.app.getPath('appData')
     await import('../electron/main')
     expect(electron.app.getPath('userData')).toBe(join(appDataPath, 'baby-diary'))
+  })
+
+  it('rejects a test override that points at the interactive Baby Diary profile', async () => {
+    process.env.BABYDIARY_TEST_USERDATA = join(electronPaths.appData, 'baby-diary')
+
+    await expect(import('../electron/main')).rejects.toThrow(/isolated test userdata/i)
+    expect(settingsStoreMocks.construct).not.toHaveBeenCalled()
+    expect(MockBrowserWindow.instances).toHaveLength(0)
   })
 
   it('explicitly sandboxes both the main and print windows', async () => {

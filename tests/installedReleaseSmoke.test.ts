@@ -90,6 +90,20 @@ function hasThrowingGuard(sourceText: string, identifier: string): boolean {
 describe('installed Mac release smoke script', () => {
   const script = source('scripts/mac-installed-release-smoke.sh')
 
+  it('defaults to the strict trusted policy and rejects every unknown policy', () => {
+    expect(script).toContain('signature_policy="${3:-RequireTrusted}"')
+    expect(script).toContain('AllowUnsigned|RequireTrusted)')
+    expect(script).toContain('Unsupported Mac signature policy: $signature_policy')
+    expect(script).not.toContain('signature_policy="${3:-AllowUnsigned}"')
+  })
+
+  it('runs trust verification by default and bypasses Gatekeeper only for explicit AllowUnsigned', () => {
+    expect(script).toMatch(
+      /if \[\[ "\$signature_policy" == "RequireTrusted" \]\]; then[\s\S]*codesign --verify --deep --strict[\s\S]*spctl --assess --type execute[\s\S]*xcrun stapler validate[\s\S]*else[\s\S]*xattr -dr com\.apple\.quarantine "\$installed_app"[\s\S]*fi/,
+    )
+    expect(script).toContain('Unsigned smoke could not remove quarantine metadata')
+  })
+
   it('requires the expected host architecture and mounts the supplied DMG read-only', () => {
     expect(script).toContain('uname -m')
     expect(script).toContain('expected_host_arch')

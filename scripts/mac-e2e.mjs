@@ -182,6 +182,10 @@ async function main() {
         ...process.env,
         NODE_ENV: 'production',          // load dist/index.html, not dev server
         BABYDIARY_TEST_USERDATA: tmpDir, // isolated data dir
+        BABYDIARY_FIREBASE_EMULATOR: '1',
+        BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID: 'demo-baby-diary',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099',
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
         ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
       },
       // Playwright's _electron doesn't need a browser download

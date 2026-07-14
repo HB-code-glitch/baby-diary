@@ -249,6 +249,10 @@ try {
     env: {
       ...process.env,
       BABYDIARY_TEST_USERDATA: profileRoot,
+      BABYDIARY_FIREBASE_EMULATOR: '1',
+      BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID: 'demo-baby-diary',
+      FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099',
+      FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
       NODE_ENV: 'production',
     },
     args: [

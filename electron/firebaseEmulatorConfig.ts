@@ -3,6 +3,14 @@ import type { FirebaseEmulatorBridge } from '../shared/types'
 export const FIREBASE_EMULATOR_PROJECT_ID = 'demo-baby-diary' as const
 export const FIREBASE_AUTH_EMULATOR_PORT = 9099
 export const FIRESTORE_EMULATOR_PORT = 8080
+export const FIREBASE_EMULATOR_CONFIG = Object.freeze({
+  apiKey: 'demo-api-key',
+  authDomain: 'demo-baby-diary.firebaseapp.com',
+  projectId: FIREBASE_EMULATOR_PROJECT_ID,
+  storageBucket: 'demo-baby-diary.appspot.com',
+  messagingSenderId: '123456789',
+  appId: '1:123456789:web:sync-e2e',
+})
 
 type Environment = Readonly<Record<string, string | undefined>>
 
@@ -42,7 +50,9 @@ export function readFirebaseEmulatorBridge(env: Environment): FirebaseEmulatorBr
   if (!env.BABYDIARY_TEST_USERDATA) return null
 
   const requested = env.BABYDIARY_FIREBASE_EMULATOR
-  if (requested == null || requested === '') return null
+  if (requested == null || requested === '') {
+    return invalid('Isolated test userData requires the Firebase emulator')
+  }
   if (requested !== '1') return invalid('BABYDIARY_FIREBASE_EMULATOR must be 1')
 
   if (env.BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID !== FIREBASE_EMULATOR_PROJECT_ID) {
@@ -66,6 +76,7 @@ export function readFirebaseEmulatorBridge(env: Environment): FirebaseEmulatorBr
   return {
     enabled: true,
     projectId: FIREBASE_EMULATOR_PROJECT_ID,
+    firebaseConfig: { ...FIREBASE_EMULATOR_CONFIG },
     authHost: auth.host,
     authPort: FIREBASE_AUTH_EMULATOR_PORT,
     firestoreHost: firestore.host,

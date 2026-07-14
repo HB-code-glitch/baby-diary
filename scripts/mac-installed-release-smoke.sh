@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-dmg_path="${1:?usage: mac-installed-release-smoke.sh <universal-dmg> <arm64|x86_64>}"
-expected_host_arch="${2:?usage: mac-installed-release-smoke.sh <universal-dmg> <arm64|x86_64>}"
+dmg_path="${1:?usage: mac-installed-release-smoke.sh <universal-dmg> <arm64|x86_64> [AllowUnsigned|RequireTrusted]}"
+expected_host_arch="${2:?usage: mac-installed-release-smoke.sh <universal-dmg> <arm64|x86_64> [AllowUnsigned|RequireTrusted]}"
+signature_policy="${3:-RequireTrusted}"
+
+case "$signature_policy" in
+  AllowUnsigned|RequireTrusted) ;;
+  *)
+    echo "Unsupported Mac signature policy: $signature_policy" >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -f "$dmg_path" ]]; then
   echo "Universal DMG not found: $dmg_path" >&2
@@ -65,9 +74,17 @@ if [[ "$archs" != "arm64 x86_64" ]]; then
   exit 1
 fi
 
-codesign --verify --deep --strict --verbose=4 "$installed_app"
-spctl --assess --type execute --verbose=4 "$installed_app"
-xcrun stapler validate "$installed_app"
+if [[ "$signature_policy" == "RequireTrusted" ]]; then
+  codesign --verify --deep --strict --verbose=4 "$installed_app"
+  spctl --assess --type execute --verbose=4 "$installed_app"
+  xcrun stapler validate "$installed_app"
+else
+  xattr -dr com.apple.quarantine "$installed_app"
+  if xattr -p com.apple.quarantine "$installed_app" >/dev/null 2>&1; then
+    echo "Unsigned smoke could not remove quarantine metadata" >&2
+    exit 1
+  fi
+fi
 
 if [[ "$expected_host_arch" == "arm64" ]]; then
   expected_electron_arch="arm64"

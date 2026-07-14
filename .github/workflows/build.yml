@@ -65,6 +65,102 @@ jobs:
             release/*.zip
           if-no-files-found: error
 
+  personal-smoke-mac-arm64:
+    needs: [security-check, build-mac]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: baby-diary-mac
+          path: release
+      - name: Install and exercise the exact personal unsigned universal DMG on Apple Silicon
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          dmg="release/Baby Diary-${version}-universal.dmg"
+          evidence_dir=".artifacts/personal-unsigned-mac-smoke"
+          mkdir -p "${evidence_dir}"
+          {
+            printf 'schema_version=1\n'
+            printf 'source_sha=%s\n' "${GITHUB_SHA}"
+            printf 'workflow_run_id=%s\n' "${GITHUB_RUN_ID}"
+            printf 'workflow_run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}"
+            printf 'host_arch=%s\n' "$(uname -m)"
+            shasum -a 256 "$dmg"
+          } > "${evidence_dir}/evidence.txt"
+          bash scripts/mac-installed-release-smoke.sh "$dmg" arm64 AllowUnsigned
+          printf 'smoke=pass\n' >> "${evidence_dir}/evidence.txt"
+        timeout-minutes: 20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: personal-unsigned-mac-arm64-evidence
+          path: |
+            .artifacts/personal-unsigned-mac-smoke/evidence.txt
+            screenshots/
+            e2e-result.json
+          if-no-files-found: error
+          include-hidden-files: true
+
+  personal-smoke-mac-intel:
+    needs: [security-check, build-mac]
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: baby-diary-mac
+          path: release
+      - name: Install and exercise the exact personal unsigned universal DMG on Intel
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          dmg="release/Baby Diary-${version}-universal.dmg"
+          evidence_dir=".artifacts/personal-unsigned-mac-smoke"
+          mkdir -p "${evidence_dir}"
+          {
+            printf 'schema_version=1\n'
+            printf 'source_sha=%s\n' "${GITHUB_SHA}"
+            printf 'workflow_run_id=%s\n' "${GITHUB_RUN_ID}"
+            printf 'workflow_run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}"
+            printf 'host_arch=%s\n' "$(uname -m)"
+            shasum -a 256 "$dmg"
+          } > "${evidence_dir}/evidence.txt"
+          bash scripts/mac-installed-release-smoke.sh "$dmg" x86_64 AllowUnsigned
+          printf 'smoke=pass\n' >> "${evidence_dir}/evidence.txt"
+        timeout-minutes: 20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: personal-unsigned-mac-intel-evidence
+          path: |
+            .artifacts/personal-unsigned-mac-smoke/evidence.txt
+            screenshots/
+            e2e-result.json
+          if-no-files-found: error
+          include-hidden-files: true
+
   e2e-mac:
     needs: security-check
     runs-on: macos-latest
@@ -133,6 +229,27 @@ jobs:
           -SignaturePolicy AllowUnsigned
           -EvidenceDirectory ".artifacts/installed-release-smoke"
         timeout-minutes: 20
+      - id: personal-unsigned-windows-candidate
+        name: Bind the verified unsigned Windows Setup to the package version
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $expected = Join-Path 'release' "Baby Diary Setup $version.exe"
+          $candidates = @(Get-ChildItem -LiteralPath release -Filter 'Baby Diary Setup *.exe' -File)
+          if ($candidates.Count -ne 1) {
+            throw "Expected exactly one unsigned Windows Setup, found $($candidates.Count)"
+          }
+          $resolvedExpected = (Resolve-Path -LiteralPath $expected).Path
+          if (-not [string]::Equals($candidates[0].FullName, $resolvedExpected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsigned Windows Setup does not match package version $version"
+          }
+          "setup_path=$expected" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: actions/upload-artifact@v4
+        with:
+          name: personal-unsigned-windows
+          path: ${{ steps.personal-unsigned-windows-candidate.outputs.setup_path }}
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:

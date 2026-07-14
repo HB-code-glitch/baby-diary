@@ -1,8 +1,11 @@
 import { app, BrowserWindow, ipcMain, dialog, session, shell } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
+import { tmpdir } from 'os'
 import { pathToFileURL } from 'url'
 import { EventLog } from './store/eventLog'
+import { EventFamilyOwnership } from './store/eventFamilyOwnership'
+import { FamilyScopedEventLog } from './store/familyScopedEventLog'
 import { SettingsStore } from './store/settings'
 import { BackupManager } from './store/backup'
 import { SettingsRecoveryError } from './store/backupSnapshot'
@@ -26,6 +29,7 @@ import {
   detectPreexistingFirebaseProfile,
 } from './store/firebasePersistenceRegistry'
 import { registerFirebasePersistenceIPC } from './firebasePersistenceIPC'
+import { resolveIsolatedTestUserData } from './testUserDataIsolation'
 
 const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged
 const rendererEntryPath = path.join(__dirname, '../../dist/index.html')
@@ -34,12 +38,17 @@ const rendererEntryUrl = isDev
   : pathToFileURL(rendererEntryPath).toString()
 
 // E2E 전용: 환경변수가 설정된 경우 임시 디렉토리를 userData로 사용한다 (실 데이터 오염 방지).
+const interactiveUserDataPath = path.join(app.getPath('appData'), 'baby-diary')
+const isolatedTestUserDataPath = resolveIsolatedTestUserData(process.env.BABYDIARY_TEST_USERDATA, {
+  interactiveProfileRoot: interactiveUserDataPath,
+  tempRoot: tmpdir(),
+})
 if (process.env.BABYDIARY_TEST_USERDATA) {
-  app.setPath('userData', process.env.BABYDIARY_TEST_USERDATA)
+  app.setPath('userData', isolatedTestUserDataPath!)
 } else {
   // 데이터 경로 영구 고정: 앱 이름/버전이 바뀌어도 기존 기록(%APPDATA%\baby-diary)을 계속 사용한다.
   // 이 줄을 바꾸면 부모가 쌓아온 기록 폴더와 연결이 끊긴다 — 절대 수정 금지.
-  app.setPath('userData', path.join(app.getPath('appData'), 'baby-diary'))
+  app.setPath('userData', interactiveUserDataPath)
 }
 
 // Test-only Firebase endpoints are parsed in the main process. The sandboxed
@@ -70,6 +79,7 @@ if (!process.env.BABYDIARY_TEST_USERDATA) {
 
 let mainWindow: BrowserWindow | null = null
 let eventLog: EventLog
+let familyScopedEventLog: FamilyScopedEventLog
 let settingsStore: SettingsStore
 let backupManager: BackupManager
 let firebasePersistenceRegistry: FirebasePersistenceRegistry
@@ -268,8 +278,10 @@ function createWindow(): void {
       nodeIntegration: false,
     },
     title: 'Baby Diary',
+    autoHideMenuBar: process.platform === 'win32',
     show: false,
   })
+  if (process.platform === 'win32') mainWindow.removeMenu()
   syncE2EGuard?.attachWindowDiagnostics(mainWindow, rendererResourceRoot)
   hardenBrowserWindow(mainWindow, rendererEntryUrl)
 
@@ -305,21 +317,39 @@ function setupIPC(): void {
   // P20: Use cached getAll() instead of loadAll() on every IPC call.
   // loadAll() clears the index and re-scans disk — O(N) I/O per reconcile.
   // getAll() returns the in-memory index (O(1)) which is always up-to-date after append().
-  ipcMain.handle('events:list', async () => {
-    return eventLog.getAll()
+  ipcMain.handle('events:list', async (_, expectedFamilyId?: string) => {
+    const currentFamilyId = settingsStore.get().familyId
+    if (expectedFamilyId !== undefined && expectedFamilyId !== currentFamilyId) {
+      throw new Error('EVENT_FAMILY_MISMATCH')
+    }
+    return familyScopedEventLog.listVisible(currentFamilyId)
   })
 
-  ipcMain.handle('events:listMutations', async () => {
-    return eventLog.getAllMutations()
+  ipcMain.handle('events:listMutations', async (_, expectedFamilyId?: string) => {
+    const currentFamilyId = settingsStore.get().familyId
+    if (expectedFamilyId !== undefined && expectedFamilyId !== currentFamilyId) {
+      throw new Error('EVENT_FAMILY_MISMATCH')
+    }
+    return familyScopedEventLog.listMutations(currentFamilyId)
   })
 
-  ipcMain.handle('events:append', async (_, event: DiaryEvent) => {
-    const result = eventLog.append(event)
+  ipcMain.handle('events:append', async (_, event: DiaryEvent, expectedFamilyId?: string) => {
+    const currentFamilyId = settingsStore.get().familyId
+    const result = familyScopedEventLog.append(event, currentFamilyId, expectedFamilyId)
     // Broadcast to renderer only on a genuinely new write (not duplicate/error)
     if (result === 'ok' && mainWindow) {
-      mainWindow.webContents.send('event:appended', event)
+      mainWindow.webContents.send('event:appended', event, currentFamilyId)
     }
     // Return tri-state string; preload passes it through to renderer
+    return result
+  })
+
+  ipcMain.handle('events:confirmFamily', async (_, familyId: string, allowLegacyAdoption = true) => {
+    const currentFamilyId = settingsStore.get().familyId
+    const result = familyScopedEventLog.confirmFamily(familyId, currentFamilyId, allowLegacyAdoption)
+    if (result.status === 'ok' && result.adoptedCount > 0 && mainWindow) {
+      mainWindow.webContents.send('events:scopeChanged')
+    }
     return result
   })
 
@@ -438,7 +468,8 @@ function setupIPC(): void {
     if (canceled || !filePaths[0]) return
 
     const destDir = filePaths[0]
-    const events = eventLog.loadAll().filter(e => !e.deleted)
+    const currentFamilyId = settingsStore.get().familyId
+    const events = familyScopedEventLog.listVisible(currentFamilyId).filter(e => !e.deleted)
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
 
     if (format === 'json') {
@@ -507,7 +538,8 @@ function setupIPC(): void {
       dataDir,
       backupDir: backupManager.getBackupDir(),
       documentsBackupDir: backupManager.getDocumentsBackupDir(),
-      eventCount: eventLog.getCount(),
+      eventCount: familyScopedEventLog.listVisible(settingsStore.get().familyId)
+        .filter(event => !event.deleted).length,
       lastBackupTime: backupManager.getLastBackupTime(),
     }
   })
@@ -616,6 +648,10 @@ app.whenReady().then(() => {
   // P20: Explicit startup scan so index is warm before any IPC arrives.
   // After this, getAll() is used for 'events:list' (no re-scan per call).
   eventLog.loadAll()
+  familyScopedEventLog = new FamilyScopedEventLog(
+    eventLog,
+    new EventFamilyOwnership({ dataDir: path.join(userDataPath, 'data') }),
+  )
 
   setupIPC()
   setupUpdater()

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import type { DiaryEvent, EventType } from '../shared/types'
+import * as progressiveDisclosure from '../src/lib/progressiveDisclosure'
 import {
   getStatsVisibility,
   getSyncDisclosurePresentation,
@@ -9,7 +11,82 @@ import {
   shouldOpenSyncDisclosure,
 } from '../src/lib/progressiveDisclosure'
 
+function summaryEvent(id: string, type: EventType, at: Date, deleted = false): DiaryEvent {
+  const iso = at.toISOString()
+  const data = type === 'formula'
+    ? { ml: 120 }
+    : type === 'temp'
+      ? { celsius: 37.2 }
+      : type === 'breast'
+        ? { side: 'L' as const }
+        : {}
+  return {
+    id,
+    type,
+    at: iso,
+    data,
+    author: { uid: 'test', name: 'Tester', role: 'dad' },
+    createdAt: iso,
+    updatedAt: iso,
+    rev: 1,
+    deleted,
+  } as DiaryEvent
+}
+
 describe('progressive Home disclosure', () => {
+  it('selects only non-deleted records from the current local day and never mutates history', () => {
+    const selectTodaySummaryEvents = (
+      progressiveDisclosure as typeof progressiveDisclosure & {
+        selectTodaySummaryEvents?: (
+          events: readonly DiaryEvent[],
+          options: { now: Date; birthdate?: string },
+        ) => DiaryEvent[]
+      }
+    ).selectTodaySummaryEvents
+
+    expect(selectTodaySummaryEvents).toBeTypeOf('function')
+    if (!selectTodaySummaryEvents) return
+
+    const now = new Date(2026, 6, 15, 12, 0)
+    const history = [
+      summaryEvent('pre-birth', 'formula', new Date(2026, 6, 1, 13, 0)),
+      summaryEvent('yesterday', 'breast', new Date(2026, 6, 14, 23, 59)),
+      summaryEvent('today-formula', 'formula', new Date(2026, 6, 15, 9, 0)),
+      summaryEvent('today-temp', 'temp', new Date(2026, 6, 15, 11, 0)),
+      summaryEvent('deleted-today', 'formula', new Date(2026, 6, 15, 10, 0), true),
+      summaryEvent('future-today', 'formula', new Date(2026, 6, 15, 13, 0)),
+    ]
+    const unchanged = structuredClone(history)
+
+    expect(selectTodaySummaryEvents(history, { now, birthdate: '2026-07-04' }).map(event => event.id))
+      .toEqual(['today-temp', 'today-formula'])
+    expect(history).toEqual(unchanged)
+  })
+
+  it('fails closed when a current-day record predates the configured birthdate', () => {
+    const selectTodaySummaryEvents = (
+      progressiveDisclosure as typeof progressiveDisclosure & {
+        selectTodaySummaryEvents?: (
+          events: readonly DiaryEvent[],
+          options: { now: Date; birthdate?: string },
+        ) => DiaryEvent[]
+      }
+    ).selectTodaySummaryEvents
+
+    expect(selectTodaySummaryEvents).toBeTypeOf('function')
+    if (!selectTodaySummaryEvents) return
+
+    const now = new Date(2026, 6, 15, 12, 0)
+    const impossibleCurrentSummary = [
+      summaryEvent('before-birthdate', 'formula', new Date(2026, 6, 15, 9, 0)),
+    ]
+
+    expect(selectTodaySummaryEvents(impossibleCurrentSummary, {
+      now,
+      birthdate: '2026-07-16',
+    })).toEqual([])
+  })
+
   it('keeps Home disclosure translation keys aligned across both locales', async () => {
     const ko = await import('../src/i18n/ko.json')
     const ja = await import('../src/i18n/ja.json')

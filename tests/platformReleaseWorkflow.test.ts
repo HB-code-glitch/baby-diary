@@ -53,7 +53,14 @@ const BASELINE_MAC_ASSET = { id: '474869787', size: '351533375', sha256: '2793e9
 
 const baselineJob = 'baseline-v038'
 const upgradeJobs = ['upgrade-win', 'upgrade-mac-arm64', 'upgrade-mac-intel']
-const ordinaryCiJobs = ['security-check', 'build-mac', 'e2e-mac', 'e2e-win']
+const ordinaryCiJobs = [
+  'security-check',
+  'build-mac',
+  'e2e-mac',
+  'e2e-win',
+  'personal-smoke-mac-arm64',
+  'personal-smoke-mac-intel',
+]
 const fetchDepthZeroJobs = ['security-check', baselineJob, ...upgradeJobs]
 
 const signedJobs = [
@@ -453,6 +460,7 @@ describe('signed platform release workflow', () => {
       'baseline-v038',
       'build-mac', 'e2e-mac', 'e2e-win',
       'manifest-mac', 'manifest-win', 'package-mac', 'package-win',
+      'personal-smoke-mac-arm64', 'personal-smoke-mac-intel',
       'publish-release', 'release-context', 'release-mac', 'release-preflight', 'release-win',
       'security-check',
       'smoke-mac-arm64', 'smoke-mac-intel', 'smoke-win',

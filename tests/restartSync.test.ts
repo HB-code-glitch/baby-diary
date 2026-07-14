@@ -52,6 +52,7 @@ vi.mock('../src/sync/firebase', () => ({
 
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
+    getFirebaseEmulator: vi.fn(async () => null),
     listEvents: vi.fn(async () => []),
     listEventMutations: vi.fn(async () => []),
     appendEvent: vi.fn(async () => 'ok'),

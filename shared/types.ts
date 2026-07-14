@@ -58,6 +58,12 @@ export interface DiaryEvent {
   migration?: DiaryEventMigrationProvenance
 }
 
+export interface EventFamilyConfirmationResult {
+  status: 'ok' | 'different-family' | 'uncertain' | 'error'
+  adoptionFamilyId?: string
+  adoptedCount: number
+}
+
 export interface AppSettings {
   baby: {
     name: string
@@ -231,6 +237,8 @@ export type FirebaseEmulatorBridge =
   | {
       enabled: true
       projectId: 'demo-baby-diary'
+      /** Main-owned fixed config for the local demo project; never derived from renderer settings. */
+      firebaseConfig: NonNullable<AppSettings['firebase']>
       authHost: string
       authPort: 9099
       firestoreHost: string
