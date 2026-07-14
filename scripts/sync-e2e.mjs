@@ -951,22 +951,48 @@ async function launchDevice({
   }
 }
 
+export function classifyFirstLaunchState({ persistedLanguage, langChosen, tutorialState }) {
+  let tutorialComplete = false
+  try {
+    const parsed = JSON.parse(tutorialState ?? 'null')
+    tutorialComplete = parsed?.version === 2
+      && (parsed.status === 'completed' || parsed.status === 'skipped')
+      && typeof parsed.updatedAt === 'string'
+  } catch {
+    tutorialComplete = false
+  }
+  if (tutorialComplete) return 'complete'
+  return persistedLanguage === 'ko' || persistedLanguage === 'ja' || langChosen
+    ? 'tour'
+    : 'picker'
+}
+
+async function readFirstLaunchState(page) {
+  return page.evaluate(async () => {
+    const settings = await window.babyDiary.getSettings()
+    return {
+      persistedLanguage: settings?.language ?? null,
+      langChosen: localStorage.getItem('babydiary.langChosen') === '1',
+      tutorialState: localStorage.getItem('babydiary.tutorial.v2'),
+    }
+  })
+}
+
 async function dismissFirstLaunch(device) {
-  const { page } = device
-  const onboardingComplete = await page.evaluate(() => (
-    localStorage.getItem('babydiary.langChosen') === '1'
-    && localStorage.getItem('babydiary.tutorial.v2') !== null
-  ))
-  if (onboardingComplete) return
+  const { page, name } = device
+  const requiredSurface = classifyFirstLaunchState(await readFirstLaunchState(page))
+  if (requiredSurface === 'complete') return
 
   // App.tsx makes its first-launch decision asynchronously. Wait for the
-  // decision itself instead of assuming a fixed renderer speed in CI.
-  await page.locator('.lang-picker-overlay, .tour-card').first().waitFor({
+  // exact state-derived surface instead of assuming a fixed renderer speed.
+  const firstLaunchSurface = requiredSurface === 'picker'
+    ? page.locator('.lang-picker-overlay')
+    : page.locator('.tour-card')
+  await firstLaunchSurface.waitFor({
     state: 'visible',
     timeout: E2E_TIMEOUT_MS,
   })
-  const picker = page.locator('.lang-picker-overlay')
-  if (await picker.isVisible().catch(() => false)) {
+  if (requiredSurface === 'picker') {
     await page.locator('.lang-picker-btn[lang="ko"]').click()
     await page.locator('.tour-card').waitFor({ state: 'visible', timeout: E2E_TIMEOUT_MS })
   }
@@ -976,6 +1002,10 @@ async function dismissFirstLaunch(device) {
     await page.locator('.tour-skip-button').first().click()
     await tour.waitFor({ state: 'detached', timeout: E2E_TIMEOUT_MS })
   }
+  invariant(
+    classifyFirstLaunchState(await readFirstLaunchState(page)) === 'complete',
+    `${name}: first-launch tutorial completion was not persisted`,
+  )
 }
 
 async function openSettings(device) {

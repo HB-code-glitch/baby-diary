@@ -26,6 +26,7 @@ import {
   buildExpectedEditedEvent,
   buildSameRevisionConflicts,
   buildSeedSettings,
+  classifyFirstLaunchState,
   cleanupPartialDevice,
   closeDevice,
   collectPersistentGuardDiagnostics,
@@ -416,6 +417,35 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(a.profile.name).toBe('Device A')
     expect(b.profile.name).toBe('Device B')
     expect(a.language).toBe('ko')
+  })
+
+  it('treats persisted tutorial completion as authoritative without a legacy language marker', () => {
+    const completedTutorial = JSON.stringify({
+      version: 2,
+      status: 'skipped',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    })
+
+    expect(classifyFirstLaunchState({
+      persistedLanguage: 'ko',
+      langChosen: false,
+      tutorialState: completedTutorial,
+    })).toBe('complete')
+    expect(classifyFirstLaunchState({
+      persistedLanguage: 'ko',
+      langChosen: false,
+      tutorialState: null,
+    })).toBe('tour')
+    expect(classifyFirstLaunchState({
+      persistedLanguage: null,
+      langChosen: false,
+      tutorialState: null,
+    })).toBe('picker')
+    expect(classifyFirstLaunchState({
+      persistedLanguage: 'ko',
+      langChosen: false,
+      tutorialState: '{malformed',
+    })).toBe('tour')
   })
 
   it('normalizes convergence by id/rev/deleted with tombstones winning ties', () => {
