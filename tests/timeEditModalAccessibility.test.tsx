@@ -154,15 +154,15 @@ describe('TimeEditModal accessibility and async safety', () => {
     const appShell = container.querySelector<HTMLElement>('[data-test-app-shell]')!
     const backdrop = document.body.querySelector<HTMLElement>('[data-time-edit-modal]')!
 
-    expect(backdrop.closest('[data-modal-portal="time"]')?.parentElement).toBe(document.body)
-    expect(appShell.closest('[inert]')).not.toBeNull()
-    expect(appShell.closest('[aria-hidden="true"]')).not.toBeNull()
+    expect.soft(backdrop.parentElement).toBe(document.body)
+    expect.soft(appShell.hasAttribute('inert')).toBe(true)
+    expect.soft(appShell.getAttribute('aria-hidden')).toBe('true')
 
     await act(async () => keyDown(backdrop.querySelector<HTMLElement>('[role="dialog"]')!, 'Escape'))
 
     expect(document.body.querySelector('[data-time-edit-modal]')).toBeNull()
-    expect(appShell.closest('[inert]')).toBeNull()
-    expect(appShell.closest('[aria-hidden="true"]')).toBeNull()
+    expect(appShell.hasAttribute('inert')).toBe(false)
+    expect(appShell.hasAttribute('aria-hidden')).toBe(false)
     expect(document.activeElement).toBe(trigger)
   })
 

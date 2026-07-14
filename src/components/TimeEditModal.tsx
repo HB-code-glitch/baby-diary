@@ -32,6 +32,8 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     if (typeof document === 'undefined') return null
     const root = document.createElement('div')
     root.dataset.modalPortal = 'time'
+    root.setAttribute('data-time-edit-modal', '')
+    root.className = 'time-edit-backdrop'
     return root
   })
   const [value, setValue] = useState(
@@ -44,6 +46,10 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     if (!portalRoot || !dialog) return
     mountedRef.current = true
     document.body.appendChild(portalRoot)
+    const handleBackdropMouseDown = (event: MouseEvent) => {
+      if (event.target === portalRoot && !submittingRef.current) onCloseRef.current()
+    }
+    portalRoot.addEventListener('mousedown', handleBackdropMouseDown)
     const releaseIsolation = acquireModalIsolation(portalRoot)
     const unregisterBoundary = registerModalBoundary({
       portalRoot,
@@ -55,6 +61,7 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     inputRef.current?.focus({ preventScroll: true })
     return () => {
       mountedRef.current = false
+      portalRoot.removeEventListener('mousedown', handleBackdropMouseDown)
       releaseIsolation()
       unregisterBoundary()
       portalRoot.remove()
@@ -106,79 +113,71 @@ export function TimeEditModal({ currentAt, onConfirm, onClose }: TimeEditModalPr
     }
   }
 
-  const overlay = (
-    <div
-      data-time-edit-modal
-      className="time-edit-backdrop"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) close()
+  const dialog = (
+    <form
+      ref={dialogRef}
+      className="popover time-edit-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      aria-busy={submitting || undefined}
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+      onSubmit={event => {
+        event.preventDefault()
+        void handleConfirm()
       }}
     >
-      <form
-        ref={dialogRef}
-        className="popover time-edit-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descriptionId}
-        aria-busy={submitting || undefined}
-        tabIndex={-1}
-        onKeyDown={handleKeyDown}
-        onSubmit={event => {
-          event.preventDefault()
-          void handleConfirm()
-        }}
-      >
-        <div className="time-edit-header">
-          <h2 id={titleId} className="time-edit-title">{t('timeEdit.title')}</h2>
-          <button
-            data-time-edit-action="close"
-            type="button"
-            className="time-edit-control time-edit-close"
-            onClick={close}
-            disabled={submitting}
-            aria-label={t('timeEdit.close')}
-          >
-            <IconX size={16} color="currentColor" />
-          </button>
-        </div>
-
-        <p id={descriptionId} className="time-edit-description">{t('timeEdit.description')}</p>
-        <label className="label" htmlFor={inputId}>{t('timeEdit.label')}</label>
-        <input
-          ref={inputRef}
-          id={inputId}
-          name="recordedAt"
-          autoComplete="off"
-          data-time-edit-input
-          type="datetime-local"
-          className="input-field time-edit-input"
-          value={value}
-          onChange={event => setValue(event.target.value)}
+      <div className="time-edit-header">
+        <h2 id={titleId} className="time-edit-title">{t('timeEdit.title')}</h2>
+        <button
+          data-time-edit-action="close"
+          type="button"
+          className="time-edit-control time-edit-close"
+          onClick={close}
           disabled={submitting}
-        />
+          aria-label={t('timeEdit.close')}
+        >
+          <IconX size={16} color="currentColor" />
+        </button>
+      </div>
 
-        <div className="time-edit-actions">
-          <button
-            type="button"
-            className="btn-secondary time-edit-control"
-            onClick={close}
-            disabled={submitting}
-          >
-            {t('timeEdit.cancel')}
-          </button>
-          <button
-            data-time-edit-action="confirm"
-            type="submit"
-            className="btn-primary time-edit-control"
-            disabled={submitting || !value}
-          >
-            {submitting ? t('timeEdit.saving') : t('timeEdit.confirm')}
-          </button>
-        </div>
-      </form>
-    </div>
+      <p id={descriptionId} className="time-edit-description">{t('timeEdit.description')}</p>
+      <label className="label" htmlFor={inputId}>{t('timeEdit.label')}</label>
+      <input
+        ref={inputRef}
+        id={inputId}
+        name="recordedAt"
+        autoComplete="off"
+        data-time-edit-input
+        type="datetime-local"
+        className="input-field time-edit-input"
+        value={value}
+        onChange={event => setValue(event.target.value)}
+        disabled={submitting}
+      />
+
+      <div className="time-edit-actions">
+        <button
+          type="button"
+          className="btn-secondary time-edit-control"
+          onClick={close}
+          disabled={submitting}
+        >
+          {t('timeEdit.cancel')}
+        </button>
+        <button
+          data-time-edit-action="confirm"
+          type="submit"
+          className="btn-primary time-edit-control"
+          disabled={submitting || !value}
+        >
+          {submitting ? t('timeEdit.saving') : t('timeEdit.confirm')}
+        </button>
+      </div>
+    </form>
   )
 
-  return portalRoot ? createPortal(overlay, portalRoot) : overlay
+  return portalRoot ? createPortal(dialog, portalRoot) : dialog
 }

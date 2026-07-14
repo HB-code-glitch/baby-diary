@@ -64,17 +64,22 @@ function acquireElementInert(element: HTMLElement): () => void {
 
 /**
  * Isolate a body-level modal portal from the whole application surface.
- * Every body sibling is leased independently so nested modal types cannot
- * restore #root, toasts, update banners, or an older portal too early.
+ * Every body sibling and semantic app shell is leased independently so nested
+ * modal types cannot restore #root, app content, toasts, update banners, or an
+ * older portal too early.
  */
 export function acquireModalIsolation(portalRoot: HTMLElement): () => void {
   const ownerDocument = portalRoot.ownerDocument
   if (!ownerDocument.body.contains(portalRoot)) return () => undefined
-  const releases = Array.from(ownerDocument.body.children)
+  const bodySiblings = Array.from(ownerDocument.body.children)
     .filter((element): element is HTMLElement => (
       element instanceof ownerDocument.defaultView!.HTMLElement
       && element !== portalRoot
     ))
+  const semanticAppShells = bodySiblings.flatMap(element => (
+    Array.from(element.querySelectorAll<HTMLElement>('.app-shell'))
+  ))
+  const releases = Array.from(new Set([...bodySiblings, ...semanticAppShells]))
     .map(acquireElementInert)
 
   let released = false

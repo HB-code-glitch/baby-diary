@@ -229,6 +229,66 @@ describe('baby-info delta sync over the main journal', () => {
     expect(JSON.stringify(ipcMock.commitBabyInfo.mock.calls[0][0]).length).toBeLessThan(5_000)
   })
 
+  it('preserves every non-managed setting while atomically committing the baby-info pair', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const next: AppSettings = {
+      ...store.get(),
+      baby: {
+        ...store.get().baby,
+        name: 'After',
+        birthdate: '2026-03-03',
+        gender: 'girl',
+      },
+      profile: {
+        ...store.get().profile,
+        name: 'Updated parent',
+        role: 'dad',
+      },
+      language: 'ja',
+      theme: 'dark',
+    }
+
+    const result = await sync.persistSettingsWithBabyInfoMutation(next)
+
+    expect(result.settings).toMatchObject({
+      baby: { name: 'After', birthdate: '2026-03-03', gender: 'girl' },
+      profile: { uid: 'user-1', name: 'Updated parent', role: 'dad' },
+      language: 'ja',
+      theme: 'dark',
+    })
+    expect(store.get()).toMatchObject(result.settings)
+    expect(ipcMock.saveSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not attempt the bounded pair commit when the non-managed settings save fails', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    ipcMock.saveSettings.mockRejectedValueOnce(new Error('settings disk full'))
+
+    await expect(sync.persistSettingsWithBabyInfoMutation({
+      ...store.get(),
+      baby: { ...store.get().baby, name: 'Not committed' },
+      theme: 'dark',
+    })).rejects.toThrow('settings disk full')
+
+    expect(ipcMock.commitBabyInfo).not.toHaveBeenCalled()
+    expect(store.get().baby.name).toBe('')
+  })
+
+  it('fails closed when the authoritative family changes before the pair commit', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    ipcMock.saveSettings.mockResolvedValueOnce({
+      ...store.get(),
+      familyId: 'family-B',
+    })
+
+    await expect(sync.persistSettingsWithBabyInfoMutation({
+      ...store.get(),
+      baby: { ...store.get().baby, name: 'Wrong family' },
+    })).rejects.toThrow('baby info family changed')
+
+    expect(ipcMock.commitBabyInfo).not.toHaveBeenCalled()
+  })
+
   it('accepts exactly { mutation } and rejects bare or extra cloud envelope keys', async () => {
     const sync = await import('../src/sync/babyInfoSync')
     const item = mutation(1)
