@@ -506,6 +506,7 @@ export class SettingsStore {
       if (operation.familyId !== current.familyId) {
         throw new BabyInfoSettingsCommitError('FAMILY_MISMATCH', 'baby info family mismatch')
       }
+      const ordinarySettings = applyManagedSettingsSave(current, operation.settings)
       const changed = operation.babyName !== current.baby.name
         || operation.babyBirthdate !== current.baby.birthdate
       let mutation: BabyInfoMutation | undefined
@@ -531,7 +532,7 @@ export class SettingsStore {
           // mutation (validBabyMutationShape's `hasAll([...,'updatedAtMs',...])`);
           // without it, cloud writes for this mutation are denied outright.
           updatedAtMs: nowMs,
-          authorId: current.profile.uid || 'local',
+          authorId: ordinarySettings.profile.uid || 'local',
           origin: 'user',
         }
         canonicalBabyInfoMutationJson(mutation)
@@ -545,19 +546,21 @@ export class SettingsStore {
         activePendingCount = summary.pendingCount
       }
 
-      let settings = current
+      let settings = ordinarySettings
       if (changed) {
         settings = {
-          ...current,
+          ...ordinarySettings,
           baby: {
-            ...current.baby,
+            ...ordinarySettings.baby,
             name: operation.babyName,
             birthdate: operation.babyBirthdate,
           },
           babyInfoSync: undefined,
           babyInfoJournal: this.projectionMetadata(operation.familyId, winner),
-          babyInfoRevision: incrementBabyInfoRevision(current),
+          babyInfoRevision: incrementBabyInfoRevision(ordinarySettings),
         }
+      }
+      if (changed || !sameValue(settings, current)) {
         try {
           this.write(settings)
         } catch (error) {

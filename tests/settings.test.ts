@@ -234,7 +234,7 @@ describe('SettingsStore', () => {
 
     function commitUserEdit(
       target: SettingsStore,
-      _next: AppSettings,
+      next: AppSettings,
       name: string,
       birthdate: string,
     ): BabyInfoSettingsCommitResult {
@@ -243,6 +243,11 @@ describe('SettingsStore', () => {
         familyId: target.get().familyId,
         babyName: name,
         babyBirthdate: birthdate,
+        settings: {
+          ...next,
+          familyId: target.get().familyId,
+          baby: { ...next.baby, name, birthdate },
+        },
       })
     }
 

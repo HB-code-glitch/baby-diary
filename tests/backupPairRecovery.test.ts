@@ -1787,6 +1787,14 @@ describe('verified settings/journal pair recovery', () => {
       familyId: 'family-A',
       babyName: 'Valid lineage descendant',
       babyBirthdate: '2026-05-05',
+      settings: {
+        ...opened.get(),
+        baby: {
+          ...opened.get().baby,
+          name: 'Valid lineage descendant',
+          birthdate: '2026-05-05',
+        },
+      },
     })
     const liveSettings = fs.readFileSync(path.join(tmpDir, 'settings.json'))
     const liveJournal = fs.readFileSync(path.join(tmpDir, BABY_INFO_JOURNAL_FILE))

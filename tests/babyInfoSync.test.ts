@@ -212,7 +212,7 @@ describe('baby-info delta sync over the main journal', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('persists an edit through a bounded delta instead of round-tripping AppSettings history', async () => {
+  it('persists one validated settings snapshot plus a bounded edit without round-tripping history', async () => {
     const sync = await import('../src/sync/babyInfoSync')
     const next = { ...store.get(), baby: { ...store.get().baby, name: 'After', birthdate: '2026-03-03' } }
 
@@ -223,6 +223,7 @@ describe('baby-info delta sync over the main journal', () => {
       familyId: 'family-A',
       babyName: 'After',
       babyBirthdate: '2026-03-03',
+      settings: next,
     })
     expect(result.settings.babyInfoSync).toBeUndefined()
     expect(result.settings.baby.name).toBe('After')
@@ -257,12 +258,13 @@ describe('baby-info delta sync over the main journal', () => {
       theme: 'dark',
     })
     expect(store.get()).toMatchObject(result.settings)
-    expect(ipcMock.saveSettings).toHaveBeenCalledTimes(1)
+    expect(ipcMock.saveSettings).not.toHaveBeenCalled()
   })
 
-  it('does not attempt the bounded pair commit when the non-managed settings save fails', async () => {
+  it('leaves every setting unchanged when the atomic user-edit commit fails', async () => {
     const sync = await import('../src/sync/babyInfoSync')
-    ipcMock.saveSettings.mockRejectedValueOnce(new Error('settings disk full'))
+    const before = store.get()
+    ipcMock.commitBabyInfo.mockRejectedValueOnce(new Error('settings disk full'))
 
     await expect(sync.persistSettingsWithBabyInfoMutation({
       ...store.get(),
@@ -270,23 +272,25 @@ describe('baby-info delta sync over the main journal', () => {
       theme: 'dark',
     })).rejects.toThrow('settings disk full')
 
-    expect(ipcMock.commitBabyInfo).not.toHaveBeenCalled()
-    expect(store.get().baby.name).toBe('')
+    expect(ipcMock.saveSettings).not.toHaveBeenCalled()
+    expect(store.get()).toEqual(before)
   })
 
   it('fails closed when the authoritative family changes before the pair commit', async () => {
     const sync = await import('../src/sync/babyInfoSync')
-    ipcMock.saveSettings.mockResolvedValueOnce({
-      ...store.get(),
-      familyId: 'family-B',
+    ipcMock.commitBabyInfo.mockImplementationOnce(async operation => {
+      store.commitBabyInfo({ kind: 'family-transition', familyId: 'family-B', mode: 'join' })
+      return clone(store.commitBabyInfo(operation))
     })
 
     await expect(sync.persistSettingsWithBabyInfoMutation({
       ...store.get(),
       baby: { ...store.get().baby, name: 'Wrong family' },
-    })).rejects.toThrow('baby info family changed')
+    })).rejects.toThrow('baby info family mismatch')
 
-    expect(ipcMock.commitBabyInfo).not.toHaveBeenCalled()
+    expect(ipcMock.saveSettings).not.toHaveBeenCalled()
+    expect(store.get().familyId).toBe('family-B')
+    expect(store.get().baby.name).toBe('')
   })
 
   it('accepts exactly { mutation } and rejects bare or extra cloud envelope keys', async () => {

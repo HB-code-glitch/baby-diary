@@ -25,11 +25,16 @@ function makeSettings(overrides?: Partial<AppSettings>): AppSettings {
 }
 
 function commitPair(store: SettingsStore, name: string, birthdate: string): void {
+  const current = store.get()
   store.commitBabyInfo({
     kind: 'user-edit',
-    familyId: store.get().familyId,
+    familyId: current.familyId,
     babyName: name,
     babyBirthdate: birthdate,
+    settings: {
+      ...current,
+      baby: { ...current.baby, name, birthdate },
+    },
   })
 }
 

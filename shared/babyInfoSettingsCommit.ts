@@ -253,7 +253,7 @@ export function parseBabyInfoSettingsCommitOperation(
   if (!isRecord(value) || typeof value.kind !== 'string') invalid('baby info commit shape is invalid')
 
   if (value.kind === 'user-edit') {
-    if (!hasOnlyKeys(value, ['kind', 'familyId', 'babyName', 'babyBirthdate'])) {
+    if (!hasOnlyKeys(value, ['kind', 'familyId', 'babyName', 'babyBirthdate', 'settings'])) {
       invalid('user edit shape is invalid')
     }
     if (typeof value.familyId !== 'string'
@@ -263,11 +263,25 @@ export function parseBabyInfoSettingsCommitOperation(
     if (!isText(value.babyName, 2_048) || !isText(value.babyBirthdate, 128)) {
       invalid('user edit pair is invalid')
     }
+    let settings: AppSettings
+    try {
+      settings = parseAppSettings(value.settings)
+    } catch {
+      return invalid('user edit settings are invalid')
+    }
+    if (settings.familyId !== value.familyId) {
+      invalid('user edit settings family mismatch')
+    }
+    if (settings.baby.name !== value.babyName
+      || settings.baby.birthdate !== value.babyBirthdate) {
+      invalid('user edit settings pair mismatch')
+    }
     return {
       kind: 'user-edit',
       familyId: value.familyId,
       babyName: value.babyName,
       babyBirthdate: value.babyBirthdate,
+      settings,
     }
   }
 

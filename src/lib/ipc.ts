@@ -295,6 +295,7 @@ function mockCommit(rawOperation: unknown): BabyInfoSettingsCommitResult {
   }
 
   if (operation.kind === 'user-edit') {
+    current = applyManagedSettingsSave(current, operation.settings)
     const changed = current.baby.name !== operation.babyName
       || current.baby.birthdate !== operation.babyBirthdate
     let mutation: BabyInfoMutation | undefined

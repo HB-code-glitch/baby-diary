@@ -142,6 +142,11 @@ export interface BabyInfoUserEditCommit {
   familyId: string
   babyName: string
   babyBirthdate: string
+  /**
+   * Transient, validated snapshot applied in the same main-process commit.
+   * Journal-owned pair metadata is never accepted from this snapshot.
+   */
+  settings: AppSettings
 }
 
 export interface BabyInfoReconcileCommit {

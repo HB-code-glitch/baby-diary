@@ -161,6 +161,14 @@ describe('SettingsPage baby info durable save', () => {
       familyId: seeded.familyId,
       babyName: seeded.baby.name,
       babyBirthdate: seeded.baby.birthdate,
+      settings: {
+        ...mainStore.get(),
+        baby: {
+          ...mainStore.get().baby,
+          name: seeded.baby.name,
+          birthdate: seeded.baby.birthdate,
+        },
+      },
     })
     mainStore.commitBabyInfo({
       kind: 'reconcile',
@@ -209,12 +217,12 @@ describe('SettingsPage baby info durable save', () => {
     await flush()
 
     expect(commitBabyInfo).toHaveBeenCalledTimes(1)
-    expect(commitBabyInfo).toHaveBeenCalledWith({
+    expect(commitBabyInfo).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'user-edit',
       familyId: 'family-1',
       babyName: '',
       babyBirthdate: '',
-    })
+    }))
     const saved = mainStore.get()
     expect(saved.baby).toMatchObject({ name: '', birthdate: '' })
     expect(saved.babyInfoSync).toBeUndefined()
@@ -415,6 +423,7 @@ describe('SettingsPage baby info durable save', () => {
       familyId: 'family-1',
       babyName: 'durable',
       babyBirthdate: '2026-01-02',
+      settings: { ...stale, baby: { ...stale.baby, name: 'durable', birthdate: '2026-01-02' } },
     })
     const durableSettings = clone(committed.settings)
     await act(async () => {
@@ -442,6 +451,10 @@ describe('SettingsPage baby info durable save', () => {
       familyId: 'family-1',
       babyName: 'acknowledged',
       babyBirthdate: '2026-01-02',
+      settings: {
+        ...mainStore.get(),
+        baby: { ...mainStore.get().baby, name: 'acknowledged', birthdate: '2026-01-02' },
+      },
     })
     const stale = clone(edited.settings)
     const key = getBabyInfoMutationKey(edited.mutation!)

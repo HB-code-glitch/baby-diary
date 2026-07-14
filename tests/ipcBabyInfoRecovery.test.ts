@@ -27,6 +27,12 @@ describe('baby-info recovery IPC contract', () => {
       familyId: 'family-A',
       babyName: 'Blocked',
       babyBirthdate: '2026-07-14',
+      settings: {
+        baby: { name: 'Blocked', birthdate: '2026-07-14' },
+        profile: { uid: 'user-1', name: 'Parent', role: 'mom' },
+        familyId: 'family-A',
+        firebase: null,
+      },
     }).catch(error => error)
 
     expect(failure).toBeInstanceOf(BabyInfoCommitClientError)

@@ -101,27 +101,18 @@ async function persistSettingsOperation(nextSettings: AppSettings): Promise<Baby
   if (current.familyId !== nextSettings.familyId) {
     throw new Error('baby info family changed; refresh settings before saving')
   }
-
-  // The bounded baby-info commit intentionally owns only name/birthdate. Save
-  // every other setting through the main process first; its managed-save
-  // contract preserves the current pair and journal metadata while persisting
-  // gender, profile, language, theme, and the remaining ordinary settings.
-  const saved = await ipc.saveSettings(nextSettings)
-  if (saved.familyId !== nextSettings.familyId) {
-    throw new Error('baby info family changed; refresh settings before saving')
-  }
-
   const result = await ipc.commitBabyInfo({
     kind: 'user-edit',
-    familyId: saved.familyId,
+    familyId: current.familyId,
     babyName: nextSettings.baby.name,
     babyBirthdate: nextSettings.baby.birthdate,
+    settings: nextSettings,
   })
   persistenceObserver?.(result.pendingCount, result.activePendingCount > 0)
   return { settings: result.settings, babyInfo: result.babyInfo }
 }
 
-/** Persists only the bounded baby-info edit delta; history stays main-process-owned. */
+/** Persists a validated settings snapshot plus a bounded baby-info edit; history stays main-process-owned. */
 export function persistSettingsWithBabyInfoMutation(
   nextSettings: AppSettings,
 ): Promise<BabyInfoPersistenceResult> {

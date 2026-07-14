@@ -45,6 +45,26 @@ function commit(
   store: SettingsStore,
   operation: unknown,
 ): BabyInfoSettingsCommitResult {
+  if (operation && typeof operation === 'object') {
+    const candidate = operation as Record<string, unknown>
+    if (candidate.kind === 'user-edit'
+      && candidate.settings === undefined
+      && typeof candidate.babyName === 'string'
+      && typeof candidate.babyBirthdate === 'string') {
+      const current = store.get()
+      operation = {
+        ...candidate,
+        settings: {
+          ...current,
+          baby: {
+            ...current.baby,
+            name: candidate.babyName,
+            birthdate: candidate.babyBirthdate,
+          },
+        },
+      }
+    }
+  }
   return (store as SettingsStore & {
     commitBabyInfo(value: unknown): BabyInfoSettingsCommitResult
   }).commitBabyInfo(operation)
@@ -173,6 +193,125 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     })
     expect(listPending(store).items).toContainEqual(result.mutation)
     expect(JSON.stringify(result).length).toBeLessThan(20_000)
+  })
+
+  it('applies ordinary settings and the baby pair in one authoritative settings write', () => {
+    writeSettings(tmpDir, baseSettings())
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    let settingsWrites = 0
+    const durableFs = Object.create(fs) as DurableFileOps
+    durableFs.renameSync = (oldPath, newPath) => {
+      if (path.resolve(String(newPath)) === path.resolve(settingsPath)) settingsWrites += 1
+      fs.renameSync(oldPath, newPath)
+    }
+    const store = new SettingsStore(tmpDir, { durableFs })
+    settingsWrites = 0
+    const current = store.get()
+    const next: AppSettings = {
+      ...current,
+      baby: { name: 'After', birthdate: '2026-03-03', gender: 'boy' },
+      profile: { ...current.profile, name: 'Updated parent', role: 'dad' },
+      language: 'ja',
+      theme: 'dark',
+    }
+
+    const result = commit(store, {
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'After',
+      babyBirthdate: '2026-03-03',
+      settings: next,
+    })
+
+    expect(settingsWrites).toBe(1)
+    expect(result.settings).toMatchObject({
+      baby: { name: 'After', birthdate: '2026-03-03', gender: 'boy' },
+      profile: { uid: 'user-1', name: 'Updated parent', role: 'dad' },
+      language: 'ja',
+      theme: 'dark',
+    })
+  })
+
+  it('persists ordinary settings when the baby pair is unchanged without appending a mutation', () => {
+    writeSettings(tmpDir, baseSettings())
+    const store = new SettingsStore(tmpDir)
+    const current = store.get()
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const journalBefore = fs.readFileSync(journalPath)
+
+    const result = commit(store, {
+      kind: 'user-edit',
+      familyId: current.familyId,
+      babyName: current.baby.name,
+      babyBirthdate: current.baby.birthdate,
+      settings: {
+        ...current,
+        baby: { ...current.baby, gender: 'boy' },
+        profile: { ...current.profile, name: 'Updated without pair edit', role: 'dad' },
+        language: 'ja',
+        theme: 'dark',
+      },
+    })
+
+    expect(result.mutation).toBeUndefined()
+    expect(result.settings).toMatchObject({
+      baby: { name: current.baby.name, birthdate: current.baby.birthdate, gender: 'boy' },
+      profile: { name: 'Updated without pair edit', role: 'dad' },
+      language: 'ja',
+      theme: 'dark',
+    })
+    expect(fs.readFileSync(journalPath)).toEqual(journalBefore)
+  })
+
+  it('rejects a stale snapshot after a family transition without reverting or writing', () => {
+    writeSettings(tmpDir, baseSettings())
+    const store = new SettingsStore(tmpDir)
+    const stale = store.get()
+    commit(store, { kind: 'family-transition', familyId: 'family-B', mode: 'join' })
+    const afterTransition = store.get()
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const journalBefore = fs.readFileSync(journalPath)
+
+    expect(() => commit(store, {
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'Must not commit',
+      babyBirthdate: '2026-04-04',
+      settings: {
+        ...stale,
+        baby: { ...stale.baby, name: 'Must not commit', birthdate: '2026-04-04' },
+        theme: 'dark',
+      },
+    })).toThrow(expect.objectContaining({ code: 'FAMILY_MISMATCH' }))
+
+    expect(store.get()).toEqual(afterTransition)
+    expect(fs.readFileSync(journalPath)).toEqual(journalBefore)
+  })
+
+  it('rejects self-inconsistent user-edit snapshots before touching settings or journal', () => {
+    writeSettings(tmpDir, baseSettings())
+    const store = new SettingsStore(tmpDir)
+    const before = store.get()
+    const journalPath = path.join(tmpDir, BABY_INFO_JOURNAL_FILE)
+    const journalBefore = fs.readFileSync(journalPath)
+
+    expect(() => commit(store, {
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'After',
+      babyBirthdate: '2026-03-03',
+      settings: { ...before, familyId: 'family-B' },
+    })).toThrow(expect.objectContaining({ code: 'INVALID_OPERATION' }))
+    expect(() => commit(store, {
+      kind: 'user-edit',
+      familyId: 'family-A',
+      babyName: 'After',
+      babyBirthdate: '2026-03-03',
+      settings: before,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_OPERATION' }))
+
+    expect(store.get()).toEqual(before)
+    expect(fs.readFileSync(journalPath)).toEqual(journalBefore)
   })
 
   it('applies page-sized discovered and exact-ack deltas without returning history', () => {
