@@ -116,6 +116,10 @@ describe('Firebase emulator connection', () => {
 
     await expect(initFirebase(demoConfig)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
 
+    expect(firebase.initializeFirestore).toHaveBeenCalledWith(
+      firebase.app,
+      expect.objectContaining({ experimentalForceLongPolling: true }),
+    )
     expect(firebase.connectFirestoreEmulator).toHaveBeenCalledWith(firebase.db, '127.0.0.1', 8080)
     expect(firebase.connectAuthEmulator).toHaveBeenCalledWith(
       firebase.auth,
@@ -134,6 +138,10 @@ describe('Firebase emulator connection', () => {
 
     await initFirebase({ ...demoConfig, projectId: 'production-project' })
 
+    expect(firebase.initializeFirestore).toHaveBeenCalledWith(
+      firebase.app,
+      expect.not.objectContaining({ experimentalForceLongPolling: true }),
+    )
     expect(firebase.connectFirestoreEmulator).not.toHaveBeenCalled()
     expect(firebase.connectAuthEmulator).not.toHaveBeenCalled()
     expect(firebase.setPersistence).not.toHaveBeenCalled()

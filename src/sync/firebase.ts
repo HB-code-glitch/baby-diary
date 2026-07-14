@@ -356,6 +356,11 @@ async function initializeEntry(
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
+        // The emulator is a loopback Java process and CI runners can briefly
+        // starve its WebChannel handshake while two packaged apps start. Long
+        // polling keeps the test transport deterministic without changing the
+        // ordinary production connection strategy.
+        ...(emulator?.enabled ? { experimentalForceLongPolling: true } : {}),
       })
   entry.db = db
   const auth = getAuth(app)
