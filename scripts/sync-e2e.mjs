@@ -47,7 +47,13 @@ const APP_PACKAGE_MAIN = APP_PACKAGE.main
 const E2E_TIMEOUT_MS = 30_000
 const PACKAGED_LAUNCH_TIMEOUT_MS = 60_000
 const CDP_CONNECT_ATTEMPT_TIMEOUT_MS = 2_000
+const PACKAGED_LAUNCH_DIAGNOSTIC_CHARS = 2_048
 const CLOSE_TIMEOUT_MS = 10_000
+// A packaged macOS quit must cross Electron's native application lifecycle
+// and finish the durable before-quit backup. Apple Silicon hosted runners can
+// exceed the generic process-only budget even though that shutdown is still
+// making progress, so keep a bounded platform-specific grace window.
+const MAC_CLOSE_TIMEOUT_MS = 30_000
 const CLOSE_CLEANUP_TIMEOUT_MS = 5_000
 const WINDOWS_PROCESS_POLL_MS = 75
 const LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS = 30_000
@@ -1149,6 +1155,29 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function sanitizePackagedLaunchDiagnosticText(value, maxChars = PACKAGED_LAUNCH_DIAGNOSTIC_CHARS) {
+  return String(value ?? '')
+    .replace(/\b(?:https?|wss?|file):\/\/[^\s"'<>]+/gi, '[redacted-url]')
+    .replace(/\b(?:127\.0\.0\.1|localhost):\d{1,5}\b/gi, '[redacted-endpoint]')
+    .replace(/[A-Za-z]:[\\/][^\r\n]*/g, '[redacted-path]')
+    .replace(/\\\\[^\r\n]*/g, '[redacted-path]')
+    .replace(/\/(?:Applications|Users|home|private|tmp|var)\/[^\r\n]*/g, '[redacted-path]')
+    .replace(/\b(?:token|secret|password|api[-_]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, '[redacted-secret]')
+    .replace(/\b[A-Za-z0-9+/_=-]{32,}\b/g, '[redacted-secret]')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .trim()
+    .slice(0, Math.max(0, maxChars))
+}
+
+function packagedLaunchDiagnosticSummary(child, stderr) {
+  const exited = childProcessExited(child)
+  const pid = Number.isInteger(child?.pid) ? child.pid : 'unavailable'
+  const exitCode = child?.exitCode ?? (exited ? 'none' : 'running')
+  const signal = child?.signalCode ?? 'none'
+  const safeStderr = sanitizePackagedLaunchDiagnosticText(stderr)
+  return `pid=${pid}, exitCode=${exitCode}, signal=${signal}${safeStderr ? `, stderr=${JSON.stringify(safeStderr)}` : ''}`
+}
+
 async function reserveLoopbackPort({ createServerImpl = createServer } = {}) {
   const server = createServerImpl()
   server.unref?.()
@@ -1185,12 +1214,14 @@ export async function launchCdpElectronApplication({
   platform = process.platform,
   allocatePort = reserveLoopbackPort,
   spawnImpl = spawn,
+  onSpawn,
   connectOverCDP,
   sleep = delay,
   cleanupProcess = killOwnedProcessTree,
   extraArgs = [],
 }) {
   invariant(typeof connectOverCDP === 'function', 'CDP connector is required')
+  invariant(onSpawn === undefined || typeof onSpawn === 'function', 'Packaged Electron spawn observer must be a function')
   invariant(platform === 'win32' || platform === 'darwin', `Unsupported CDP launch platform: ${platform}`)
   invariant(
     Array.isArray(extraArgs) && extraArgs.every(argument => typeof argument === 'string'),
@@ -1238,15 +1269,27 @@ export async function launchCdpElectronApplication({
   let browser
   let lastConnectError
   try {
+    if (onSpawn) {
+      const remaining = deadline - Date.now()
+      invariant(remaining > 0, 'Packaged Electron spawn observer exceeded the launch deadline')
+      await withTimeout(
+        Promise.resolve().then(() => onSpawn(child, { endpoint, port })),
+        remaining,
+        'Packaged Electron spawn observer',
+      )
+    }
     while (!browser) {
-      if (spawnError) throw new Error(`Packaged Electron process could not start: ${spawnError.message ?? String(spawnError)}`)
+      if (spawnError) {
+        const reason = sanitizePackagedLaunchDiagnosticText(spawnError.message ?? String(spawnError), 512)
+        throw new Error(`Packaged Electron process could not start: ${reason || 'unknown spawn error'} (${packagedLaunchDiagnosticSummary(child, stderr)})`)
+      }
       if (childProcessExited(child)) {
-        const details = stderr.trim()
-        throw new Error(`Packaged Electron process exited before CDP was ready${details ? `: ${details}` : ''}`)
+        throw new Error(`Packaged Electron process exited before CDP was ready (${packagedLaunchDiagnosticSummary(child, stderr)})`)
       }
       const remaining = deadline - Date.now()
       if (remaining <= 0) {
-        throw new Error(`Packaged Electron CDP endpoint was not ready: ${lastConnectError?.message ?? 'timeout'}`)
+        const reason = sanitizePackagedLaunchDiagnosticText(lastConnectError?.message ?? 'timeout', 512)
+        throw new Error(`Packaged Electron CDP endpoint was not ready: ${reason || 'timeout'} (${packagedLaunchDiagnosticSummary(child, stderr)})`)
       }
       try {
         const connectTimeoutMs = Math.min(CDP_CONNECT_ATTEMPT_TIMEOUT_MS, remaining)
@@ -1559,10 +1602,10 @@ function remainingCloseBudget(deadline, label) {
 export async function closeDevice(
   device,
   {
-    timeoutMs = CLOSE_TIMEOUT_MS,
+    platform = process.platform,
+    timeoutMs = platform === 'darwin' ? MAC_CLOSE_TIMEOUT_MS : CLOSE_TIMEOUT_MS,
     cleanupTimeoutMs = CLOSE_CLEANUP_TIMEOUT_MS,
     killTree = killOwnedProcessTree,
-    platform = process.platform,
     queryWindowsProcessTable: queryProcessTable = queryWindowsProcessTable,
     processPollSleep = delay,
     processPollIntervalMs = WINDOWS_PROCESS_POLL_MS,

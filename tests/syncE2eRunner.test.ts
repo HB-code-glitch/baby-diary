@@ -166,6 +166,79 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(spawnImpl).not.toHaveBeenCalled()
   })
 
+  it('awaits the packaged spawn observer before the first CDP connection attempt', async () => {
+    const page = { close: vi.fn(async () => undefined) }
+    const context = Object.assign(new EventEmitter(), {
+      pages: vi.fn(() => [page]),
+      waitForEvent: vi.fn(),
+    })
+    const browser = {
+      contexts: vi.fn(() => [context]),
+      close: vi.fn(async () => undefined),
+    }
+    const child = Object.assign(new EventEmitter(), {
+      pid: 8140,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      stderr: new EventEmitter(),
+    })
+    let releaseObserver!: () => void
+    const observerBlocked = new Promise<void>(resolve => { releaseObserver = resolve })
+    const onSpawn = vi.fn(async () => observerBlocked)
+    const connectOverCDP = vi.fn(async () => browser)
+
+    const launch = launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: { TEST_SENTINEL: 'yes' },
+      timeoutMs: 1_000,
+      platform: 'win32',
+      allocatePort: async () => 49215,
+      spawnImpl: vi.fn(() => child),
+      connectOverCDP,
+      onSpawn,
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    expect(onSpawn).toHaveBeenCalledWith(child, {
+      endpoint: 'http://127.0.0.1:49215',
+      port: 49215,
+    })
+    expect(connectOverCDP).not.toHaveBeenCalled()
+
+    releaseObserver()
+    const app = await launch
+    expect(connectOverCDP).toHaveBeenCalledOnce()
+    await app.close()
+  })
+
+  it('cleans up the owned child when the packaged spawn observer rejects', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 8141,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      stderr: new EventEmitter(),
+    })
+    const cleanupProcess = vi.fn(async () => { child.exitCode = 1 })
+    const connectOverCDP = vi.fn()
+
+    await expect(launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: { TEST_SENTINEL: 'yes' },
+      timeoutMs: 1_000,
+      platform: 'win32',
+      allocatePort: async () => 49216,
+      spawnImpl: vi.fn(() => child),
+      connectOverCDP,
+      cleanupProcess,
+      onSpawn: async () => { throw new Error('spawn observation failed') },
+    })).rejects.toThrow('spawn observation failed')
+
+    expect(connectOverCDP).not.toHaveBeenCalled()
+    expect(cleanupProcess).toHaveBeenCalledWith(8141)
+  })
+
   it('requests a guarded graceful packaged macOS quit before renderer teardown and waits for exit', async () => {
     const closeOrder: string[] = []
     const page = {
@@ -225,6 +298,47 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(browser.close).not.toHaveBeenCalled()
   })
 
+  it('keeps the default macOS graceful-close window open beyond the shared 10 second budget', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 8126,
+        exitCode: null as number | null,
+        signalCode: null as NodeJS.Signals | null,
+      })
+      const killTree = vi.fn(async () => undefined)
+      const device = {
+        name: 'mac-arm64-device',
+        app: {
+          close: vi.fn(async () => undefined),
+          process: () => child,
+        },
+      }
+      let closeError: unknown
+      let closeResolved = false
+      const closing = closeDevice(device, {
+        platform: 'darwin',
+        killTree,
+      }).then(
+        () => { closeResolved = true },
+        error => { closeError = error },
+      )
+
+      await vi.advanceTimersByTimeAsync(10_001)
+      expect(closeError).toBeUndefined()
+      expect(closeResolved).toBe(false)
+      expect(killTree).not.toHaveBeenCalled()
+
+      child.exitCode = 0
+      child.emit('exit', 0, null)
+      await closing
+      expect(closeResolved).toBe(true)
+      expect(device.app).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reports the CDP endpoint deadline instead of racing the final retry delay', async () => {
     vi.useFakeTimers()
     try {
@@ -238,6 +352,14 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         child.exitCode = 0
       })
       let launchError: unknown
+      const spawnImpl = vi.fn(() => {
+        queueMicrotask(() => child.stderr.emit('data', [
+          'startup failed at C:\\Users\\ci-owner\\private-profile',
+          'token=abcdefghijklmnopqrstuvwxyz0123456789',
+          'https://private.example.test/launch',
+        ].join('\n')))
+        return child
+      })
       const launch = launchCdpElectronApplication({
         executablePath: '/Applications/Baby Diary.app/Contents/MacOS/Baby Diary',
         cwd: '/Applications/Baby Diary.app',
@@ -245,7 +367,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         timeoutMs: 24,
         platform: 'darwin',
         allocatePort: async () => 49213,
-        spawnImpl: vi.fn(() => child),
+        spawnImpl,
         connectOverCDP: vi.fn(async () => {
           throw new Error('endpoint is not ready')
         }),
@@ -258,9 +380,18 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       await vi.runAllTimersAsync()
       await launch
       expect(launchError).toBeInstanceOf(Error)
-      expect((launchError as Error).message).toBe(
-        'Packaged Electron CDP endpoint was not ready: endpoint is not ready',
-      )
+      const message = (launchError as Error).message
+      expect(message).toContain('Packaged Electron CDP endpoint was not ready: endpoint is not ready')
+      expect(message).toContain('pid=8125')
+      expect(message).toContain('exitCode=running')
+      expect(message).toContain('signal=none')
+      expect(message).toContain('stderr=')
+      expect(message).toContain('[redacted-path]')
+      expect(message).toContain('[redacted-secret]')
+      expect(message).toContain('[redacted-url]')
+      expect(message).not.toContain('ci-owner')
+      expect(message).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789')
+      expect(message).not.toContain('private.example.test')
       expect(cleanupProcess).toHaveBeenCalledWith(8125)
     } finally {
       vi.useRealTimers()

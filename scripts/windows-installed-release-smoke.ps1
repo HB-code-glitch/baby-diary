@@ -89,6 +89,27 @@ function Get-UninstallerPath {
   throw 'Could not parse the Baby Diary UninstallString'
 }
 
+function Get-ExactInstalledApplicationProcesses {
+  param([string]$ExecutablePath)
+
+  $expectedPath = [IO.Path]::GetFullPath($ExecutablePath)
+  $matches = foreach ($candidate in @(Get-Process -Name 'Baby Diary' -ErrorAction SilentlyContinue)) {
+    $candidatePath = $candidate.Path
+    if ([string]::IsNullOrWhiteSpace($candidatePath)) {
+      throw "Could not attest Baby Diary process path for pid $($candidate.Id)"
+    }
+    if ([string]::Equals(
+        [IO.Path]::GetFullPath($candidatePath),
+        $expectedPath,
+        [StringComparison]::OrdinalIgnoreCase
+      )) {
+      $candidate
+    }
+  }
+
+  return @($matches)
+}
+
 function New-FalsePositivePrePublicationEvidence {
   param(
     [string]$ProfileRoot,
@@ -196,25 +217,34 @@ function Invoke-PackagedRecoveryProbe {
   param(
     [string]$ExecutablePath,
     [string]$ProfileRoot,
-    [string]$RuntimeEvidencePath
+    [string]$RuntimeEvidencePath,
+    [string]$ProcessLogPath
   )
   $source = @'
 import { execFile } from 'node:child_process'
-import { writeFile } from 'node:fs/promises'
+import { open, writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { chromium } from 'playwright'
 import { closeDevice, launchCdpElectronApplication } from './scripts/sync-e2e.mjs'
 
-const [executablePath, profileRoot, runtimeEvidencePath] = process.argv.slice(1)
+const [executablePath, profileRoot, runtimeEvidencePath, processLogPath] = process.argv.slice(1)
 const execFileAsync = promisify(execFile)
+const MAX_CAPTURED_STDERR_CHARS = 2_048
+const MAX_PROCESS_LOG_BYTES = 4_096
+const MAX_RECORDED_WINDOW_TITLES = 8
+const MAX_RECORDED_TITLE_CHARS = 160
+const MAX_RECORDED_ERROR_CHARS = 512
 const observedTopLevelWindowTitles = new Set()
+const observedRecoveryDialogTitles = new Set()
 const observedBrowserWindows = new Set()
-const recoveryDialogTitle = /^Baby Diary (?:recovery required|startup failed)$/i
+const recoveryDialogTitle = /^(?:Baby Diary (?:recovery required|startup failed)|Error|\uC624\uB958|\u30A8\u30E9\u30FC)$/i
 let application
 let launchedProcess
 let observeWindowTitles = false
 let titleMonitor
+let processStderr = ''
+let titleHelperError = null
 let rendererReady = false
 let publicState = null
 let browserWindowCount = 0
@@ -227,6 +257,52 @@ const probeDevice = {
   app: null,
   name: 'installed packaged recovery probe',
   closing: false,
+}
+
+function sanitizeDiagnosticText(value, maxChars) {
+  let sanitized = String(value ?? '')
+  for (const sensitivePath of [executablePath, profileRoot, process.cwd()]) {
+    if (sensitivePath) sanitized = sanitized.split(String(sensitivePath)).join('[redacted-path]')
+  }
+  sanitized = sanitized
+    .replace(/\b(?:https?|wss?|file):\/\/[^\s\x22'<>]+/gi, '[redacted-url]')
+    .replace(/\b(?:127\.0\.0\.1|localhost):\d{1,5}\b/gi, '[redacted-endpoint]')
+    .replace(/[A-Za-z]:[\\/][^\r\n]*/g, '[redacted-path]')
+    .replace(/\\\\[^\r\n]*/g, '[redacted-path]')
+    .replace(/\b(?:token|secret|password|api[-_]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, '[redacted-secret]')
+    .replace(/\b[A-Za-z0-9+/_=-]{32,}\b/g, '[redacted-secret]')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .trim()
+  return sanitized.slice(0, Math.max(0, maxChars))
+}
+
+function recordTopLevelWindowTitle(value) {
+  const title = sanitizeDiagnosticText(value, MAX_RECORDED_TITLE_CHARS)
+  if (!title) return
+  if (recoveryDialogTitle.test(title)
+    && observedRecoveryDialogTitles.size < MAX_RECORDED_WINDOW_TITLES) {
+    observedRecoveryDialogTitles.add(title)
+  }
+  if (observedTopLevelWindowTitles.size < MAX_RECORDED_WINDOW_TITLES) {
+    observedTopLevelWindowTitles.add(title)
+  }
+}
+
+async function readSanitizedProcessLog() {
+  let handle
+  try {
+    handle = await open(processLogPath, 'r')
+    const buffer = Buffer.alloc(MAX_PROCESS_LOG_BYTES)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    return sanitizeDiagnosticText(
+      buffer.subarray(0, bytesRead).toString('utf8'),
+      MAX_PROCESS_LOG_BYTES,
+    ) || null
+  } catch {
+    return null
+  } finally {
+    await handle?.close().catch(() => {})
+  }
 }
 
 async function readMainProcessWindowTitle(pid) {
@@ -244,9 +320,37 @@ async function readMainProcessWindowTitle(pid) {
       windowsHide: true,
     })
     return stdout.trim()
-  } catch {
+  } catch (error) {
+    titleHelperError ??= sanitizeDiagnosticText(
+      error instanceof Error ? error.message : String(error),
+      MAX_RECORDED_ERROR_CHARS,
+    )
     return ''
   }
+}
+
+function startProcessObservation(child) {
+  launchedProcess = child
+  if (!Number.isInteger(launchedProcess.pid) || launchedProcess.pid <= 1) {
+    throw new Error('spawn observer did not receive a safe child pid')
+  }
+  launchedProcess.once('exit', (code, signal) => {
+    processExitObserved = true
+    processExitCode = code
+    processExitSignal = signal
+  })
+  launchedProcess.stderr?.on?.('data', chunk => {
+    if (processStderr.length < MAX_CAPTURED_STDERR_CHARS) {
+      processStderr += String(chunk).slice(0, MAX_CAPTURED_STDERR_CHARS - processStderr.length)
+    }
+  })
+  observeWindowTitles = true
+  titleMonitor = (async () => {
+    while (observeWindowTitles && !processExitObserved) {
+      recordTopLevelWindowTitle(await readMainProcessWindowTitle(launchedProcess.pid))
+      await delay(500)
+    }
+  })()
 }
 
 try {
@@ -255,6 +359,9 @@ try {
     cwd: process.cwd(),
     platform: 'win32',
     timeoutMs: 60_000,
+    onSpawn: child => {
+      startProcessObservation(child)
+    },
     connectOverCDP: (endpoint, options) => chromium.connectOverCDP(endpoint, options),
     env: {
       ...process.env,
@@ -266,42 +373,28 @@ try {
       NODE_ENV: 'production',
     },
     extraArgs: [
+      '--enable-logging=file',
+      `--log-file=${processLogPath}`,
       '--proxy-server=127.0.0.1:9',
       '--proxy-bypass-list=<-loopback>',
       '--disable-background-networking',
     ],
   })
   probeDevice.app = application
-  launchedProcess = application.process()
-  launchedProcess.once('exit', (code, signal) => {
-    processExitObserved = true
-    processExitCode = code
-    processExitSignal = signal
-  })
   application.on('window', window => observedBrowserWindows.add(window))
   for (const window of application.context().pages()) observedBrowserWindows.add(window)
-  observeWindowTitles = true
-  titleMonitor = (async () => {
-    while (observeWindowTitles && !processExitObserved) {
-      const title = await readMainProcessWindowTitle(launchedProcess.pid)
-      if (title) observedTopLevelWindowTitles.add(title)
-      await delay(100)
-    }
-  })()
 
   const page = await application.firstWindow({ timeout: 30_000 })
   await page.waitForFunction(() => Boolean(window.babyDiary), undefined, { timeout: 30_000 })
   publicState = await page.evaluate(async () => {
-    const [settings, events, dataInfo] = await Promise.all([
+    const [settings, events] = await Promise.all([
       window.babyDiary.getSettings(),
       window.babyDiary.listEvents(),
-      window.babyDiary.getDataInfo(),
     ])
     return {
-      profileUid: settings.profile.uid,
-      familyId: settings.familyId,
+      profileUidPresent: Boolean(settings.profile.uid),
+      familyIdPresent: Boolean(settings.familyId),
       eventCount: events.length,
-      dataDir: dataInfo.dataDir,
     }
   })
   await page.waitForTimeout(1_000)
@@ -321,24 +414,45 @@ try {
     }
   }
   additionalWindowCount = Math.max(0, browserWindowCount - (rendererReady ? 1 : 0))
-  const recoveryDialogTitles = Array.from(observedTopLevelWindowTitles)
-    .filter(title => recoveryDialogTitle.test(title))
+  const boundedTopLevelWindowTitles = Array.from(observedTopLevelWindowTitles)
+    .slice(0, MAX_RECORDED_WINDOW_TITLES)
+  const recoveryDialogTitles = Array.from(observedRecoveryDialogTitles)
+    .slice(0, MAX_RECORDED_WINDOW_TITLES)
   const recoveryDialogCount = recoveryDialogTitles.length
+  const processExitCodeBeforeClose = processExitCode ?? launchedProcess?.exitCode ?? null
+  const processExitSignalBeforeClose = processExitSignal ?? launchedProcess?.signalCode ?? null
   const processExitObservedBeforeClose = Boolean(
-    processExitObserved || (launchedProcess && launchedProcess.exitCode !== null),
+    processExitObserved
+      || processExitCodeBeforeClose !== null
+      || processExitSignalBeforeClose !== null,
   )
+  const childPid = Number.isInteger(launchedProcess?.pid) ? Number(launchedProcess.pid) : null
+  const sanitizedProcessStderr = sanitizeDiagnosticText(processStderr, MAX_CAPTURED_STDERR_CHARS) || null
+  const processLog = await readSanitizedProcessLog()
+  const sanitizedProbeFailure = probeFailure
+    ? sanitizeDiagnosticText(
+        probeFailure instanceof Error ? probeFailure.message : String(probeFailure),
+        MAX_RECORDED_ERROR_CHARS,
+      ) || 'packaged probe failed without a safe diagnostic message'
+    : null
   await writeFile(runtimeEvidencePath, `${JSON.stringify({
     rendererReady,
-    observedTopLevelWindowTitles: Array.from(observedTopLevelWindowTitles),
+    childPid,
+    observedTopLevelWindowTitles: boundedTopLevelWindowTitles,
     recoveryDialogTitles,
     recoveryDialogCount: recoveryDialogTitles.length,
     browserWindowCount,
     additionalWindowCount: Number(additionalWindowCount),
     processExitObserved: Boolean(processExitObservedBeforeClose),
-    processExitCode,
-    processExitSignal,
+    processExitCode: processExitCodeBeforeClose,
+    processExitSignal: processExitSignalBeforeClose,
+    processStderr: sanitizedProcessStderr,
+    processLog,
+    titleHelperError: titleHelperError
+      ? sanitizeDiagnosticText(titleHelperError, MAX_RECORDED_ERROR_CHARS)
+      : null,
     publicState,
-    probeFailure: probeFailure instanceof Error ? probeFailure.message : probeFailure ? String(probeFailure) : null,
+    probeFailure: sanitizedProbeFailure,
   }, null, 2)}\n`, 'utf8')
   if (application) {
     try {
@@ -355,8 +469,11 @@ try {
   if (additionalWindowCount > 0) {
     throw new Error(`packaged application opened ${additionalWindowCount} unexpected additional window(s)`)
   }
-  if (processExitObservedBeforeClose) {
-    throw new Error(`packaged application exited during readiness probe: code=${processExitCode}, signal=${processExitSignal}`)
+  if (titleHelperError && !probeFailure) {
+    throw new Error(`packaged application window observation failed: ${titleHelperError}`)
+  }
+  if (processExitObservedBeforeClose && !probeFailure) {
+    throw new Error(`packaged application exited during readiness probe: code=${processExitCodeBeforeClose}, signal=${processExitSignalBeforeClose}`)
   }
 }
 if (probeFailure) throw probeFailure
@@ -364,7 +481,8 @@ if (probeFailure) throw probeFailure
   Invoke-NodeInline -Label 'installed packaged recovery probe' -Source $source -Arguments @(
     $ExecutablePath,
     $ProfileRoot,
-    $RuntimeEvidencePath
+    $RuntimeEvidencePath,
+    $ProcessLogPath
   )
 }
 
@@ -437,6 +555,7 @@ $afterManifestPath = Join-Path $runRoot 'after-manifest.json'
 $beforeProjectionPath = Join-Path $runRoot 'before-projection.json'
 $afterProjectionPath = Join-Path $runRoot 'after-projection.json'
 $runtimeEvidencePath = Join-Path $runRoot 'renderer-readiness.json'
+$processLogPath = Join-Path $runRoot 'electron-startup.log'
 $comparisonPath = Join-Path $runRoot 'preservation-comparison.json'
 $evidencePath = Join-Path $runRoot 'installed-release-smoke-evidence.json'
 $installLocation = $null
@@ -482,6 +601,13 @@ try {
     throw "Installed executable not found: $installedExecutable"
   }
 
+  $unexpectedInstalledProcesses = @(
+    Get-ExactInstalledApplicationProcesses -ExecutablePath $installedExecutable
+  )
+  if ($unexpectedInstalledProcesses.Count -ne 0) {
+    throw "Silent Setup unexpectedly launched the installed application (pid: $($unexpectedInstalledProcesses.Id -join ', '))"
+  }
+
   if ($SignaturePolicy -eq 'RequireTrusted') {
     Assert-TrustedSignature -Path $installedExecutable
   }
@@ -498,7 +624,8 @@ try {
   Invoke-PackagedRecoveryProbe `
     -ExecutablePath $installedExecutable `
     -ProfileRoot $profileRoot `
-    -RuntimeEvidencePath $runtimeEvidencePath
+    -RuntimeEvidencePath $runtimeEvidencePath `
+    -ProcessLogPath $processLogPath
   Complete-PreservationEvidence `
     -ProfileRoot $profileRoot `
     -BeforeProjectionPath $beforeProjectionPath `

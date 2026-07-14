@@ -63,6 +63,7 @@ const harness = vi.hoisted(() => ({
   commitQueue: [] as CommitOutcome[],
   commitCalls: [] as Array<{ ops: BatchOp[] }>,
   getDocInterceptors: [] as GetDocInterceptor[],
+  getDocsDelayMs: 0,
   authCallbacks: [] as Array<(user: unknown) => void>,
   mergeSettings: vi.fn(),
   settings: null as unknown as AppSettings,
@@ -101,6 +102,9 @@ async function fakeGetDoc(ref: { path: string; id: string }) {
 }
 
 async function fakeGetDocs(ref: { path: string }) {
+  if (harness.getDocsDelayMs > 0) {
+    await new Promise(resolve => setTimeout(resolve, harness.getDocsDelayMs))
+  }
   const prefix = `${ref.path}/`
   const docs: Array<{ id: string; data: () => unknown }> = []
   for (const [path, data] of harness.store.entries()) {
@@ -295,17 +299,28 @@ async function importFreshEngine() {
   return import('../src/sync/syncEngine')
 }
 
+async function waitForConnectionResult(engine: Awaited<ReturnType<typeof importFreshEngine>>) {
+  let unsubscribe = () => undefined
+  try {
+    await new Promise<void>(resolve => {
+      unsubscribe = engine.subscribeStatus(state => {
+        if (state.status === 'online' || state.status === 'error') resolve()
+      })
+    })
+  } finally {
+    unsubscribe()
+  }
+}
+
 async function connect(uid: string, email: string, familyId: string, engineModule?: Awaited<ReturnType<typeof importFreshEngine>>) {
   const engine = engineModule ?? await importFreshEngine()
   harness.settings = { ...harness.settings, familyId }
   await engine.configure(config, familyId)
   await engine.start()
-  await vi.waitFor(() => expect(harness.authCallbacks.length).toBeGreaterThan(0))
+  expect(harness.authCallbacks.length).toBeGreaterThan(0)
+  const connectionResult = waitForConnectionResult(engine)
   harness.authCallbacks[harness.authCallbacks.length - 1]({ uid, email })
-  await vi.waitFor(() => {
-    const status = engine.getStatus().status
-    expect(status === 'online' || status === 'error').toBe(true)
-  })
+  await connectionResult
   return engine
 }
 
@@ -337,6 +352,7 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
     harness.commitQueue = []
     harness.commitCalls = []
     harness.getDocInterceptors = []
+    harness.getDocsDelayMs = 0
     harness.authCallbacks.length = 0
     harness.settings = {
       baby: { name: '', birthdate: '' },
@@ -463,6 +479,17 @@ describe('syncEngine upload: durable derivative + exact ACK', () => {
   // ──────────────────────────────────────────────────────────
 
   describe('full upload pipeline', () => {
+    it('observes an eventual successful connection without a one-second polling deadline', async () => {
+      const familyId = 'family-delayed-connect'
+      const uid = 'delayed-writer-uid'
+      seedFamily(familyId, uid)
+      harness.getDocsDelayMs = 1_100
+
+      const engine = await connect(uid, 'delayed@example.test', familyId)
+
+      expect(engine.getStatus().status).toBe('online')
+    })
+
     it('uploads a foreign-authored local event as its writer-bound derivative, at the derivative doc id, and clears pending only after ACK', async () => {
       const familyId = 'family-1'
       const uid = 'writer-uid'
