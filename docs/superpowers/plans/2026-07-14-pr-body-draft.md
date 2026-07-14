@@ -1,11 +1,8 @@
 # PR Draft: v0.3.9 남은 작업 (evidence-guidance-v3)
 
-> 이 파일은 실제 `gh pr create` 실행 없이 준비한 PR 본문 초안이다. 브랜치는 아직 push되지 않았다.
-
 - 브랜치: `codex/evidence-guidance-v3`
 - 시작 HEAD(baseline): `51d5da3bcb41559b69bc0d9786ebc6b366c1a062`
-- 현재 HEAD: `0e38086e5aaa2f07c7adba71cbb7969e4d4515a5`
-- 이 브랜치는 `origin/master` 대비 84개 커밋 앞서 있고 아직 push되지 않았다 (`git status` 기준).
+- 최종 HEAD: `9fbd535` (test(upgrade): give rules-transition suite explicit 30s timeouts)
 
 ---
 
@@ -28,14 +25,16 @@ fix: harden family sync, event durability, and storage/firebase review gaps for 
 | 조건부 정보 표시·가독성 | 완료 | Task 8 회귀만 |
 | 계정/가족코드 동기화·무손실 (family lifecycle) | **이번 브랜치에서 완료** (커밋 `0fc0887`) | Task 8 회귀, 실 emulator 확정(CI) |
 | 계정/가족코드 동기화·무손실 (event 업로드 파생본) | **이번 브랜치에서 완료** (커밋 `0e38086`) | Task 8 회귀 |
-| 계정/가족코드 동기화·무손실 (baby-info projection + rollout 정책) | 미완료 | Task 6 |
+| 계정/가족코드 동기화·무손실 (baby-info projection + rollout 정책) | **이번 브랜치에서 완료** (커밋 `8fca347`, `e5b4f7d`) | 실 emulator 확정(CI) |
 | 한/일 튜토리얼·skip | 완료 | Task 8 회귀만 |
 | 공신력/과학 근거·시기별 안내 | 완료 | Task 8 회귀만 |
 | 기록 메뉴 직관성 | 완료 | Task 8 회귀만 |
 | CI 안전 업그레이드 게이트 통합 | **이번 브랜치에서 완료** (커밋 `3150900`) | 실제 서명된 CI 실행으로 최종 확인 |
 | 실제 사용자 프로필 사고 복구 | **미완료, 승인 대기** | Task 1 승인 획득 후 Task 2 |
 
-이 PR은 계획서 `docs/superpowers/plans/2026-07-14-claude-code-remaining-work-handoff.md`의 Task 3(부분), 4, 5, 7을 반영한다. Task 1/2(사고 복구), 6(baby-info projection), 8(종합 검증), 10-11(서명 릴리즈/Desktop 설치)은 이 PR 범위 밖이며 후속 작업으로 남는다.
+이 PR은 계획서 `docs/superpowers/plans/2026-07-14-claude-code-remaining-work-handoff.md`의 Task 3, 4, 5, 6, 7, 8(로컬 부분)을 반영한다. Task 1/2(사고 복구, 사용자 승인 대기)와 10-11(서명 릴리즈/Desktop 설치, 서명 시크릿 필요)은 이 PR 범위 밖이며 후속 작업으로 남는다.
+
+**최종 독립 리뷰 3도메인 결과** (로컬 내구성 / Firebase·규칙·동기화 / 업그레이드·릴리스): Critical 0 / Important 1 / Minor 7. Important 1건(durably-committed append 실패 오보)과 조치 가치 있는 Minor 4건은 전부 이 브랜치에서 RED→GREEN으로 수정 완료(`667d74d`, `9031405`, `5da7c30`, `4f22a8e`, `e5b4f7d`). 잔여 Minor 3건은 의도된 롤아웃 정책이거나 도달 불가 경로로 판정되어 조치 불요.
 
 ---
 
@@ -90,7 +89,12 @@ Firestore rules emulator (Java 21 필요, 로컬 미보유 시 CI 권위 결과 
 & $node scripts/run-firestore-rules.mjs
 ```
 
-이 초안 작성 세션에서는 문서 준비만 수행했고 위 명령들을 재실행하지 않았다. 각 커밋 시점의 통과 근거는 해당 커밋 메시지(§4)와 계획서 Task 3/4/5/7 본문에 기술된 RED→GREEN 절차를 따른다. 병합 전 Task 8에서 전체 스위트를 한 번에 재확인해야 한다.
+**최종 게이트 실행 결과 (최종 HEAD `9fbd535`, 2026-07-14):**
+- typecheck: `tsc -p tsconfig.json --noEmit` = 0 errors, `tsc -p tsconfig.node.json --noEmit` = 0 errors
+- 전체 테스트: **109 파일 통과 / 1 skip** (`firestoreRulesEmulator.test.ts` — Java 21 없어 clean skip, CI 권위), 실패 0
+- 프로덕션 빌드: `vite build` exit 0 (3271 모듈)
+- UI 회귀 게이트(별도 실행): 튜토리얼·i18n 패리티·keep-login·History·가독성·시기별 안내·동기화 계약 25스위트 298/298
+- 보안 스윕: 실 이메일/uid/familyId/초대코드/로컬 절대경로 브랜치 diff 내 0건, i18n 한/일 507키 완전 패리티
 
 ---
 
@@ -104,6 +108,15 @@ Firestore rules emulator (Java 21 필요, 로컬 미보유 시 CI 권위 결과 
 | `aaa8a9e6e90f55861fbd0b972c3b043cdd62eefa` | fix(firebase): close ownership review gap |
 | `0fc0887add2fea9d242a496000129d21a6e2e29c` | fix(sync): make family lifecycle atomic |
 | `0e38086e5aaa2f07c7adba71cbb7969e4d4515a5` | fix(sync): persist exact event upload derivatives |
+| `a51bc43` | docs: draft v0.3.9 PR body |
+| `d23e8bf` | fix(settings): swallow ENOENT when scanning userData dir for restore-intent tombstones |
+| `667d74d` | fix(storage): report durably-committed appends as success |
+| `5da7c30` | ci: authenticate baseline asset downloads with github.token |
+| `9031405` | fix(backup): sweep stale staging directories at backup start |
+| `8fca347` | fix(sync): bind baby info projection and rollout |
+| `4f22a8e` | fix(sync): exclude prior-account derivatives from event re-derivation |
+| `e5b4f7d` | fix(settings): stamp updatedAtMs on baby info mutations |
+| `9fbd535` | test(upgrade): give rules-transition suite explicit 30s timeouts |
 
 요약:
 - `docs`: 세 개 인수인계 계획서 커밋(문서 전용).
@@ -157,8 +170,8 @@ Firestore rules emulator (Java 21 필요, 로컬 미보유 시 CI 권위 결과 
 
 ## 병합 전 체크리스트 (이 PR 자체)
 
-- [ ] Task 8: `npm ci` → typecheck → test → build → test:firestore-rules 전체 재실행, 결과를 이 PR에 첨부
+- [x] Task 8(로컬): typecheck → 전체 test(109/109, 실패 0) → build 완료 (§3 최종 게이트 결과). `test:firestore-rules`만 CI-deferred (Java 21)
 - [ ] push 후 CI에서 `security-check`, `e2e-mac`, `e2e-win`, `baseline-v038`, `upgrade-win`, `upgrade-mac-arm64`, `upgrade-mac-intel` 등 Java 21 필요 잡 green 확인
-- [ ] Task 3 재검토(스토리지/Firebase) 확정 보고서 첨부 (Critical/Important/Minor 0/0/0, Ready Yes)
+- [x] 최종 독립 리뷰 3도메인 완료: C 0 / I 1 / M 7 → 조치 대상 5건 전부 수정 커밋 반영, 잔여 M 3건 조치 불요 판정 (§1). 세 도메인 모두 Ready: Yes
 - [ ] 서명 시크릿 미보유 상태이므로 release 계열 잡(`package-*`, `upgrade-*`, `manifest-*`, `release-*`, `publish-release`)은 이 PR에서 통과를 요구하지 않음 — 스킵/미실행 사유 명시
 - [ ] production Firestore rules 미배포 유지 확인
