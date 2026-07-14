@@ -645,6 +645,27 @@ describe('main-owned Firebase persistence registry', () => {
     expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
+  it('keeps a prior valid live WAL record when the final record is truncated mid-write', () => {
+    const root = makeRoot('wal-truncated-final-record')
+    const completeRecord = makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 1 },
+    )
+    const crashedRecord = makeChromiumIndexedDbAuthLog('unrelated', 'unrelated', { sequenceLow: 2 })
+    const fullLog = Buffer.concat([completeRecord, crashedRecord])
+    // Simulate an ordinary unclean shutdown: the second WriteBatch's physical
+    // record header was flushed, but its payload was cut short before the
+    // process crashed. This is the routine condition real LevelDB treats as
+    // a benign incomplete final record, not corruption.
+    const truncatedLog = fullLog.subarray(0, fullLog.length - 4)
+    expect(truncatedLog.length).toBeGreaterThan(completeRecord.length + 7)
+    writeV038AuthLevelDb(root, truncatedLog)
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
   it('detects a stable-directory inventory change while reading a higher live WAL', () => {
     const root = makeRoot('higher-live-wal-inventory-change')
     const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(

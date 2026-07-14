@@ -468,10 +468,20 @@ function readLevelDbLogRecords(bytes: Buffer): Buffer[] {
   const records: Buffer[] = []
   let fragments: Buffer[] | null = null
   let offset = 0
+  // Set only when parsing stops because the file ends before a physical
+  // record header/payload was fully flushed. Real LevelDB treats an
+  // incomplete final record this way as a benign unclean-shutdown artifact,
+  // not corruption, and still replays every complete record before it.
+  let stoppedAtTruncatedTail = false
   while (offset < bytes.length) {
     const blockOffset = offset % blockSize
     const remainingInBlock = Math.min(blockSize - blockOffset, bytes.length - offset)
+    const atBufferEnd = offset + remainingInBlock >= bytes.length
     if (remainingInBlock < 7) {
+      if (atBufferEnd) {
+        stoppedAtTruncatedTail = true
+        break
+      }
       if (bytes.subarray(offset, offset + remainingInBlock).some(byte => byte !== 0)) {
         throw new Error('Firebase LevelDB log trailer is invalid')
       }
@@ -489,7 +499,17 @@ function readLevelDbLogRecords(bytes: Buffer): Buffer[] {
       offset = blockEnd
       continue
     }
-    if (type < 1 || type > 4 || length > remainingInBlock - 7 || offset + 7 + length > bytes.length) {
+    if (type < 1 || type > 4) {
+      throw new Error('Firebase LevelDB physical record is invalid')
+    }
+    if (offset + 7 + length > bytes.length) {
+      // The header was flushed but the declared payload extends past the
+      // actual end of the captured file: the writer died mid-write. Stop
+      // replay here instead of discarding every record parsed so far.
+      stoppedAtTruncatedTail = true
+      break
+    }
+    if (length > remainingInBlock - 7) {
       throw new Error('Firebase LevelDB physical record is invalid')
     }
     const payload = bytes.subarray(offset + 7, offset + 7 + length)
@@ -514,7 +534,9 @@ function readLevelDbLogRecords(bytes: Buffer): Buffer[] {
     }
     offset += 7 + length
   }
-  if (fragments) throw new Error('Firebase LevelDB fragmented record is truncated')
+  if (fragments && !stoppedAtTruncatedTail) {
+    throw new Error('Firebase LevelDB fragmented record is truncated')
+  }
   return records
 }
 
