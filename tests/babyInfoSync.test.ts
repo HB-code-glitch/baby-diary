@@ -290,7 +290,7 @@ describe('baby-info delta sync over the main journal', () => {
     }
   }, 30_000)
 
-  it('turns a v0.3.8 pair-only family update into a deterministic bridge bound to the prior winner', async () => {
+  it('turns a v0.3.8 pair-only family update into a deterministic auth-bound bridge bound to the prior winner', async () => {
     installStore(tmpDir, baseSettings({ baby: { name: '', birthdate: '' } }))
     const sync = await import('../src/sync/babyInfoSync')
     const prior = mutation(20, { babyName: 'Prior winner', logicalClock: 10 })
@@ -311,15 +311,20 @@ describe('baby-info delta sync over the main journal', () => {
     }
     firestore.documents.set('families/family-A', clone(familyData))
 
-    await sync.reconcileFamilyBabyInfo(await options(familyData))
+    const result = await sync.reconcileFamilyBabyInfo(await options(familyData))
     const firstWinner = store.getBabyInfoSummary('family-A').winner!
+    // Hardened rules reject a bare v0.3.8 pair-only write, so the bridge
+    // this cycle uploads must be auth-bound (never the unauthenticated
+    // `legacy-cloud-bridge` sentinel) or the real emulator would reject it.
     expect(firstWinner).toMatchObject({
       babyName: 'Old client edit',
       babyBirthdate: '2026-05-05',
       logicalClock: 11,
-      origin: 'legacy-cloud',
+      origin: 'user',
+      authorId: 'user-1',
     })
     expect(store.getBabyInfoSummary('family-A').pendingCount).toBe(0)
+    expect(result.legacyClientUpdateRequired).toBe(true)
 
     // Replaying the same old-client projection in the opposite device order
     // deduplicates the deterministic bridge and cannot revert the winner.
@@ -437,5 +442,159 @@ describe('baby-info delta sync over the main journal', () => {
 
     await expect(sync.reconcileFamilyBabyInfo(await options())).rejects.toMatchObject({ code: 'unavailable' })
     expect(store.getBabyInfoSummary('family-A').pendingCount).toBe(0)
+  })
+})
+
+describe('monotonic atomic projection and hardened v0.3.8 rollout', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    vi.resetModules()
+    firestore.reset()
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'baby-info-sync-v3-'))
+    installStore(tmpDir, baseSettings({ baby: { name: '', birthdate: '' } }))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function projectionFrom(mut: BabyInfoMutation) {
+    return {
+      babyName: mut.babyName,
+      babyBirthdate: mut.babyBirthdate,
+      babyInfoWinnerKey: getBabyInfoMutationKey(mut),
+      babyInfoWinnerMutationId: mut.mutationId,
+      babyInfoWinnerLogicalClock: mut.logicalClock,
+      babyInfoWinnerUpdatedAt: mut.updatedAt,
+      babyInfoWinnerAuthorId: mut.authorId,
+      babyInfoWinnerOrigin: mut.origin,
+    }
+  }
+
+  it('never lets a stale lower-clock local winner regress an already-projected higher winner', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const externalWinner = mutation(600, { babyName: 'Winner B', logicalClock: 999_999 })
+    const familyData = projectionFrom(externalWinner)
+    const stale = mutation(601, { babyName: 'Stale A', logicalClock: 50 })
+    store.commitBabyInfo({
+      kind: 'reconcile', familyId: 'family-A',
+      discoveredMutations: [stale], exactAcknowledgedMutationKeys: [],
+    })
+
+    const result = await sync.reconcileFamilyBabyInfo(await options(familyData))
+
+    expect(result.needsRetry).toBe(false)
+    expect(firestore.documents.get('families/family-A')).toMatchObject(familyData)
+  })
+
+  it.each([
+    'loser projected first, winner reconciles second',
+    'winner projected first, loser reconciles second',
+  ])('converges an equal-clock projection race to the deterministic key winner: %s', async label => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const m1 = mutation(700, { babyName: 'Device M1', logicalClock: 5_000 })
+    const m2 = mutation(701, { babyName: 'Device M2', logicalClock: 5_000 })
+    const key1 = getBabyInfoMutationKey(m1)
+    const key2 = getBabyInfoMutationKey(m2)
+    expect(key1).not.toBe(key2)
+    const [loser, winner] = key1 < key2 ? [m1, m2] : [m2, m1]
+    const alreadyProjected = label.startsWith('loser') ? loser : winner
+    const reconciling = label.startsWith('loser') ? winner : loser
+    const familyData = projectionFrom(alreadyProjected)
+    store.commitBabyInfo({
+      kind: 'reconcile', familyId: 'family-A',
+      discoveredMutations: [reconciling],
+      exactAcknowledgedMutationKeys: [getBabyInfoMutationKey(reconciling)],
+    })
+
+    await sync.reconcileFamilyBabyInfo(await options(familyData))
+
+    expect(firestore.documents.get('families/family-A')).toMatchObject(projectionFrom(winner))
+  })
+
+  it('rejects a mutation whose updatedAt is a syntactically valid but non-existent calendar date', async () => {
+    const { canonicalBabyInfoMutationJson } = await import('../shared/babyInfoResolver')
+    const poisoned = mutation(800, { babyName: 'Bogus date', updatedAt: '2026-02-30T10:00:00.000Z' })
+
+    expect(() => canonicalBabyInfoMutationJson(poisoned)).toThrow()
+    // Date.parse alone silently rolls Feb 30 into Mar 2, so this proves the
+    // explicit calendar check -- not just the ISO regex -- rejects it.
+    expect(Number.isFinite(Date.parse(poisoned.updatedAt))).toBe(true)
+  })
+
+  it('rejects a cloud mutation whose numeric updatedAtMs shadow does not match its updatedAt string', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const base = mutation(820, { babyName: 'Shadow mismatch' })
+    const poisoned = { ...base, updatedAtMs: Date.parse(base.updatedAt) + 1 }
+
+    expect(sync.parseCloudBabyInfoDocument(sync.makeBabyInfoDocId(base), { mutation: poisoned }, 'family-A'))
+      .toBeNull()
+  })
+
+  it('rejects a cloud mutation whose numeric shadow is far in the future', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const futureMs = Date.now() + 10 * 60 * 1000
+    const base = mutation(830, { babyName: 'Future shadow', updatedAt: new Date(futureMs).toISOString() })
+    const poisoned = { ...base, updatedAtMs: futureMs }
+
+    expect(sync.parseCloudBabyInfoDocument(sync.makeBabyInfoDocId(poisoned), { mutation: poisoned }, 'family-A'))
+      .toBeNull()
+  })
+
+  it('rejects a cloud document whose id does not match its content-bound hash', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const real = mutation(840, { babyName: 'Real content' })
+    const forgedId = `b1|${real.mutationId}|30000000-0000-5000-8000-000000000841`
+    expect(forgedId).not.toBe(sync.makeBabyInfoDocId(real))
+
+    expect(sync.parseCloudBabyInfoDocument(forgedId, { mutation: real }, 'family-A')).toBeNull()
+  })
+
+  it('keeps two cloud mutations that reuse the same mutationId with different payloads as distinct entries', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const shared = '30000000-0000-4000-8000-000000000850'
+    const first = mutation(850, { mutationId: shared, babyName: 'First payload', logicalClock: 100 })
+    const second = mutation(851, { mutationId: shared, babyName: 'Second payload', logicalClock: 200 })
+    expect(sync.makeBabyInfoDocId(first)).not.toBe(sync.makeBabyInfoDocId(second))
+    firestore.documents.set(`families/family-A/babyInfoMutations/${sync.makeBabyInfoDocId(first)}`, { mutation: first })
+    firestore.documents.set(`families/family-A/babyInfoMutations/${sync.makeBabyInfoDocId(second)}`, { mutation: second })
+
+    const result = await sync.reconcileFamilyBabyInfo(await options())
+
+    expect(result.needsRetry).toBe(false)
+    expect(store.getBabyInfoSummary('family-A')).toMatchObject({ mutationCount: 2, winner: second })
+  })
+
+  it('isolates a poisoned cloud sibling from a valid one discovered in the same page', async () => {
+    const sync = await import('../src/sync/babyInfoSync')
+    const valid = mutation(810, { babyName: 'Valid sibling' })
+    firestore.documents.set(`families/family-A/babyInfoMutations/${sync.makeBabyInfoDocId(valid)}`, { mutation: valid })
+    const poisonMutationId = '30000000-0000-4000-8000-000000000811'
+    const poisonDocId = `b1|${poisonMutationId}|30000000-0000-5000-8000-000000000812`
+    firestore.documents.set(`families/family-A/babyInfoMutations/${poisonDocId}`, {
+      mutation: {
+        ...mutation(811, { mutationId: poisonMutationId }),
+        updatedAt: '2026-02-30T10:00:00.000Z',
+      },
+    })
+
+    const result = await sync.reconcileFamilyBabyInfo(await options())
+
+    expect(result.needsRetry).toBe(false)
+    expect(store.getBabyInfoSummary('family-A')).toMatchObject({ mutationCount: 1, winner: valid })
+    expect(result.legacyClientUpdateRequired).toBe(false)
+  })
+})
+
+describe('bilingual update-required copy', () => {
+  it('ko.json explains that an older device must update before family sync resumes', async () => {
+    const ko = await import('../src/i18n/ko.json')
+    expect((ko as any).settings.babyInfoUpdateRequired).toContain('업데이트')
+  })
+
+  it('ja.json explains that an older device must update before family sync resumes', async () => {
+    const ja = await import('../src/i18n/ja.json')
+    expect((ja as any).settings.babyInfoUpdateRequired).toContain('更新')
   })
 })

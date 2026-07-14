@@ -211,6 +211,19 @@ function validBabyMutation(
   }
 }
 
+function babyProjectionPatch(entry: { docId: string; contentId: string; mutation: BabyInfoMutation }) {
+  return {
+    babyName: entry.mutation.babyName,
+    babyBirthdate: entry.mutation.babyBirthdate,
+    babyInfoWinnerKey: `baby-info:${entry.mutation.mutationId}:${entry.contentId}`,
+    babyInfoWinnerMutationId: entry.mutation.mutationId,
+    babyInfoWinnerLogicalClock: entry.mutation.logicalClock,
+    babyInfoWinnerUpdatedAt: entry.mutation.updatedAt,
+    babyInfoWinnerAuthorId: entry.mutation.authorId,
+    babyInfoWinnerOrigin: entry.mutation.origin,
+  }
+}
+
 describe.skipIf(!emulatorAvailable)('Firestore security rules in the real emulator', () => {
   afterAll(async () => {
     await Promise.all(clients.map(async client => {
@@ -319,10 +332,15 @@ describe.skipIf(!emulatorAvailable)('Firestore security rules in the real emulat
     }))
   })
 
-  it('allows the v0.3.8 baby pair-only bridge only for an existing member and exactly both fields', async () => {
+  it('rejects the exact v0.3.8 baby pair-only direct write now that hardened rules require proof fields', async () => {
+    // Chosen rollout policy: a bare pair-only write (no babyInfoMutations
+    // proof) is rejected outright. A v0.3.9 client bridges any pre-existing
+    // production data of this shape through an auth-bound babyInfoMutations
+    // derivative instead (see the "enforces immutable bounded baby
+    // mutations..." test below), never through this direct family-doc path.
     const family = await createFamily('pair-only')
     const ref = doc(family.owner.db, 'families', family.id)
-    await expectAllowed(() => updateDoc(ref, {
+    await expectDenied(() => updateDoc(ref, {
       babyName: 'Old client baby',
       babyBirthdate: '2026-03-04',
     }))
@@ -395,6 +413,72 @@ describe.skipIf(!emulatorAvailable)('Firestore security rules in the real emulat
     await expectDenied(() => setDoc(doc(
       family.owner.db, 'families', family.id, 'babyInfoMutations', future.docId,
     ), { mutation: future.mutation }))
+  })
+
+  it('denies a baby mutation whose docId mutationId segment does not match its content mutationId field', async () => {
+    const family = await createFamily('baby-forged-id')
+    const value = validBabyMutation(family.owner, family.id, sequence + 4)
+    const forgedDocId = `b1|${uuidFor(sequence + 5, 4)}|${value.contentId}`
+    await expectDenied(() => setDoc(
+      doc(family.owner.db, 'families', family.id, 'babyInfoMutations', forgedDocId),
+      { mutation: value.mutation },
+    ))
+  })
+
+  it('never lets a stale lower-clock projection replace an already-committed winner', async () => {
+    const family = await createFamily('baby-projection-monotonic')
+    const ref = doc(family.owner.db, 'families', family.id)
+
+    const high = validBabyMutation(family.owner, family.id, sequence + 60)
+    high.mutation.logicalClock = Date.now() - 60_000
+    await expectAllowed(() => setDoc(
+      doc(family.owner.db, 'families', family.id, 'babyInfoMutations', high.docId),
+      { mutation: high.mutation },
+    ))
+    await expectAllowed(() => updateDoc(ref, babyProjectionPatch(high)))
+
+    const low = validBabyMutation(family.owner, family.id, sequence + 61)
+    low.mutation.logicalClock = high.mutation.logicalClock - 1_000
+    await expectAllowed(() => setDoc(
+      doc(family.owner.db, 'families', family.id, 'babyInfoMutations', low.docId),
+      { mutation: low.mutation },
+    ))
+    await expectDenied(() => updateDoc(ref, babyProjectionPatch(low)))
+
+    const higher = validBabyMutation(family.owner, family.id, sequence + 62)
+    higher.mutation.logicalClock = high.mutation.logicalClock + 1_000
+    await expectAllowed(() => setDoc(
+      doc(family.owner.db, 'families', family.id, 'babyInfoMutations', higher.docId),
+      { mutation: higher.mutation },
+    ))
+    await expectAllowed(() => updateDoc(ref, babyProjectionPatch(higher)))
+  })
+
+  it('resolves an equal-clock projection race to the same deterministic key winner regardless of commit order', async () => {
+    const family = await createFamily('baby-projection-tie')
+    const ref = doc(family.owner.db, 'families', family.id)
+    const clock = Date.now() - 60_000
+
+    const a = validBabyMutation(family.owner, family.id, sequence + 70)
+    a.mutation.logicalClock = clock
+    const b = validBabyMutation(family.owner, family.id, sequence + 71)
+    b.mutation.logicalClock = clock
+    const keyA = `baby-info:${a.mutation.mutationId}:${a.contentId}`
+    const keyB = `baby-info:${b.mutation.mutationId}:${b.contentId}`
+    const [loser, winner] = keyA < keyB ? [a, b] : [b, a]
+
+    for (const entry of [loser, winner]) {
+      await expectAllowed(() => setDoc(
+        doc(family.owner.db, 'families', family.id, 'babyInfoMutations', entry.docId),
+        { mutation: entry.mutation },
+      ))
+    }
+
+    // Whichever order the winner and its equal-clock rival are committed in,
+    // only the deterministically larger key may end up projected.
+    await expectAllowed(() => updateDoc(ref, babyProjectionPatch(loser)))
+    await expectAllowed(() => updateDoc(ref, babyProjectionPatch(winner)))
+    await expectDenied(() => updateDoc(ref, babyProjectionPatch(loser)))
   })
 
   it('accepts all nine exact event schemas and safely evaluates modern and missing-mutation legacy ids', async () => {

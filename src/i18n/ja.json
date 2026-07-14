@@ -370,6 +370,7 @@
     "toastSaveFail": "設定の保存に失敗しました",
     "babyInfoSavePending": "赤ちゃんの情報はこの端末に保存され、接続すると同期されます。",
     "babyInfoSharedHint": "赤ちゃんの情報は家族全体で共有されます",
+    "babyInfoUpdateRequired": "他の端末のアプリが古いバージョンです。家族の同期を再開するには、その端末を最新バージョンに更新してください。",
     "unlinkedArchiveReview": "家族に紐づいていなかった赤ちゃん情報を保管しています: {{name}} · {{birthdate}}。反映しても保存するまでは共有されません。",
     "unlinkedArchiveApply": "保管した赤ちゃん情報を反映",
     "unlinkedArchiveLoadMore": "保管した情報をさらに表示",

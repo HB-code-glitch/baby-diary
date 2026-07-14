@@ -370,6 +370,7 @@
     "toastSaveFail": "설정 저장에 실패했습니다",
     "babyInfoSavePending": "아기 정보가 이 기기에 저장되었으며 연결되면 동기화됩니다.",
     "babyInfoSharedHint": "아기 정보는 가족 전체에 공유돼요",
+    "babyInfoUpdateRequired": "다른 기기의 앱이 오래된 버전이에요. 가족 동기화를 다시 시작하려면 그 기기를 최신 버전으로 업데이트해 주세요.",
     "unlinkedArchiveReview": "가족에 연결되지 않았던 아기 정보가 보관되어 있어요: {{name}} · {{birthdate}}. 적용해도 저장 전에는 공유되지 않아요.",
     "unlinkedArchiveApply": "보관된 아기 정보 적용",
     "unlinkedArchiveLoadMore": "보관된 정보 더 보기",

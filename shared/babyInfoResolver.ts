@@ -38,10 +38,32 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null
 }
 
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+}
+
+/**
+ * `Date.parse` silently rolls a non-existent calendar day into the next
+ * month (e.g. Feb 30 -> Mar 2) instead of rejecting it, which would let a
+ * syntactically valid but bogus `updatedAt` carry a self-consistent but
+ * misleading numeric shadow. Reject those explicitly.
+ */
+function isValidCalendarDate(value: string): boolean {
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  if (month < 1 || month > 12 || day < 1) return false
+  const max = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1]
+  return day <= max
+}
+
 function isExplicitZoneTimestamp(value: unknown): value is string {
   return typeof value === 'string'
     && value.length <= 64
     && EXPLICIT_ZONE_TIMESTAMP.test(value)
+    && isValidCalendarDate(value)
     && Number.isFinite(Date.parse(value))
 }
 
@@ -168,6 +190,40 @@ export function validateBabyInfoMutationForCloud(
     || !Number.isSafeInteger(mutation.updatedAtMs)) return false
   return mutation.updatedAtMs! <= nowMs + CLOUD_FUTURE_SKEW_MS
     && mutation.logicalClock <= nowMs + CLOUD_FUTURE_SKEW_MS
+}
+
+/**
+ * Read-time future-skew guard applied to any cloud document, independent of
+ * whether it is otherwise upload-ready. A numeric shadow is optional (durable
+ * pre-hardening records may omit it) but if present it, and the logical
+ * clock, must not exceed the tolerated clock skew.
+ */
+export function isBabyInfoMutationCloudFresh(
+  mutation: BabyInfoMutation,
+  nowMs = Date.now(),
+): boolean {
+  const upper = nowMs + CLOUD_FUTURE_SKEW_MS
+  if (mutation.logicalClock > upper) return false
+  if (mutation.updatedAtMs !== undefined && mutation.updatedAtMs > upper) return false
+  return true
+}
+
+/**
+ * Rule-enforceable decision for whether a candidate winner may replace the
+ * family document's current projection. A lower logical clock never wins;
+ * an equal clock falls back to the same deterministic resolver key ordering
+ * `compareBabyInfoMutations` would use, so concurrent writers converge on the
+ * identical winner regardless of arrival order.
+ */
+export function babyInfoProjectionShouldReplace(
+  candidateKey: string,
+  candidateLogicalClock: number,
+  currentKey: string | undefined,
+  currentLogicalClock: number | undefined,
+): boolean {
+  if (currentKey === undefined || currentLogicalClock === undefined) return true
+  if (candidateLogicalClock !== currentLogicalClock) return candidateLogicalClock > currentLogicalClock
+  return candidateKey >= currentKey
 }
 
 /** Content-bound immutable identity; a reused UUID with another payload gets another key. */

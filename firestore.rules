@@ -294,7 +294,19 @@ service cloud.firestore {
           && mutation.authorId == 'legacy-cloud');
     }
 
-    function validBabyProjection(familyId, data) {
+    // A lower logical clock may never replace an already-projected winner.
+    // An equal clock falls back to the same deterministic resolver key
+    // ordering the client's `compareBabyInfoMutations` tie-break uses, so two
+    // concurrent writers converge on the identical winner regardless of
+    // which one the server happens to commit first.
+    function babyProjectionMonotonic(before, data) {
+      return !('babyInfoWinnerKey' in before)
+        || data.babyInfoWinnerLogicalClock > before.babyInfoWinnerLogicalClock
+        || (data.babyInfoWinnerLogicalClock == before.babyInfoWinnerLogicalClock
+          && data.babyInfoWinnerKey >= before.babyInfoWinnerKey);
+    }
+
+    function validBabyProjection(familyId, before, data) {
       let keyParts = data.babyInfoWinnerKey.split(':');
       let mutationDocId = 'b1|' + keyParts[1] + '|' + keyParts[2];
       let stored = getAfter(
@@ -319,7 +331,8 @@ service cloud.firestore {
         && data.babyInfoWinnerAuthorId == mutation.authorId
         && data.babyInfoWinnerOrigin == mutation.origin
         && data.babyName == mutation.babyName
-        && data.babyBirthdate == mutation.babyBirthdate;
+        && data.babyBirthdate == mutation.babyBirthdate
+        && babyProjectionMonotonic(before, data);
     }
 
     match /users/{uid} {
@@ -438,16 +451,6 @@ service cloud.firestore {
           && userAfterSelects(request.auth.uid, familyId);
       }
 
-      function validLegacyPairOnlyUpdate() {
-        let top = request.resource.data.diff(resource.data).affectedKeys();
-        return isMember()
-          && top.hasAll(['babyName', 'babyBirthdate'])
-          && top.hasOnly(['babyName', 'babyBirthdate'])
-          && request.resource.data.babyName is string
-          && request.resource.data.babyName.size() <= 2048
-          && birthdate(request.resource.data.babyBirthdate);
-      }
-
       function validMemberUpdate() {
         let top = request.resource.data.diff(resource.data).affectedKeys();
         let memberChanges = request.resource.data.members.diff(resource.data.members).affectedKeys();
@@ -467,13 +470,13 @@ service cloud.firestore {
           && request.auth.uid in request.resource.data.members
           && memberChanges.hasOnly([request.auth.uid])
           && validMember(request.resource.data.members[request.auth.uid])
-          && (!top.hasAny(babyFields) || validBabyProjection(familyId, request.resource.data));
+          && (!top.hasAny(babyFields) || validBabyProjection(familyId, resource.data, request.resource.data));
       }
 
       allow get: if isMember();
       allow list: if false;
       allow create: if validFamilyCreate();
-      allow update: if validSelfJoin() || validLegacyPairOnlyUpdate() || validMemberUpdate();
+      allow update: if validSelfJoin() || validMemberUpdate();
       allow delete: if false;
 
       match /events/{eventDocId} {

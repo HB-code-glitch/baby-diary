@@ -11,10 +11,12 @@ import type {
   BabyInfoMutation,
 } from '../../shared/types'
 import {
+  babyInfoProjectionShouldReplace,
   canonicalBabyInfoMutationJson,
   getBabyInfoMutationKey,
+  isBabyInfoMutationCloudFresh,
+  makeAuthBoundLegacyCloudBridgeBabyInfoMutation,
   makeLegacyCloudBabyInfoMutation,
-  makeLegacyCloudBridgeBabyInfoMutation,
 } from '../../shared/babyInfoResolver'
 import { assertFamilyId } from '../../shared/familyId'
 import { isValidMutationId } from '../../shared/eventResolver'
@@ -68,6 +70,13 @@ export interface ReconcileBabyInfoResult {
   needsRetry: boolean
   uploadFailures: number
   settings: AppSettings
+  /**
+   * True only when this cycle bridged an exact v0.3.8 pair-only cloud write
+   * (no proof fields) into the mutation model, i.e. evidence that some
+   * device wrote through the now-rejected legacy path. Never true for
+   * local-only recording (no family/writer identity).
+   */
+  legacyClientUpdateRequired: boolean
 }
 
 const CLOUD_PAGE_SIZE = 250
@@ -136,6 +145,7 @@ export function parseCloudBabyInfoDocument(
   docId: string,
   data: DocumentData,
   expectedFamilyId?: string,
+  nowMs = Date.now(),
 ): BabyInfoMutation | null {
   if (typeof docId !== 'string' || docId.length > 256 || !isPlainRecord(data)) return null
   const envelopeKeys = Object.keys(data)
@@ -151,6 +161,10 @@ export function parseCloudBabyInfoDocument(
     if (expectedFamilyId !== undefined && candidate.familyId !== expectedFamilyId) return null
     if (makeBabyInfoDocId(candidate) !== docId) return null
     canonicalBabyInfoMutationJson(candidate)
+    // A forged content-hash segment is unreachable from any content this
+    // client would ever generate, but Firestore rules cannot recompute a
+    // UUIDv5 hash; the docId round-trip above is this check's real guard.
+    if (!isBabyInfoMutationCloudFresh(candidate, nowMs)) return null
     return candidate
   } catch {
     return null
@@ -278,10 +292,20 @@ async function ingestCloudPages(
   }
 }
 
+/**
+ * Detects an exact v0.3.8-shaped pair-only family write (no proof fields)
+ * and bridges it into the mutation model. Hardened rules reject *new* direct
+ * pair writes going forward, so this only ever fires against production data
+ * written before this rollout; it is durable read/migration compatibility,
+ * not a write path. When a writer identity is available the bridge is
+ * auth-bound (never the unauthenticated `legacy-cloud-bridge` sentinel), so
+ * the one derivative this cycle uploads carries current proof.
+ */
 async function ingestLegacyProjection(
   options: ReconcileBabyInfoOptions,
   summary: BabyInfoJournalSummary,
-): Promise<{ summary: BabyInfoJournalSummary; settings?: AppSettings }> {
+  writerUid: string,
+): Promise<{ summary: BabyInfoJournalSummary; settings?: AppSettings; legacyDetected: boolean }> {
   let candidate: BabyInfoMutation | undefined
   const projectedName = options.familyData.babyName ?? ''
   const projectedBirthdate = options.familyData.babyBirthdate ?? ''
@@ -296,18 +320,23 @@ async function ingestLegacyProjection(
     const markerKey = options.familyData.babyInfoWinnerKey
     const marker = await ipc.getBabyInfoMutation(options.familyId, markerKey)
     options.assertCurrent?.()
-    if (marker) {
-      candidate = makeLegacyCloudBridgeBabyInfoMutation(
+    if (marker && writerUid.length > 0) {
+      // The marker's own logical clock is the deterministic promotion basis
+      // (not wall-clock time) so replaying this bridge across restarts and
+      // opposite discovery orders always re-derives byte-identical content.
+      candidate = makeAuthBoundLegacyCloudBridgeBabyInfoMutation(
         options.familyId,
         projectedName,
         projectedBirthdate,
         markerKey,
         marker,
+        writerUid,
+        marker.logicalClock,
       )
     }
   }
 
-  if (!candidate) return { summary }
+  if (!candidate) return { summary, legacyDetected: false }
   const committed = await ipc.commitBabyInfo({
     kind: 'reconcile',
     familyId: options.familyId,
@@ -320,6 +349,7 @@ async function ingestLegacyProjection(
   return {
     summary: nextSummary,
     settings: committed.settings,
+    legacyDetected: true,
   }
 }
 
@@ -387,6 +417,8 @@ export async function reconcileFamilyBabyInfo(
     throw new Error('baby info family mismatch')
   }
 
+  const writerUid = initialSettings.profile.uid ?? ''
+
   let latestSettings = initialSettings
   const cloudSettings = await ingestCloudPages(options)
   options.assertCurrent?.()
@@ -394,7 +426,7 @@ export async function reconcileFamilyBabyInfo(
 
   let summary = await ipc.getBabyInfoSummary(familyId)
   options.assertCurrent?.()
-  const legacy = await ingestLegacyProjection(options, summary)
+  const legacy = await ingestLegacyProjection(options, summary, writerUid)
   options.assertCurrent?.()
   summary = legacy.summary
   if (legacy.settings) latestSettings = legacy.settings
@@ -406,15 +438,24 @@ export async function reconcileFamilyBabyInfo(
 
   let projectionNeedsRetry = false
   if (summary.winner && summary.pendingCount === 0) {
-    const patch = projectionPatch(summary.winner)
-    if (projectionDiffers(options.familyData, patch)) {
-      try {
-        options.assertCurrent?.()
-        await options.ops.updateDoc(options.familyRef, patch as Record<string, unknown>)
-        options.assertCurrent?.()
-      } catch {
-        options.assertCurrent?.()
-        projectionNeedsRetry = true
+    const candidateKey = getBabyInfoMutationKey(summary.winner)
+    const shouldReplace = babyInfoProjectionShouldReplace(
+      candidateKey,
+      summary.winner.logicalClock,
+      options.familyData.babyInfoWinnerKey,
+      options.familyData.babyInfoWinnerLogicalClock,
+    )
+    if (shouldReplace) {
+      const patch = projectionPatch(summary.winner)
+      if (projectionDiffers(options.familyData, patch)) {
+        try {
+          options.assertCurrent?.()
+          await options.ops.updateDoc(options.familyRef, patch as Record<string, unknown>)
+          options.assertCurrent?.()
+        } catch {
+          options.assertCurrent?.()
+          projectionNeedsRetry = true
+        }
       }
     }
   }
@@ -430,5 +471,6 @@ export async function reconcileFamilyBabyInfo(
     needsRetry,
     uploadFailures: summary.pendingCount,
     settings: latestSettings,
+    legacyClientUpdateRequired: writerUid.length > 0 && legacy.legacyDetected,
   }
 }
