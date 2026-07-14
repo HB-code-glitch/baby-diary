@@ -44,6 +44,7 @@ const APP_VERSION = APP_PACKAGE.version
 const E2E_TIMEOUT_MS = 30_000
 const CLOSE_TIMEOUT_MS = 10_000
 const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
+const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
 const DEFAULT_FILE_SYSTEM = { existsSync, lstatSync, realpathSync }
 
 function invariant(condition, message) {
@@ -284,6 +285,8 @@ export function buildSeedSettings(deviceName) {
     },
     language: 'ko',
     theme: 'light',
+    babyInfoJournal: { version: 1, projectedFamilyId: '' },
+    babyInfoRevision: 1,
   }
 }
 
@@ -578,13 +581,14 @@ function verifyFirebaseCli(invocation, env) {
   invariant(result.stdout.trim() === FIREBASE_CLI_VERSION, `Expected Firebase CLI ${FIREBASE_CLI_VERSION}, got ${result.stdout.trim()}`)
 }
 
-function writeSeed(userData, deviceName) {
+export function writeSeed(userData, deviceName) {
   mkdirSync(userData, { recursive: true })
   writeFileSync(
     path.join(userData, 'settings.json'),
     `${JSON.stringify(buildSeedSettings(deviceName), null, 2)}\n`,
     'utf8',
   )
+  writeFileSync(path.join(userData, BABY_INFO_JOURNAL_FILE), '', 'utf8')
 }
 
 function appendOfflineEvent(userData, event) {

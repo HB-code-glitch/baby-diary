@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
+import { SettingsStore } from '../electron/store/settings'
 import { validateDiaryEvent } from '../shared/eventResolver'
 import {
   FIREBASE_AUTH_PORT,
@@ -52,6 +53,7 @@ import {
   semanticEventPayload,
   semanticEventsEqual,
   selectMutationWinner,
+  writeSeed,
 } from '../scripts/sync-e2e.mjs'
 
 describe('packaged cross-platform sync E2E runner contract', () => {
@@ -471,9 +473,36 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(b.baby).toEqual(a.baby)
     expect(a.familyId).toBe('')
     expect(b.familyId).toBe('')
+    expect(a.babyInfoJournal).toEqual({ version: 1, projectedFamilyId: '' })
+    expect(b.babyInfoJournal).toEqual(a.babyInfoJournal)
+    expect(a.babyInfoRevision).toBe(1)
+    expect(b.babyInfoRevision).toBe(1)
     expect(a.profile.name).toBe('Device A')
     expect(b.profile.name).toBe('Device B')
     expect(a.language).toBe('ko')
+  })
+
+  it('loads the E2E seed as an intentional local projection without archiving or clearing its baby pair', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'sync-e2e-modern-seed-'))
+    try {
+      writeSeed(root, 'Device A')
+      expect(readFileSync(path.join(root, 'baby-info-journal-v1.jsonl'), 'utf8')).toBe('')
+
+      const loaded = new SettingsStore(root)
+      expect(loaded.get()).toMatchObject({
+        familyId: '',
+        baby: { name: 'Sync Baby', birthdate: '2026-01-15' },
+        babyInfoJournal: { version: 1, projectedFamilyId: '' },
+        babyInfoRevision: 1,
+      })
+      expect(loaded.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([])
+
+      const restarted = new SettingsStore(root)
+      expect(restarted.get().baby).toEqual({ name: 'Sync Baby', birthdate: '2026-01-15' })
+      expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('treats persisted tutorial completion as authoritative without a legacy language marker', () => {
