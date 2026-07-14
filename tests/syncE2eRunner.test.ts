@@ -70,6 +70,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     })
     const browser = {
       contexts: vi.fn(() => [context]),
+      close: vi.fn(async () => undefined),
     }
     const child = Object.assign(new EventEmitter(), {
       pid: 8123,
@@ -92,6 +93,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         electron_run_as_node: '1',
       },
       timeoutMs: 1_000,
+      platform: 'win32',
       allocatePort: async () => 49211,
       spawnImpl,
       connectOverCDP,
@@ -128,6 +130,40 @@ describe('packaged cross-platform sync E2E runner contract', () => {
 
     await app.close()
     expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
+    expect(browser.close).not.toHaveBeenCalled()
+  })
+
+  it('requests a graceful packaged macOS quit through CDP after closing its windows', async () => {
+    const page = { close: vi.fn(async () => undefined) }
+    const context = Object.assign(new EventEmitter(), {
+      pages: vi.fn(() => [page]),
+      waitForEvent: vi.fn(),
+    })
+    const browser = {
+      contexts: vi.fn(() => [context]),
+      close: vi.fn(async () => undefined),
+    }
+    const child = Object.assign(new EventEmitter(), {
+      pid: 8124,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      stderr: new EventEmitter(),
+    })
+
+    const app = await launchCdpElectronApplication({
+      executablePath: '/Applications/Baby Diary.app/Contents/MacOS/Baby Diary',
+      cwd: '/Applications/Baby Diary.app',
+      env: { TEST_SENTINEL: 'yes' },
+      timeoutMs: 1_000,
+      platform: 'darwin',
+      allocatePort: async () => 49212,
+      spawnImpl: vi.fn(() => child),
+      connectOverCDP: vi.fn(async () => browser),
+    })
+
+    await app.close()
+    expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
+    expect(browser.close).toHaveBeenCalledOnce()
   })
 
   it('attests the exact packaged app.asar metadata used by a CDP launch', async () => {

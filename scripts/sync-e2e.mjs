@@ -962,13 +962,15 @@ async function reserveLoopbackPort({ createServerImpl = createServer } = {}) {
  * Launch a packaged Electron executable like a user does, then attach only to
  * Chromium's remote-debugging endpoint. Playwright's `_electron.launch` also
  * enables Electron's Node inspector (`--inspect=0`); Electron 43 can race that
- * inspector startup across rapid relaunches and crash a sandboxed renderer.
+ * inspector startup across rapid relaunches and crash a sandboxed renderer on
+ * both Windows and macOS.
  */
 export async function launchCdpElectronApplication({
   executablePath,
   cwd,
   env,
   timeoutMs = E2E_TIMEOUT_MS,
+  platform = process.platform,
   allocatePort = reserveLoopbackPort,
   spawnImpl = spawn,
   connectOverCDP,
@@ -976,6 +978,7 @@ export async function launchCdpElectronApplication({
   cleanupProcess = killOwnedProcessTree,
 }) {
   invariant(typeof connectOverCDP === 'function', 'CDP connector is required')
+  invariant(platform === 'win32' || platform === 'darwin', `Unsupported CDP launch platform: ${platform}`)
   const port = await allocatePort()
   invariant(Number.isInteger(port) && port > 0 && port <= 65_535, `Invalid CDP port: ${port}`)
 
@@ -1063,6 +1066,12 @@ export async function launchCdpElectronApplication({
         // window-all-closed triggers the app's durable backup + quit path.
         for (const page of [...pages].reverse()) {
           await page.close({ runBeforeUnload: true })
+        }
+        // Closing the last window exits the Windows app. macOS intentionally
+        // keeps an app alive with no windows, so Browser.close is required to
+        // request a normal application quit and run the durable backup hook.
+        if (platform === 'darwin' && !childProcessExited(child)) {
+          await browser.close()
         }
         context.off?.('page', forwardWindow)
       })()
@@ -1503,28 +1512,15 @@ async function launchDevice({
       FIRESTORE_EMULATOR_HOST: `127.0.0.1:${FIRESTORE_PORT}`,
       ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
     }
-    const app = process.platform === 'win32'
-      ? await launchCdpElectronApplication({
-          executablePath,
-          cwd: ROOT,
-          env: launchEnvironment,
-          connectOverCDP: endpoint => playwright.chromium.connectOverCDP(endpoint),
-        })
-      : await playwright._electron.launch({
-          executablePath,
-          cwd: ROOT,
-          env: launchEnvironment,
-        })
+    const app = await launchCdpElectronApplication({
+      executablePath,
+      cwd: ROOT,
+      env: launchEnvironment,
+      platform: process.platform,
+      connectOverCDP: endpoint => playwright.chromium.connectOverCDP(endpoint),
+    })
     device.app = app
-    const attestation = process.platform === 'win32'
-      ? await readPackagedArtifactAttestation({ executablePath, resourcePath })
-      : await app.evaluate(({ app: electronApp }) => ({
-          name: electronApp.getName(),
-          version: electronApp.getVersion(),
-          isPackaged: electronApp.isPackaged,
-          appPath: electronApp.getAppPath(),
-          executablePath: process.execPath,
-        }))
+    const attestation = await readPackagedArtifactAttestation({ executablePath, resourcePath })
     assertPackagedRuntimeAttestation(attestation, {
       executablePath,
       resourcePath,
