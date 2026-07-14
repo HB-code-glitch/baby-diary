@@ -81,6 +81,10 @@ it('keeps every time-editor target at least 40px', () => {
   expect(css).toMatch(/\.time-edit-control\s*\{[^}]*min-width:\s*40px[^}]*min-height:\s*40px/s)
 })
 
+it('keeps day timeline actions safely above the 40px packaged-app boundary', () => {
+  expect(css).toMatch(/\.timeline-action-button\s*\{[^}]*min-width:\s*44px[^}]*min-height:\s*44px/s)
+})
+
 it('does not visually shrink time-editor targets during its entrance motion', () => {
   const keyframes = css.match(/@keyframes\s+timeEditAppear\s*\{([\s\S]*?)\n\}/)?.[1]
   expect(keyframes).toBeTruthy()

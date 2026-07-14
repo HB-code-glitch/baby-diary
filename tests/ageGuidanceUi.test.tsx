@@ -71,6 +71,18 @@ describe('age guidance progressive UI', () => {
     expect(container.textContent).toContain('생일')
   })
 
+  it('keeps the Japanese Settings evidence-center title when birthdate is unavailable', async () => {
+    const { AgeGuidancePanel } = await loadGuidanceUi()
+    await i18n.changeLanguage('ja')
+
+    await act(async () => {
+      root.render(<AgeGuidancePanel birthdate="" asOf="2026-07-13" variant="settings" />)
+    })
+
+    const eyebrow = container.querySelector<HTMLElement>('[data-guidance-birthdate-prompt] .age-guidance-eyebrow')
+    expect(eyebrow?.textContent).toBe('年齢別エビデンスセンター')
+  })
+
   it.each([undefined, '', 'not-a-date', '2026-07-14'])('routes missing, invalid, and future birthdates to settings', async birthdate => {
     const { AgeGuidancePanel } = await loadGuidanceUi()
     const onRequestBirthdate = vi.fn()

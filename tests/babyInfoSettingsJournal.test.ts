@@ -857,6 +857,127 @@ describe('SettingsStore main-owned baby-info journal integration', () => {
     expect(new SettingsStore(tmpDir).getBabyInfoSummary('family-A').mutationCount).toBe(1)
   })
 
+  it('keeps an intentional familyless local-only projection across ordinary writes and restart', () => {
+    writeSettings(tmpDir, baseSettings({
+      familyId: '',
+      baby: { name: '', birthdate: '', gender: 'girl' },
+    }))
+    const store = new SettingsStore(tmpDir)
+    const edited = commit(store, {
+      kind: 'user-edit',
+      familyId: '',
+      babyName: 'Local baby',
+      babyBirthdate: '2026-04-10',
+    })
+
+    expect(edited).toMatchObject({
+      babyInfo: 'local-only',
+      settings: {
+        baby: { name: 'Local baby', birthdate: '2026-04-10' },
+        babyInfoJournal: { version: 1, projectedFamilyId: '' },
+      },
+    })
+
+    const saved = store.save({ ...store.get(), theme: 'dark' })
+    expect(saved.baby).toMatchObject({ name: 'Local baby', birthdate: '2026-04-10' })
+    const merged = store.merge({ language: 'ja' })
+    expect(merged.baby).toMatchObject({ name: 'Local baby', birthdate: '2026-04-10' })
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get()).toMatchObject({
+      familyId: '',
+      baby: { name: 'Local baby', birthdate: '2026-04-10' },
+      babyInfoJournal: { version: 1, projectedFamilyId: '' },
+      theme: 'dark',
+      language: 'ja',
+    })
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([])
+  })
+
+  it.each(['save', 'merge', 'commit'] as const)(
+    'archives an intentional local-only pair before a %s family transition',
+    transition => {
+      const transitionDir = path.join(tmpDir, transition)
+      fs.mkdirSync(transitionDir)
+      writeSettings(transitionDir, baseSettings({
+        familyId: '',
+        baby: { name: '', birthdate: '', gender: 'boy' },
+      }))
+      const store = new SettingsStore(transitionDir)
+      commit(store, {
+        kind: 'user-edit',
+        familyId: '',
+        babyName: `Local ${transition}`,
+        babyBirthdate: '2026-04-10',
+      })
+      const familyId = `family-${transition}`
+
+      const transitioned = transition === 'save'
+        ? store.save({ ...store.get(), familyId })
+        : transition === 'merge'
+          ? store.merge({ familyId })
+          : commit(store, { kind: 'family-transition', familyId, mode: 'create' }).settings
+
+      expect(transitioned).toMatchObject({
+        familyId,
+        baby: { name: '', birthdate: '' },
+      })
+      expect(store.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
+        expect.objectContaining({
+          babyName: `Local ${transition}`,
+          babyBirthdate: '2026-04-10',
+          source: 'legacy-unscoped',
+        }),
+      ])
+    },
+  )
+
+  it('keeps the local-only pair and durable archive evidence when a family projection write fails', () => {
+    writeSettings(tmpDir, baseSettings({
+      familyId: '',
+      baby: { name: '', birthdate: '', gender: 'girl' },
+    }))
+    const store = new SettingsStore(tmpDir)
+    commit(store, {
+      kind: 'user-edit',
+      familyId: '',
+      babyName: 'Crash-safe local',
+      babyBirthdate: '2026-04-10',
+    })
+    const settingsPath = path.join(tmpDir, 'settings.json')
+    const durableFs = Object.create(fs) as DurableFileOps
+    durableFs.renameSync = (oldPath, newPath) => {
+      if (path.resolve(String(newPath)) === path.resolve(settingsPath)) {
+        throw Object.assign(new Error('injected family projection failure'), { code: 'EIO' })
+      }
+      fs.renameSync(oldPath, newPath)
+    }
+    const guarded = new SettingsStore(tmpDir, { durableFs })
+
+    expect(() => commit(guarded, {
+      kind: 'family-transition',
+      familyId: 'family-after-crash',
+      mode: 'create',
+    })).toThrow(expect.objectContaining({
+      code: 'SETTINGS_RECOVERY_REQUIRED',
+      localDataModified: true,
+      readOnly: true,
+      archiveEvidence: expect.objectContaining({ durable: true }),
+    }))
+
+    const restarted = new SettingsStore(tmpDir)
+    expect(restarted.get().baby).toMatchObject({
+      name: 'Crash-safe local',
+      birthdate: '2026-04-10',
+    })
+    expect(restarted.listUnlinkedBabyInfoArchives({ limit: 10 }).items).toEqual([
+      expect.objectContaining({
+        babyName: 'Crash-safe local',
+        babyBirthdate: '2026-04-10',
+      }),
+    ])
+  })
+
   it('archives an unscoped legacy pair once and never adopts it through create or join', () => {
     writeSettings(tmpDir, baseSettings({
       familyId: '',

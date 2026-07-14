@@ -400,6 +400,262 @@ describe('SettingsPage baby info durable save', () => {
     expect(inputByLabel(container, i18n.t('settings.birthdate')).value).toBe('2026-01-02')
   })
 
+  it('preserves durable baby and profile data when Save wins the remount hydration race', async () => {
+    await act(async () => root.unmount())
+    container.remove()
+
+    mainStore.merge({ familyId: '' })
+    const local = mainStore.get()
+    const durable = mainStore.commitBabyInfo({
+      kind: 'user-edit',
+      familyId: '',
+      babyName: 'Local baby',
+      babyBirthdate: '2026-04-10',
+      settings: {
+        ...local,
+        baby: {
+          ...local.baby,
+          name: 'Local baby',
+          birthdate: '2026-04-10',
+          gender: 'boy',
+        },
+        profile: { ...local.profile, name: 'durable parent', role: 'dad' },
+        theme: 'dark',
+      },
+    }).settings
+    const staleBlank: AppSettings = {
+      ...clone(durable),
+      baby: { ...durable.baby, name: '', birthdate: '', gender: undefined },
+      profile: { ...durable.profile, name: '', role: 'mom' },
+      theme: 'system',
+    }
+    const initialHydration = deferred<AppSettings>()
+    getSettings.mockReset()
+      .mockImplementationOnce(async () => initialHydration.promise)
+      .mockImplementation(async () => clone(mainStore.get()))
+    useAppStore.setState({ settings: clone(staleBlank) })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => root.render(
+      <ToastProvider>
+        <SettingsPage />
+      </ToastProvider>,
+    ))
+
+    expect(inputByLabel(container, i18n.t('settings.babyName')).value).toBe('')
+    expect(inputByLabel(container, i18n.t('settings.birthdate')).value).toBe('')
+    expect(inputByLabel(container, i18n.t('settings.myName')).value).toBe('')
+
+    await act(async () => saveButton(container).click())
+    await flush()
+
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      baby: expect.objectContaining({
+        name: durable.baby.name,
+        birthdate: durable.baby.birthdate,
+        gender: 'boy',
+      }),
+      profile: expect.objectContaining({
+        uid: durable.profile.uid,
+        name: 'durable parent',
+        role: 'dad',
+      }),
+      theme: 'dark',
+    }))
+    expect(mainStore.get()).toMatchObject({
+      baby: {
+        name: durable.baby.name,
+        birthdate: durable.baby.birthdate,
+        gender: 'boy',
+      },
+      profile: {
+        uid: durable.profile.uid,
+        name: 'durable parent',
+        role: 'dad',
+      },
+      theme: 'dark',
+    })
+    expect(inputByLabel(container, i18n.t('settings.babyName')).value).toBe(durable.baby.name)
+    expect(inputByLabel(container, i18n.t('settings.birthdate')).value).toBe(durable.baby.birthdate)
+    expect(inputByLabel(container, i18n.t('settings.myName')).value).toBe('durable parent')
+    expect(container.querySelector('[data-settings-account-role="dad"]')?.classList.contains('selected')).toBe(true)
+    expect(Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent === i18n.t('settings.genderBoy')
+    ))?.classList.contains('selected')).toBe(true)
+    expect(Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent === i18n.t('settings.themeDark')
+    ))?.classList.contains('active')).toBe(true)
+
+    await act(async () => initialHydration.resolve(staleBlank))
+    await flush()
+
+    expect(inputByLabel(container, i18n.t('settings.babyName')).value).toBe(durable.baby.name)
+    expect(inputByLabel(container, i18n.t('settings.birthdate')).value).toBe(durable.baby.birthdate)
+    expect(inputByLabel(container, i18n.t('settings.myName')).value).toBe('durable parent')
+    expect(container.querySelector('[data-settings-account-role="dad"]')?.classList.contains('selected')).toBe(true)
+    expect(Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent === i18n.t('settings.genderBoy')
+    ))?.classList.contains('selected')).toBe(true)
+    expect(Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent === i18n.t('settings.themeDark')
+    ))?.classList.contains('active')).toBe(true)
+  })
+
+  it('lets authoritative disk values win when an untouched hydrated form becomes stale', async () => {
+    const advanced = mainStore.save({
+      ...mainStore.get(),
+      baby: { ...mainStore.get().baby, gender: 'boy' },
+      profile: { ...mainStore.get().profile, name: 'new disk parent', role: 'dad' },
+      theme: 'dark',
+      language: 'ja',
+    })
+
+    // The mounted form still contains its earlier girl/mom/light/Korean snapshot.
+    expect(inputByLabel(container, i18n.t('settings.myName')).value).not.toBe('new disk parent')
+    await act(async () => saveButton(container).click())
+    await flush()
+
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      baby: expect.objectContaining({ gender: advanced.baby.gender }),
+      profile: expect.objectContaining({
+        uid: advanced.profile.uid,
+        name: advanced.profile.name,
+        role: advanced.profile.role,
+      }),
+      theme: advanced.theme,
+      language: advanced.language,
+    }))
+    expect(mainStore.get()).toMatchObject({
+      baby: { gender: 'boy' },
+      profile: { name: 'new disk parent', role: 'dad' },
+      theme: 'dark',
+      language: 'ja',
+    })
+  })
+
+  it('does not let a late generic save reverse an in-flight language selection', async () => {
+    const oldKoreanSnapshot = clone(mainStore.get())
+    const languageRead = deferred<AppSettings>()
+    const releaseLateGenericWrite = deferred<void>()
+    getSettings.mockReset()
+      .mockImplementationOnce(async () => languageRead.promise)
+      .mockImplementation(async () => clone(oldKoreanSnapshot))
+    saveSettings.mockReset()
+      .mockImplementationOnce(async next => {
+        await releaseLateGenericWrite.promise
+        return clone(mainStore.save(next))
+      })
+      .mockImplementation(async next => clone(mainStore.save(next)))
+
+    const japanese = container.querySelector<HTMLButtonElement>('button[lang="ja"]')!
+    await act(async () => japanese.click())
+    await flush()
+
+    // Language read is held; generic Save captures the same old Korean disk snapshot.
+    await act(async () => saveButton(container).click())
+    await flush()
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+
+    // The dedicated language write lands first.
+    await act(async () => languageRead.resolve(oldKoreanSnapshot))
+    await flush()
+    expect(mainStore.get().language).toBe('ja')
+
+    // The generic write completes last and must still carry the explicit Japanese intent.
+    await act(async () => releaseLateGenericWrite.resolve(undefined))
+    await flush()
+    expect(mainStore.get().language).toBe('ja')
+    expect(saveSettings.mock.calls[0]?.[0].language).toBe('ja')
+  })
+
+  it('aborts a stale language save when an earlier disk read resolves after a rapid toggle', async () => {
+    const oldSnapshot = clone(mainStore.get())
+    const firstJapaneseRead = deferred<AppSettings>()
+    getSettings.mockReset()
+      .mockImplementationOnce(async () => firstJapaneseRead.promise)
+      .mockImplementation(async () => clone(mainStore.get()))
+
+    await act(async () => container.querySelector<HTMLButtonElement>('button[lang="ja"]')!.click())
+    await flush()
+    await act(async () => container.querySelector<HTMLButtonElement>('button[lang="ko"]')!.click())
+    await flush()
+
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ language: 'ko' }))
+    expect(mainStore.get().language).toBe('ko')
+
+    await act(async () => firstJapaneseRead.resolve(oldSnapshot))
+    await flush()
+
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(mainStore.get().language).toBe('ko')
+    expect(i18n.language).toBe('ko')
+  })
+
+  it('aborts a stale theme save when an earlier disk read resolves after a rapid toggle', async () => {
+    const oldSnapshot = clone(mainStore.get())
+    const firstDarkRead = deferred<AppSettings>()
+    getSettings.mockReset()
+      .mockImplementationOnce(async () => firstDarkRead.promise)
+      .mockImplementation(async () => clone(mainStore.get()))
+    const themeButton = (key: 'themeDark' | 'themeLight') => Array.from(
+      container.querySelectorAll('button'),
+    ).find(button => button.textContent === i18n.t(`settings.${key}`)) as HTMLButtonElement
+
+    await act(async () => themeButton('themeDark').click())
+    await flush()
+    await act(async () => themeButton('themeLight').click())
+    await flush()
+
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'light' }))
+    expect(mainStore.get().theme).toBe('light')
+
+    await act(async () => firstDarkRead.resolve(oldSnapshot))
+    await flush()
+
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(mainStore.get().theme).toBe('light')
+    expect(document.documentElement.dataset.theme).toBe('light')
+  })
+
+  it('lets explicit profile, gender, role, and theme edits win over disk values', async () => {
+    const profileName = inputByLabel(container, i18n.t('settings.myName'))
+    const selectedGirl = Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent === i18n.t('settings.genderGirl')
+    )) as HTMLButtonElement
+    const dad = container.querySelector<HTMLButtonElement>('[data-settings-account-role="dad"]')!
+    const dark = Array.from(container.querySelectorAll('button')).find(button => (
+      button.textContent === i18n.t('settings.themeDark')
+    )) as HTMLButtonElement
+
+    await act(async () => {
+      setInput(profileName, '')
+      selectedGirl.click() // selected -> explicit clear
+      dad.click()
+    })
+    // Keep the durable theme stale so the generic Save must honor dirty UI intent.
+    saveSettings.mockRejectedValueOnce(new Error('injected immediate theme save failure'))
+    await act(async () => dark.click())
+    await flush()
+    expect(mainStore.get().theme).toBe('light')
+
+    await act(async () => saveButton(container).click())
+    await flush()
+
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      baby: expect.objectContaining({ gender: undefined }),
+      profile: expect.objectContaining({ name: '', role: 'dad' }),
+      theme: 'dark',
+    }))
+    expect(mainStore.get()).toMatchObject({
+      baby: { gender: undefined },
+      profile: { name: '', role: 'dad' },
+      theme: 'dark',
+    })
+  })
+
   it('shows an error alert and no success/pending copy when the atomic disk save fails', async () => {
     commitBabyInfo.mockResolvedValueOnce({
       ok: false,

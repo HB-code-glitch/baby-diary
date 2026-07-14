@@ -340,6 +340,28 @@ export class SettingsStore {
     }
   }
 
+  private isIntentionalLocalProjection(settings: AppSettings): boolean {
+    return settings.familyId === ''
+      && settings.babyInfoSync === undefined
+      && settings.babyInfoJournal?.version === 1
+      && settings.babyInfoJournal.projectedFamilyId === ''
+      && settings.babyInfoJournal.projectedWinnerKey === undefined
+  }
+
+  private archiveIntentionalLocalProjectionForTransition(
+    settings: AppSettings,
+    nextFamilyId: string,
+  ): string | undefined {
+    if (!nextFamilyId
+      || !this.isIntentionalLocalProjection(settings)
+      || (settings.baby.name === '' && settings.baby.birthdate === '')) {
+      return undefined
+    }
+    return this.journal
+      .archiveUnlinkedPair(settings.baby.name, settings.baby.birthdate)
+      ?.archiveId
+  }
+
   /**
    * Import the legacy settings source only after the journal is durable, then
    * recover a possibly interrupted settings projection from the journal index.
@@ -347,6 +369,7 @@ export class SettingsStore {
   private recoverJournalProjection(): void {
     const current = parseAppSettings(this.settings)
     const journalWasEmpty = !this.journal.hasAnyRecords()
+    const preserveIntentionalLocalProjection = this.isIntentionalLocalProjection(current)
     let sourceRemoved = false
     let unlinkedArchiveId: string | undefined
     let journalMutationKind: 'legacy-import' | 'legacy-local-pair' | undefined
@@ -358,7 +381,9 @@ export class SettingsStore {
       journalMutationKind = 'legacy-import'
     }
 
-    if (!current.familyId && (current.baby.name !== '' || current.baby.birthdate !== '')) {
+    if (!current.familyId
+      && !preserveIntentionalLocalProjection
+      && (current.baby.name !== '' || current.baby.birthdate !== '')) {
       unlinkedArchiveId = this.journal
         .archiveUnlinkedPair(current.baby.name, current.baby.birthdate)
         ?.archiveId
@@ -386,8 +411,12 @@ export class SettingsStore {
     }
 
     const metadata = this.projectionMetadata(current.familyId, winner)
-    const desiredName = winner?.babyName ?? ''
-    const desiredBirthdate = winner?.babyBirthdate ?? ''
+    const desiredName = preserveIntentionalLocalProjection
+      ? current.baby.name
+      : winner?.babyName ?? ''
+    const desiredBirthdate = preserveIntentionalLocalProjection
+      ? current.baby.birthdate
+      : winner?.babyBirthdate ?? ''
     const pairChanged = current.baby.name !== desiredName
       || current.baby.birthdate !== desiredBirthdate
     const metadataChanged = !sameValue(current.babyInfoJournal, metadata)
@@ -420,8 +449,18 @@ export class SettingsStore {
       this.recoverJournalProjection()
       const currentFamilyId = this.settings.familyId
       let next = applyManagedSettingsSave(this.settings, settings)
+      const transitionArchiveId = next.familyId !== currentFamilyId
+        ? this.archiveIntentionalLocalProjectionForTransition(this.settings, next.familyId)
+        : undefined
       if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
-      this.write(next)
+      try {
+        this.write(next)
+      } catch (error) {
+        if (transitionArchiveId) {
+          throw new SettingsLocalMutationRecoveryError(transitionArchiveId, error)
+        }
+        throw error
+      }
       return this.get()
     } catch (error) {
       throw this.normalizeStorageRecoveryError(error)
@@ -435,8 +474,18 @@ export class SettingsStore {
       this.recoverJournalProjection()
       const currentFamilyId = this.settings.familyId
       let next = applyManagedSettingsMerge(this.settings, partial)
+      const transitionArchiveId = next.familyId !== currentFamilyId
+        ? this.archiveIntentionalLocalProjectionForTransition(this.settings, next.familyId)
+        : undefined
       if (next.familyId !== currentFamilyId) next = this.projectFamily(next, next.familyId)
-      this.write(next)
+      try {
+        this.write(next)
+      } catch (error) {
+        if (transitionArchiveId) {
+          throw new SettingsLocalMutationRecoveryError(transitionArchiveId, error)
+        }
+        throw error
+      }
       return this.get()
     } catch (error) {
       throw this.normalizeStorageRecoveryError(error)
@@ -480,8 +529,19 @@ export class SettingsStore {
     if (operation.kind === 'family-transition') {
       this.recoverJournalProjection()
       current = parseAppSettings(this.settings)
+      const transitionArchiveId = this.archiveIntentionalLocalProjectionForTransition(
+        current,
+        operation.familyId,
+      )
       const next = this.projectFamily(current, operation.familyId)
-      this.write(next)
+      try {
+        this.write(next)
+      } catch (error) {
+        if (transitionArchiveId) {
+          throw new SettingsLocalMutationRecoveryError(transitionArchiveId, error)
+        }
+        throw error
+      }
       const summary = this.journal.getSummary(operation.familyId)
       return {
         kind: 'family-transition',

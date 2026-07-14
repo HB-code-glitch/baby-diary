@@ -182,7 +182,7 @@ export function AgeGuidancePanel({
   if (!birthdate || !stage || completedMonths === null) {
     return (
       <section className="age-guidance-panel is-missing" data-guidance-birthdate-prompt data-tour="age-guidance">
-        <div className="age-guidance-eyebrow">{copy.title}</div>
+        <div className="age-guidance-eyebrow">{copy.eyebrow}</div>
         <h2>{copy.missingTitle}</h2>
         <p>{copy.missingBody}</p>
         {onRequestBirthdate && (

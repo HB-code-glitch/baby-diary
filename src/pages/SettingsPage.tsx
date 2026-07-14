@@ -69,8 +69,19 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const [birthdate,  setBirthdate]  = useState(settings?.baby?.birthdate  ?? '')
   const babyNameDirtyRef = useRef(false)
   const birthdateDirtyRef = useRef(false)
+  const babyGenderDirtyRef = useRef(false)
+  const myNameDirtyRef = useRef(false)
+  const myRoleDirtyRef = useRef(false)
+  const themeDirtyRef = useRef(false)
+  const languageDirtyRef = useRef(false)
   const babyNameEditGenerationRef = useRef(0)
   const birthdateEditGenerationRef = useRef(0)
+  const babyGenderEditGenerationRef = useRef(0)
+  const myNameEditGenerationRef = useRef(0)
+  const myRoleEditGenerationRef = useRef(0)
+  const themeEditGenerationRef = useRef(0)
+  const languageEditGenerationRef = useRef(0)
+  const mountHydrationEpochRef = useRef(0)
   const [babyGender, setBabyGender] = useState<'girl' | 'boy' | undefined>(settings?.baby?.gender)
   const [myName,     setMyName]     = useState(settings?.profile?.name    ?? '')
   const [myRole,     setMyRole]     = useState<'mom' | 'dad'>(settings?.profile?.role ?? 'mom')
@@ -86,25 +97,28 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   const archiveFocusIndexRef = useRef<number | null>(null)
 
   // Hydrate form from a settings object
-  const hydrateForm = useCallback((s: AppSettings, forceBabyInfo = false) => {
-    if (forceBabyInfo || !babyNameDirtyRef.current) {
+  const hydrateForm = useCallback((s: AppSettings, forceAll = false) => {
+    if (forceAll || !babyNameDirtyRef.current) {
       setBabyName(s.baby?.name ?? '')
     }
-    if (forceBabyInfo || !birthdateDirtyRef.current) {
+    if (forceAll || !birthdateDirtyRef.current) {
       setBirthdate(s.baby?.birthdate ?? '')
     }
-    setBabyGender(s.baby?.gender)
-    setMyName(s.profile?.name      ?? '')
-    setMyRole(s.profile?.role      ?? 'mom')
-    setCurrentTheme(s.theme        ?? 'system')
+    if (forceAll || !babyGenderDirtyRef.current) setBabyGender(s.baby?.gender)
+    if (forceAll || !myNameDirtyRef.current) setMyName(s.profile?.name ?? '')
+    if (forceAll || !myRoleDirtyRef.current) setMyRole(s.profile?.role ?? 'mom')
+    if (forceAll || !themeDirtyRef.current) setCurrentTheme(s.theme ?? 'system')
   }, [])
 
   // Belt+suspenders: on mount, always fetch fresh settings directly from disk
   // (bypasses possible stale Zustand store state from hydration race)
   useEffect(() => {
     let cancelled = false
+    const hydrationEpoch = mountHydrationEpochRef.current
     ipc.getSettings().then(fresh => {
-      if (!cancelled) hydrateForm(fresh)
+      if (!cancelled && hydrationEpoch === mountHydrationEpochRef.current) {
+        hydrateForm(fresh)
+      }
     }).catch(() => {
       // fallback to store state handled below
     })
@@ -190,18 +204,46 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
     const submittedBirthdate = birthdate
     const submittedBabyNameDirty = babyNameDirtyRef.current
     const submittedBirthdateDirty = birthdateDirtyRef.current
+    const submittedBabyGenderDirty = babyGenderDirtyRef.current
+    const submittedMyNameDirty = myNameDirtyRef.current
+    const submittedMyRoleDirty = myRoleDirtyRef.current
+    const submittedThemeDirty = themeDirtyRef.current
+    const submittedLanguageDirty = languageDirtyRef.current
     const submittedBabyNameGeneration = babyNameEditGenerationRef.current
     const submittedBirthdateGeneration = birthdateEditGenerationRef.current
+    const submittedBabyGenderGeneration = babyGenderEditGenerationRef.current
+    const submittedMyNameGeneration = myNameEditGenerationRef.current
+    const submittedMyRoleGeneration = myRoleEditGenerationRef.current
+    const submittedThemeGeneration = themeEditGenerationRef.current
+    const submittedLanguageGeneration = languageEditGenerationRef.current
+    const submittedBabyGender = babyGender
+    const submittedMyName = myName
+    const submittedMyRole = myRole
+    const submittedTheme = currentTheme
+    const submittedLanguage = i18nInstance.language as Language
+    // A late mount read belongs to the pre-save snapshot and must never win.
+    mountHydrationEpochRef.current += 1
     setSaving(true)
     try {
       // Source of truth: always fetch fresh from disk before merging
       const current = await ipc.getSettings()
 
+      // Disk is authoritative for every untouched field, even after an earlier
+      // hydration completed: another process/sync path may have advanced it.
+      // Explicit user edits retain ownership, including intentional empty values.
+      const resolvedBabyName = submittedBabyNameDirty ? submittedBabyName : current.baby.name
+      const resolvedBirthdate = submittedBirthdateDirty ? submittedBirthdate : current.baby.birthdate
+      const resolvedBabyGender = submittedBabyGenderDirty ? submittedBabyGender : current.baby.gender
+      const resolvedMyName = submittedMyNameDirty ? submittedMyName : current.profile.name
+      const resolvedMyRole = submittedMyRoleDirty ? submittedMyRole : current.profile.role
+      const resolvedTheme = submittedThemeDirty ? submittedTheme : current.theme
+      const resolvedLanguage = submittedLanguageDirty ? submittedLanguage : current.language
+
       const form: FormSnapshot = {
-        babyName: submittedBabyName,
-        birthdate: submittedBirthdate,
-        babyGender,
-        myName,
+        babyName: resolvedBabyName,
+        birthdate: resolvedBirthdate,
+        babyGender: resolvedBabyGender,
+        myName: resolvedMyName,
       }
 
       // Merge: never blank-overwrite non-empty saved critical fields
@@ -214,18 +256,19 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
         baby: {
           ...merged.baby,
           // Dirty fields carry exact user intent, including an empty string.
-          name: submittedBabyNameDirty ? submittedBabyName : merged.baby.name,
-          birthdate: submittedBirthdateDirty ? submittedBirthdate : merged.baby.birthdate,
+          name: resolvedBabyName,
+          birthdate: resolvedBirthdate,
         },
         profile: {
           ...merged.profile,
           uid:  current.profile?.uid ?? settings?.profile?.uid ?? uuidv4(),
-          role: myRole,
+          name: resolvedMyName,
+          role: resolvedMyRole,
         },
         familyId: current.familyId ?? settings?.familyId ?? '',  // F8: never fabricate
         firebase:  current.firebase  ?? settings?.firebase  ?? null,
-        language:  (i18nInstance.language as Language) ?? 'ko',
-        theme:     currentTheme,
+        language:  resolvedLanguage,
+        theme:     resolvedTheme,
       }
 
       const saveResult = babyInfoWasDirty
@@ -239,8 +282,26 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       const birthdateChangedSinceSubmission = (
         birthdateEditGenerationRef.current !== submittedBirthdateGeneration
       )
+      const babyGenderChangedSinceSubmission = (
+        babyGenderEditGenerationRef.current !== submittedBabyGenderGeneration
+      )
+      const myNameChangedSinceSubmission = myNameEditGenerationRef.current !== submittedMyNameGeneration
+      const myRoleChangedSinceSubmission = myRoleEditGenerationRef.current !== submittedMyRoleGeneration
+      const themeChangedSinceSubmission = themeEditGenerationRef.current !== submittedThemeGeneration
+      const languageChangedSinceSubmission = (
+        languageEditGenerationRef.current !== submittedLanguageGeneration
+      )
       if (!babyNameChangedSinceSubmission) babyNameDirtyRef.current = false
       if (!birthdateChangedSinceSubmission) birthdateDirtyRef.current = false
+      if (!babyGenderChangedSinceSubmission) babyGenderDirtyRef.current = false
+      if (!myNameChangedSinceSubmission) myNameDirtyRef.current = false
+      if (!myRoleChangedSinceSubmission) myRoleDirtyRef.current = false
+      if (!themeChangedSinceSubmission) themeDirtyRef.current = false
+      if (!languageChangedSinceSubmission) languageDirtyRef.current = false
+
+      // Cleared fields accept the durable result. Edits made while the save was
+      // pending remain dirty and are therefore not overwritten.
+      hydrateForm(savedSettings)
 
       if (savedSettings.familyId) {
         // Member entry self-heal: push profile name/role to family doc member entry
@@ -257,7 +318,7 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
       const formWasBlank = !babyInfoWasDirty
         && !submittedBabyName.trim()
         && !submittedBirthdate.trim()
-        && !myName.trim()
+        && !submittedMyName.trim()
       const diskHadData  = !!(current.baby?.name?.trim() || current.baby?.birthdate?.trim() || current.profile?.name?.trim())
 
       if (saveResult.babyInfo === 'pending') {
@@ -266,8 +327,6 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
         && diskHadData
         && !babyNameChangedSinceSubmission
         && !birthdateChangedSinceSubmission) {
-        // Re-hydrate from merged result so the user sees their real data
-        hydrateForm(savedSettings, true)
         showToast({ message: t('settings.restoredFromDisk') })
       } else {
         showToast({ message: t('settings.toastSaved') })
@@ -281,18 +340,26 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
   }
 
   const handleLanguageChange = async (lang: Language) => {
+    languageDirtyRef.current = true
+    languageEditGenerationRef.current += 1
+    const languageGeneration = languageEditGenerationRef.current
     setLanguage(lang)
     // P4: always fetch fresh settings from disk before merging — never reconstruct
     // sub-objects from possibly-null Zustand snapshot (would overwrite baby name/uid).
     try {
       const current = await ipc.getSettings()
+      if (languageEditGenerationRef.current !== languageGeneration) return
       await saveSettings({ ...current, language: lang })
+      if (languageEditGenerationRef.current === languageGeneration) languageDirtyRef.current = false
     } catch {
       showToast({ message: t('settings.toastSaveFail') })
     }
   }
 
   const handleThemeChange = async (theme: 'light' | 'dark' | 'system') => {
+    themeDirtyRef.current = true
+    themeEditGenerationRef.current += 1
+    const themeGeneration = themeEditGenerationRef.current
     setCurrentTheme(theme)
     // Apply instantly via data-theme
     let resolved: 'light' | 'dark'
@@ -306,7 +373,9 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
     // sub-objects from possibly-null Zustand snapshot (would overwrite baby name/uid).
     try {
       const current = await ipc.getSettings()
+      if (themeEditGenerationRef.current !== themeGeneration) return
       await saveSettings({ ...current, theme })
+      if (themeEditGenerationRef.current === themeGeneration) themeDirtyRef.current = false
     } catch {
       showToast({ message: t('settings.toastSaveFail') })
     }
@@ -548,14 +617,22 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
                     className={`role-btn${babyGender === 'girl' ? ' selected' : ''}`}
-                    onClick={() => setBabyGender(babyGender === 'girl' ? undefined : 'girl')}
+                    onClick={() => {
+                      babyGenderDirtyRef.current = true
+                      babyGenderEditGenerationRef.current += 1
+                      setBabyGender(babyGender === 'girl' ? undefined : 'girl')
+                    }}
                     type="button"
                   >
                     {t('settings.genderGirl')}
                   </button>
                   <button
                     className={`role-btn${babyGender === 'boy' ? ' selected' : ''}`}
-                    onClick={() => setBabyGender(babyGender === 'boy' ? undefined : 'boy')}
+                    onClick={() => {
+                      babyGenderDirtyRef.current = true
+                      babyGenderEditGenerationRef.current += 1
+                      setBabyGender(babyGender === 'boy' ? undefined : 'boy')
+                    }}
                     type="button"
                   >
                     {t('settings.genderBoy')}
@@ -577,7 +654,11 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   data-settings-account-name
                   placeholder={t('settings.myNamePlaceholder')}
                   value={myName}
-                  onChange={e => setMyName(e.target.value)}
+                  onChange={e => {
+                    myNameDirtyRef.current = true
+                    myNameEditGenerationRef.current += 1
+                    setMyName(e.target.value)
+                  }}
                 />
               </div>
               <div>
@@ -586,14 +667,22 @@ export function SettingsPage({ onStartTour }: SettingsPageProps) {
                   <button
                     className={`role-btn${myRole === 'mom' ? ' selected' : ''}`}
                     data-settings-account-role="mom"
-                    onClick={() => setMyRole('mom')}
+                    onClick={() => {
+                      myRoleDirtyRef.current = true
+                      myRoleEditGenerationRef.current += 1
+                      setMyRole('mom')
+                    }}
                   >
                     {t('settings.roleMom')}
                   </button>
                   <button
                     className={`role-btn${myRole === 'dad' ? ' selected' : ''}`}
                     data-settings-account-role="dad"
-                    onClick={() => setMyRole('dad')}
+                    onClick={() => {
+                      myRoleDirtyRef.current = true
+                      myRoleEditGenerationRef.current += 1
+                      setMyRole('dad')
+                    }}
                   >
                     {t('settings.roleDad')}
                   </button>

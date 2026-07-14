@@ -484,6 +484,8 @@ async function main() {
     await nameInput.triple_click?.() ?? await nameInput.click({ clickCount: 3 })
     await nameInput.fill('테스트')
 
+    const babyNameValue = await nameInput.inputValue()
+
     // Birthdate = today - 95 days
     const birthdateValue = daysAgo(95)
     const dateInput = await page.$('input[type="date"]')
@@ -1156,8 +1158,20 @@ async function main() {
 
     const settingsSaveForLanguageSwitch = page.locator('[data-tour="settings-main"] .btn-primary').first()
     assert(await settingsSaveForLanguageSwitch.isVisible(), 'Settings save action is available for language-switch toast coverage')
+    const settingsBeforeLanguageSwitchSave = await page.evaluate(() => window.babyDiary.getSettings())
+    assert(
+      settingsBeforeLanguageSwitchSave.baby?.name === babyNameValue
+        && settingsBeforeLanguageSwitchSave.baby?.birthdate === birthdateValue,
+      'step 9 pre-save preserves the baby name and birthdate recorded in step 2',
+    )
     await settingsSaveForLanguageSwitch.click()
     await page.waitForSelector('.toast', { timeout: 5000 })
+    const settingsAfterLanguageSwitchSave = await page.evaluate(() => window.babyDiary.getSettings())
+    assert(
+      settingsAfterLanguageSwitchSave.baby?.name === babyNameValue
+        && settingsAfterLanguageSwitchSave.baby?.birthdate === birthdateValue,
+      'step 9 save preserves the baby name and birthdate recorded in step 2',
+    )
     assert(await page.locator('.toast').count() > 0, 'an old-language toast is visible before switching languages')
 
     // Click 日本語 button
