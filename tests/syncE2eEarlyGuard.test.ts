@@ -17,6 +17,7 @@ import {
   createSyncE2EGuard,
   isAllowedSyncE2EGuardUrl,
   readSyncE2EGuardConfig,
+  safeConsoleSummary,
 } from '../electron/syncE2EGuard'
 
 const TOKEN = 'a'.repeat(64)
@@ -38,6 +39,43 @@ function guardEnvironment(userData: string): NodeJS.ProcessEnv {
 }
 
 describe('packaged sync E2E early main-process guard', () => {
+  it('keeps console causes useful while removing secrets and identifiers', () => {
+    const summary = safeConsoleSummary([
+      'Firestore write failed\nwhile restoring account',
+      'https://user:pass@example.test/private?apiKey=api-key-value',
+      'private-account@example.test',
+      'Authorization: Bearer bearer-secret-value',
+      'token=0123456789abcdef0123456789abcdef',
+      'credential="wife-private-value"',
+      '{"refreshToken":"refresh-private-value","client_secret":"client-private-value"}',
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiYWJ5In0.signaturevalue',
+      '01890f47-3c6f-7cc1-98c2-b8f9deac0001',
+      String.raw`C:\Users\wife-private\AppData\Roaming\baby-diary\events.jsonl`,
+      '/Users/wife-private/Library/BabyDiary/events.jsonl',
+      '\u0000\u0007',
+    ].join(' '))
+
+    expect(summary).toContain('Firestore write failed while restoring account')
+    expect(summary).toContain('[url]')
+    expect(summary).toContain('[email]')
+    expect(summary).toContain('[redacted]')
+    expect(summary).toContain('[jwt]')
+    expect(summary).toContain('[uuid]')
+    expect(summary).toContain('[path]')
+    expect(summary).not.toMatch(/[\r\n\u0000-\u001f\u007f]/)
+    expect(summary).not.toContain('private-account')
+    expect(summary).not.toContain('api-key-value')
+    expect(summary).not.toContain('bearer-secret-value')
+    expect(summary).not.toContain('wife-private-value')
+    expect(summary).not.toContain('refresh-private-value')
+    expect(summary).not.toContain('client-private-value')
+    expect(summary).not.toContain('wife-private')
+    expect(summary).not.toContain('01890f47')
+    expect(summary.length).toBeLessThanOrEqual(240)
+    expect(safeConsoleSummary(' \r\n\t\u0000 ')).toBe('unavailable')
+    expect(safeConsoleSummary('ordinary failure '.repeat(40))).toHaveLength(240)
+  })
+
   it('is inert unless the explicit test-only activation token is present', () => {
     expect(readSyncE2EGuardConfig({}, path.resolve('production-user-data'))).toBeNull()
     expect(() => readSyncE2EGuardConfig({
@@ -131,7 +169,7 @@ describe('packaged sync E2E early main-process guard', () => {
     }
   })
 
-  it('attaches window diagnostics before load without writing renderer message contents', () => {
+  it('attaches window diagnostics before load with redacted modern and legacy summaries', () => {
     const userData = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-early-guard-')))
     const resourceRoot = path.resolve('release', 'win-unpacked', 'resources', 'app.asar')
     try {
@@ -147,16 +185,25 @@ describe('packaged sync E2E early main-process guard', () => {
 
       webContents.emit('console-message', {
         level: 'error',
-        message: 'private-account@example.test password=do-not-write',
+        message: 'Auth restore failed for private-account@example.test password=do-not-write',
+        stack: 'raw-stack-with-secret-token',
         lineNumber: 17,
         sourceId: packagedSource,
       })
-      window.emit('close')
+      webContents.emit(
+        'console-message',
+        {},
+        3,
+        'Legacy Firestore write failed token=legacy-private-token',
+        18,
+        'node:electron/js2c/browser_init',
+      )
+      guard.beginShutdown()
       webContents.emit('console-message', {
         level: 'error',
-        message: 'private-account@example.test password=still-do-not-write',
-        lineNumber: 18,
-        sourceId: packagedSource,
+        message: 'Teardown failed credential=still-do-not-write',
+        lineNumber: 19,
+        sourceId: 'node:electron/js2c/browser_init',
       })
       let prevented = false
       webContents.emit('will-navigate', {
@@ -181,13 +228,23 @@ describe('packaged sync E2E early main-process guard', () => {
           protocol: 'file:',
           destination: 'packaged',
           line: 17,
+          summary: 'Auth restore failed for [email] password=[redacted]',
+        }),
+        expect.objectContaining({
+          kind: 'console-error',
+          phase: 'active',
+          protocol: 'node:',
+          destination: 'external',
+          line: 18,
+          summary: 'Legacy Firestore write failed token=[redacted]',
         }),
         expect.objectContaining({
           kind: 'console-error',
           phase: 'closing',
-          protocol: 'file:',
-          destination: 'packaged',
-          line: 18,
+          protocol: 'node:',
+          destination: 'external',
+          line: 19,
+          summary: 'Teardown failed credential=[redacted]',
         }),
       ])
       for (const kind of ['console-error', 'navigation-blocked', 'load-failed', 'renderer-gone']) {
@@ -195,10 +252,19 @@ describe('packaged sync E2E early main-process guard', () => {
       }
       expect(source).not.toContain('private-account')
       expect(source).not.toContain('do-not-write')
-      expect(source).not.toContain('token=')
+      expect(source).not.toContain('legacy-private-token')
+      expect(source).not.toContain('raw-stack-with-secret-token')
+      expect(source).not.toContain('token=secret')
     } finally {
       rmSync(userData, { recursive: true, force: true })
     }
+  })
+
+  it('marks the shared guard as shutting down at the start of before-quit', () => {
+    const source = readFileSync(path.resolve('electron', 'main.ts'), 'utf8')
+    expect(source).toMatch(
+      /app\.on\('before-quit', \(event\) => \{\s*syncE2EGuard\?\.beginShutdown\(\)/,
+    )
   })
 
   it('refuses to overwrite a pre-existing diagnostic file', () => {

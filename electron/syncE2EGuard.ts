@@ -88,6 +88,41 @@ function safeReason(value: unknown): string {
     : 'unknown'
 }
 
+const MAX_CONSOLE_SUMMARY_LENGTH = 240
+
+export function safeConsoleSummary(message: unknown): string {
+  if (typeof message !== 'string') return 'unavailable'
+
+  let summary = message
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\b(?:https?|wss?|ftp|file):\/\/[^\s<>"'`]+/gi, '[url]')
+    .replace(/\b[A-Za-z]:\\(?:[^\\\s"'<>|]+\\)*[^\\\s"'<>|]*/g, '[path]')
+    .replace(
+      /(^|[\s("'`])\/(?:[^/\s"'<>]+\/)*[^/\s"'<>]*/g,
+      (_match, prefix: string) => `${prefix}[path]`,
+    )
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+    .replace(
+      /(["']?)([A-Za-z0-9_-]*(?:api[_-]?key|password|token|secret|authorization|credential)[A-Za-z0-9_-]*)\1\s*[:=]\s*(?:\[redacted\]|"[^"\r\n]*"|'[^'\r\n]*'|Bearer\s+[^\s,;)}\]&]+|[^\s,;)}\]&]+)/gi,
+      (_match, _quote: string, key: string) => `${key}=[redacted]`,
+    )
+    .replace(/\bBearer\s+[^\s,;)}\]&]+/gi, 'Bearer [redacted]')
+    .replace(/\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[jwt]')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '[uuid]')
+    .replace(
+      /(^|[^A-Za-z0-9+/_=-])([A-Za-z0-9+/_-]{24,}={0,2})(?=$|[^A-Za-z0-9+/_=-])/g,
+      (_match, prefix: string) => `${prefix}[redacted]`,
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!summary) return 'unavailable'
+  if (summary.length > MAX_CONSOLE_SUMMARY_LENGTH) {
+    summary = `${summary.slice(0, MAX_CONSOLE_SUMMARY_LENGTH - 1).trimEnd()}…`
+  }
+  return summary || 'unavailable'
+}
+
 function eventUrl(args: unknown[]): unknown {
   for (const value of args) {
     if (typeof value === 'string' && /^[a-z][a-z0-9+.-]*:/i.test(value)) return value
@@ -171,6 +206,7 @@ export function isAllowedSyncE2EGuardUrl(rawUrl: string, resourceRoot: string): 
 export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
   installSessionGuard: (session: GuardSession, resourceRoot: string) => void
   attachWindowDiagnostics: (window: GuardWindow, resourceRoot: string) => void
+  beginShutdown: () => void
   close: () => void
 } {
   let descriptor: number
@@ -183,6 +219,7 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
   }
 
   let closed = false
+  let shuttingDown = false
   let sessionInstalled = false
   const attached = new WeakSet<object>()
   const record = (kind: string, fields: Record<string, DiagnosticValue> = {}): void => {
@@ -221,10 +258,12 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
       if (level !== 'error' && level !== 3) return
       const source = details?.sourceId ?? args[4]
       const lineNumber = details?.lineNumber ?? args[3]
+      const message = details?.message ?? args[2]
       record('console-error', {
-        phase,
+        phase: shuttingDown || phase === 'closing' ? 'closing' : 'active',
         ...safeUrlFields(source, resourceRoot),
         ...(typeof lineNumber === 'number' ? { line: lineNumber } : {}),
+        summary: safeConsoleSummary(message),
       })
     })
 
@@ -266,6 +305,9 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
   return {
     installSessionGuard,
     attachWindowDiagnostics,
+    beginShutdown: () => {
+      shuttingDown = true
+    },
     close: () => {
       if (closed) return
       closed = true

@@ -779,6 +779,34 @@ export function collectPersistentGuardDiagnostics(
   blockedRequests,
   rendererErrors,
 ) {
+  const safeConsoleSummary = message => {
+    if (typeof message !== 'string') return 'unavailable'
+    let summary = message
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+      .replace(/\b(?:https?|wss?|ftp|file):\/\/[^\s<>"'`]+/gi, '[url]')
+      .replace(/\b[A-Za-z]:\\(?:[^\\\s"'<>|]+\\)*[^\\\s"'<>|]*/g, '[path]')
+      .replace(
+        /(^|[\s("'`])\/(?:[^/\s"'<>]+\/)*[^/\s"'<>]*/g,
+        (_match, prefix) => `${prefix}[path]`,
+      )
+      .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+      .replace(
+        /(["']?)([A-Za-z0-9_-]*(?:api[_-]?key|password|token|secret|authorization|credential)[A-Za-z0-9_-]*)\1\s*[:=]\s*(?:\[redacted\]|"[^"\r\n]*"|'[^'\r\n]*'|Bearer\s+[^\s,;)}\]&]+|[^\s,;)}\]&]+)/gi,
+        (_match, _quote, key) => `${key}=[redacted]`,
+      )
+      .replace(/\bBearer\s+[^\s,;)}\]&]+/gi, 'Bearer [redacted]')
+      .replace(/\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[jwt]')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '[uuid]')
+      .replace(
+        /(^|[^A-Za-z0-9+/_=-])([A-Za-z0-9+/_-]{24,}={0,2})(?=$|[^A-Za-z0-9+/_=-])/g,
+        (_match, prefix) => `${prefix}[redacted]`,
+      )
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!summary) return 'unavailable'
+    if (summary.length > 240) summary = `${summary.slice(0, 239).trimEnd()}…`
+    return summary || 'unavailable'
+  }
   for (const diagnosticFile of diagnosticFiles) {
     invariant(
       diagnosticFile
@@ -832,7 +860,8 @@ export function collectPersistentGuardDiagnostics(
         const destination = typeof record.destination === 'string' ? record.destination : 'unknown'
         const port = typeof record.port === 'number' ? ` port=${record.port}` : ''
         const line = typeof record.line === 'number' ? ` line=${record.line}` : ''
-        rendererErrors.push(`${diagnosticFile.name}: early console-error ${protocol} ${destination}${port}${line}`)
+        const summary = safeConsoleSummary(record.summary)
+        rendererErrors.push(`${diagnosticFile.name}: early console-error ${protocol} ${destination}${port}${line} summary=${summary}`)
         continue
       }
       if (['load-failed', 'preload-error', 'renderer-unresponsive'].includes(record.kind)) {

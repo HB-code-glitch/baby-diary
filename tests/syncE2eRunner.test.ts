@@ -939,6 +939,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
           protocol: 'file:',
           destination: 'packaged',
           line: 17,
+          summary: String.raw`Auth restore failed for private-account@example.test password=wife-private-password C:\Users\wife-private\AppData\events.jsonl 01890f47-3c6f-7cc1-98c2-b8f9deac0001`,
         }),
         JSON.stringify({
           kind: 'console-error',
@@ -946,6 +947,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
           destination: 'loopback',
           port: 8080,
           line: 23,
+          summary: 'Firestore write rejected token=0123456789abcdef0123456789abcdef',
         }),
         JSON.stringify({
           kind: 'console-error',
@@ -953,6 +955,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
           protocol: 'file:',
           destination: 'packaged',
           line: 99,
+          summary: 'Teardown private-account@example.test password=closing-private-password',
         }),
       ].join('\n') + '\n')
       const rendererErrors: string[] = []
@@ -964,9 +967,15 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       )
 
       expect(rendererErrors).toEqual([
-        'B-relaunch: early console-error file: packaged line=17',
-        'B-relaunch: early console-error http: loopback port=8080 line=23',
+        'B-relaunch: early console-error file: packaged line=17 summary=Auth restore failed for [email] password=[redacted] [path] [uuid]',
+        'B-relaunch: early console-error http: loopback port=8080 line=23 summary=Firestore write rejected token=[redacted]',
       ])
+      expect(rendererErrors.join(' ')).not.toContain('private-account')
+      expect(rendererErrors.join(' ')).not.toContain('wife-private-password')
+      expect(rendererErrors.join(' ')).not.toContain('wife-private')
+      expect(rendererErrors.join(' ')).not.toContain('01890f47')
+      expect(rendererErrors.join(' ')).not.toContain('0123456789abcdef')
+      expect(rendererErrors.join(' ')).not.toContain('closing-private-password')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

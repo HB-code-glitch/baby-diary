@@ -644,6 +644,7 @@ app.on('will-quit', () => {
 // P9 + V3: defer quit until backup() has fully settled so a crash mid-backup
 // cannot leave a corrupt or partial backup file as the newest copy.
 app.on('before-quit', (event) => {
+  syncE2EGuard?.beginShutdown()
   event.preventDefault()
   // P22: Stop the updater timer so it cannot fire during shutdown.
   stopUpdater()
