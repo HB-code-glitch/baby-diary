@@ -4,6 +4,7 @@ import { DiaryEvent } from '../../shared/types'
 import { compareEventMutations, getEventStorageKey, validateDiaryEvent } from '../../shared/eventResolver'
 import {
   appendDurableFileSync,
+  isDurableAppendCommittedError,
   type DurableFileOps,
   type DurableWriteOptions,
 } from './durableFs'
@@ -142,7 +143,17 @@ export class EventLog {
           fs.closeSync(readFd)
         }
         if (lastByte[0] !== 0x0a) {
-          appendDurableFileSync(filePath, Buffer.from('\n', 'utf8'), this.durableWriteOptions)
+          try {
+            appendDurableFileSync(filePath, Buffer.from('\n', 'utf8'), this.durableWriteOptions)
+          } catch (err) {
+            if (!isDurableAppendCommittedError(err)) {
+              console.error('[EventLog] Failed to repair torn newline before append:', err)
+              return 'error'
+            }
+            // The separator byte reached disk and was fsynced before a later
+            // step (fd close / directory fsync) failed. Treat it as durable
+            // and continue appending the record onto the now-separated file.
+          }
         }
       }
     } catch (err: unknown) {
@@ -152,8 +163,14 @@ export class EventLog {
     try {
       appendDurableFileSync(filePath, Buffer.from(line, 'utf8'), this.durableWriteOptions)
     } catch (err) {
-      console.error('[EventLog] Failed to write event to disk:', err)
-      return 'error'
+      if (!isDurableAppendCommittedError(err)) {
+        console.error('[EventLog] Failed to write event to disk:', err)
+        return 'error'
+      }
+      // The record bytes reached disk and were fsynced before a later step
+      // (fd close / directory fsync for a newly created month file) failed.
+      // The append is durably committed on disk; report success and keep
+      // the in-memory index/mutations in sync with what is now on disk.
     }
 
     this.mutations.set(mutationKey, event)
