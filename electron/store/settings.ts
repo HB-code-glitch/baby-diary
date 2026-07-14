@@ -519,13 +519,18 @@ export class SettingsStore {
         if (maximumClock >= Number.MAX_SAFE_INTEGER) {
           throw new Error('baby info logical clock exhausted')
         }
+        const nowMs = Date.now()
         mutation = {
           mutationId: uuidv4(),
           familyId: operation.familyId,
           babyName: operation.babyName,
           babyBirthdate: operation.babyBirthdate,
           logicalClock: maximumClock + 1,
-          updatedAt: new Date().toISOString(),
+          updatedAt: new Date(nowMs).toISOString(),
+          // firestore.rules requires this numeric shadow on every uploaded
+          // mutation (validBabyMutationShape's `hasAll([...,'updatedAtMs',...])`);
+          // without it, cloud writes for this mutation are denied outright.
+          updatedAtMs: nowMs,
           authorId: current.profile.uid || 'local',
           origin: 'user',
         }

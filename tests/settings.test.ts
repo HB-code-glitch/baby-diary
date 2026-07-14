@@ -378,6 +378,24 @@ describe('SettingsStore', () => {
       expect(store.getBabyInfoSummary('family-main').pendingCount).toBe(1)
     })
 
+    it('stamps a deterministic updatedAtMs shadow on every user-edit mutation so cloud rules accept it', () => {
+      store.save(initialSettings())
+      const stale = store.get()
+      const committed = commitUserEdit(
+        store,
+        { ...stale, baby: { ...stale.baby, name: 'Stamped', birthdate: '2026-07-10' } },
+        'Stamped',
+        '2026-07-10',
+      )
+
+      expect(committed.mutation).toBeDefined()
+      // firestore.rules requires every uploaded mutation to carry `updatedAtMs`
+      // (mutation.keys().hasAll([...,'updatedAtMs',...])) and that it exactly
+      // equal Date.parse(updatedAt); a mutation missing it is rejected outright.
+      expect(committed.mutation!.updatedAtMs).toBe(Date.parse(committed.mutation!.updatedAt))
+      expect(Number.isSafeInteger(committed.mutation!.updatedAtMs)).toBe(true)
+    })
+
     it('keeps managed baby info across a stale partial merge and an old renderer payload', () => {
       store.save(initialSettings())
       const stale = store.get()
