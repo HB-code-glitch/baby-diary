@@ -290,6 +290,35 @@ describe.skipIf(!emulatorAvailable)('Firestore security rules in the real emulat
     }))
   })
 
+  it('denies a member overwriting a co-member\'s entry, adding an unproven member, or replacing the whole map', async () => {
+    const family = await createFamily('member-overwrite')
+    const secondMember = await createClient('member-overwrite-second')
+    await joinFamily(secondMember, family)
+    const ref = doc(family.owner.db, 'families', family.id)
+
+    // The owner may still rename only their own entry ...
+    await expectAllowed(() => updateDoc(ref, {
+      [`members.${family.owner.user.uid}`]: { name: 'Owner renamed', role: 'mom' },
+    }))
+    // ... but may never overwrite the co-member's entry, ...
+    await expectDenied(() => updateDoc(ref, {
+      [`members.${secondMember.user.uid}`]: { name: 'Hijacked', role: 'dad' },
+    }))
+    // ... rewrite the whole members map in one update, ...
+    await expectDenied(() => updateDoc(ref, {
+      members: {
+        [family.owner.user.uid]: { name: 'Owner', role: 'mom' },
+        [secondMember.user.uid]: { name: 'Hijacked', role: 'dad' },
+      },
+    }))
+    // ... or add a third uid without a matching joinProof, even alongside their own field.
+    const outsider = await createClient('member-overwrite-outsider')
+    await expectDenied(() => updateDoc(ref, {
+      [`members.${family.owner.user.uid}`]: { name: 'Owner', role: 'mom' },
+      [`members.${outsider.user.uid}`]: { name: 'Unproven', role: 'dad' },
+    }))
+  })
+
   it('allows the v0.3.8 baby pair-only bridge only for an existing member and exactly both fields', async () => {
     const family = await createFamily('pair-only')
     const ref = doc(family.owner.db, 'families', family.id)

@@ -30,6 +30,18 @@ import {
   validateDiaryEvent,
 } from '../../shared/eventResolver'
 import { assertFamilyId } from '../../shared/familyId'
+import { generateInviteCode } from '../../shared/inviteCode'
+import {
+  exactInviteData,
+  exactJoinProofData,
+  exactOwnUserData,
+  exactShapeEquals,
+  isAmbiguousCommitError,
+  isPermissionDeniedError,
+  joinProofPath,
+  MAX_FAMILY_LIFECYCLE_ATTEMPTS,
+} from '../../shared/familyLifecycle'
+import type { FamilyJoinResult, FamilyLifecycleResult } from '../../shared/familyLifecycle'
 import { ipc } from '../lib/ipc'
 import {
   makeBabyInfoDocId,
@@ -533,19 +545,6 @@ export function parseDocId(docId: string): { id: string; rev: number; mutationId
 }
 
 // ────────────────────────────────────────────────────────────
-// inviteCode 생성 (6자리 대문자 영숫자)
-// ────────────────────────────────────────────────────────────
-
-function generateInviteCode(): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  let code = ''
-  for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)]
-  }
-  return code
-}
-
-// ────────────────────────────────────────────────────────────
 // 공개 API
 // ────────────────────────────────────────────────────────────
 
@@ -807,8 +806,16 @@ export function signOutSync(): Promise<void> {
 
 /**
  * 가족 생성 (첫 번째 사용자).
- * F2 + F-RULES: createFamily now also writes to the top-level invites/{code} collection
- * so that joinFamily can do a direct get() instead of a list() query on families.
+ * F2 + F-RULES + F4(atomic): family + invite + own user identity are written by a
+ * SINGLE writeBatch — never a separate best-effort setDoc. One familyId is generated
+ * once and kept across every invite-code collision retry (bounded attempts). If the
+ * commit throws an ambiguous error (response lost — server may or may not have
+ * applied it), the exact destination documents are read back and accepted as success
+ * only when every field matches; a definite `permission-denied` is retried only when
+ * it is provably an invite-code collision. Restart recovery: if `users/{uid}.familyId`
+ * already durably points at a consistent family (e.g. the previous attempt actually
+ * committed but the response never reached this process), that family is reused
+ * instead of creating a duplicate.
  * @param babyInfo 아기 이름 + 생일
  * @param profile  사용자 이름 + 역할
  * @returns { familyId, inviteCode }
@@ -816,66 +823,148 @@ export function signOutSync(): Promise<void> {
 export async function createFamily(
   babyInfo: { babyName: string; babyBirthdate: string; familyName?: string },
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
-): Promise<{ familyId: string; inviteCode: string }> {
+): Promise<FamilyLifecycleResult> {
   // Fallback: if _currentUser was not yet set by onAuthStateChanged (e.g. race on
   // session restore before the callback fires), grab it directly from the Auth instance.
   const effectiveUser = _currentUser ?? getFirebaseAuth()?.currentUser ?? null
   if (!_db || !effectiveUser) throw new Error(ERR_NOT_SIGNED_IN)
   // Keep _currentUser in sync so subsequent calls don't hit the same race.
   if (!_currentUser) _currentUser = effectiveUser
+  const db = _db
 
   // Always use the authenticated user's uid, never the (possibly empty) caller-supplied uid.
   const authUid = effectiveUser.uid
   const memberName = profile.name || effectiveUser.email?.split('@')[0] || 'user'
   const memberRole = profile.role ?? 'mom'
 
-  const inviteCode = generateInviteCode()
-  const { doc, collection, writeBatch, serverTimestamp } = await _firestoreOps()
-  const familyRef = doc(collection(_db, 'families'))
-  const inviteRef = doc(_db, 'invites', inviteCode)
+  // Restart recovery: a prior attempt may have durably committed without this
+  // process ever observing success. Trust users/{uid}.familyId only after it is
+  // cross-checked against a fully consistent family+invite pair.
+  const pointedFamilyId = await resolveUserPointedFamilyId(db, authUid)
+  const restored = await readConsistentFamily(db, pointedFamilyId, authUid)
+  if (restored) return finalizeCreateFamily(restored)
 
-  const familyDocData: FamilyDoc = {
-    name: babyInfo.familyName ?? `${memberName}'s family`,
-    babyName: babyInfo.babyName,
-    babyBirthdate: babyInfo.babyBirthdate,
-    members: {
-      [authUid]: { name: memberName, role: memberRole },
-    },
-    inviteCode,
-    createdAt: serverTimestamp(),
+  const { doc, collection, getDoc, writeBatch, serverTimestamp } = await _firestoreOps()
+  const familyRef = doc(collection(db, 'families'))
+  const familyId = familyRef.id
+
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < MAX_FAMILY_LIFECYCLE_ATTEMPTS; attempt += 1) {
+    const inviteCode = generateInviteCode()
+    const inviteRef = doc(db, 'invites', inviteCode)
+    const userRef = doc(db, 'users', authUid)
+
+    const familyDocData: FamilyDoc = {
+      name: babyInfo.familyName ?? `${memberName}'s family`,
+      babyName: babyInfo.babyName,
+      babyBirthdate: babyInfo.babyBirthdate,
+      members: {
+        [authUid]: { name: memberName, role: memberRole },
+      },
+      inviteCode,
+      createdAt: serverTimestamp(),
+    }
+
+    // F4(atomic): family + invite + own user identity in ONE batch — no second write.
+    const batch = writeBatch(db)
+    batch.set(familyRef, familyDocData)
+    batch.set(inviteRef, exactInviteData(familyId, inviteCode, serverTimestamp()))
+    batch.set(userRef, exactOwnUserData(familyId))
+
+    try {
+      await batch.commit()
+      return finalizeCreateFamily({ familyId, inviteCode })
+    } catch (error) {
+      // The commit may have actually landed even though this call saw an error
+      // (dropped response). Read the exact destination docs back before deciding
+      // whether to retry.
+      const verified = await readConsistentFamily(db, familyId, authUid)
+      if (verified) return finalizeCreateFamily(verified)
+
+      if (isPermissionDeniedError(error)) {
+        // Only a provable invite-code collision is safe to retry: the SAME
+        // familyId is kept, only a fresh code is drawn.
+        const collided = await getDoc(inviteRef)
+        if (collided.exists()) {
+          lastError = error
+          continue
+        }
+        throw error
+      }
+      if (isAmbiguousCommitError(error)) {
+        lastError = error
+        continue
+      }
+      throw error
+    }
   }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('createFamily exceeded invite collision retry attempts')
+}
 
-  // F-RULES: write family + invite in a single batch so they're always consistent
-  const batch = writeBatch(_db)
-  batch.set(familyRef, familyDocData)
-  batch.set(inviteRef, { familyId: familyRef.id, createdAt: serverTimestamp(), code_check: inviteCode })
-  await batch.commit()
+/** Resolves the family a signed-in uid already durably points at, if any. */
+async function resolveUserPointedFamilyId(db: Firestore, authUid: string): Promise<string | null> {
+  const { doc, getDoc } = await _firestoreOps()
+  const userSnap = await getDoc(doc(db, 'users', authUid))
+  if (!userSnap.exists()) return null
+  const familyId = (userSnap.data() as { familyId?: unknown } | undefined)?.familyId
+  return typeof familyId === 'string' && familyId.length > 0 ? familyId : null
+}
 
-  // Write cloud identity truth: users/{authUid}.familyId
-  try {
-    const { doc: docFn2, setDoc: setDocFn } = await _firestoreOps()
-    await setDocFn(docFn2(_db, 'users', authUid), { familyId: familyRef.id }, { merge: true })
-  } catch (e) {
-    console.warn('[syncEngine] createFamily: could not write users doc', e)
-  }
+/**
+ * Reads families/{familyId}, invites/{that family's code}, and users/{authUid} back
+ * and returns the result only when all three are present, cross-consistent, and
+ * exactly match the shapes exactInviteData/exactOwnUserData produce. Used both for
+ * restart recovery and for accepting an ambiguous commit as successful.
+ */
+async function readConsistentFamily(
+  db: Firestore,
+  familyId: string | null,
+  authUid: string,
+): Promise<FamilyLifecycleResult | null> {
+  if (!familyId) return null
+  const { doc, getDoc } = await _firestoreOps()
+  const familySnap = await getDoc(doc(db, 'families', familyId))
+  if (!familySnap.exists()) return null
+  const family = familySnap.data() as FamilyDoc
+  const member = family.members?.[authUid]
+  if (!member || typeof member.name !== 'string' || (member.role !== 'dad' && member.role !== 'mom')) return null
+  const inviteCode = family.inviteCode
+  if (typeof inviteCode !== 'string' || inviteCode.length === 0) return null
 
-  // Main owns the projection transition. Creation is the only path allowed
-  // to adopt an unlinked local pair into the destination journal.
-  await ipc.commitBabyInfo({
-    kind: 'family-transition',
-    familyId: familyRef.id,
-    mode: 'create',
-  })
+  const inviteSnap = await getDoc(doc(db, 'invites', inviteCode))
+  if (!inviteSnap.exists()) return null
+  const inviteData = inviteSnap.data()
+  const expectedInvite = exactInviteData(familyId, inviteCode, (inviteData as { createdAt?: unknown })?.createdAt)
+  if (!exactShapeEquals(inviteData, expectedInvite)) return null
 
-  _familyId = familyRef.id
-  setState({ inviteCode })
+  const userSnap = await getDoc(doc(db, 'users', authUid))
+  if (!userSnap.exists() || !exactShapeEquals(userSnap.data(), exactOwnUserData(familyId))) return null
+
+  return { familyId, inviteCode }
+}
+
+async function finalizeCreateFamily(result: FamilyLifecycleResult): Promise<FamilyLifecycleResult> {
+  await finalizeFamilyIdentity(result.familyId, 'create')
+  setState({ inviteCode: result.inviteCode })
+  return result
+}
+
+/**
+ * Main owns the projection transition and the post-identity reconnect kick. Shared by
+ * createFamily/joinFamily so both finalize through the exact same sequence.
+ */
+async function finalizeFamilyIdentity(familyId: string, mode: 'create' | 'join'): Promise<void> {
+  await ipc.commitBabyInfo({ kind: 'family-transition', familyId, mode })
+
+  _familyId = familyId
   // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
   // manually kick reconcile/snapshot so pending events drain without a restart.
   if (_currentUser && _db) {
     const context: AuthContext = { generation: _generation, db: _db, user: _currentUser }
-    runDetached(() => onUserSignedIn(context), 'family creation reconnect')
+    runDetached(() => onUserSignedIn(context), `family ${mode} reconnect`)
   }
-  return { familyId: familyRef.id, inviteCode }
 }
 
 /**
@@ -884,19 +973,26 @@ export async function createFamily(
  * instead of a query on families. This prevents attackers from listing all families.
  * The attacker still needs the exact code (get() only — no list); brute-forcing 36^6
  * get()s is bounded by Spark quota (50k reads/day).
+ * F4(atomic): the deterministic joinProofs/{uid}/capabilities/{code} proof, the
+ * families/{familyId}.members.{uid} self-join, and the own users/{uid} identity are
+ * written by a SINGLE writeBatch. The batch payload is fully deterministic from
+ * (uid, familyId, code, memberName, memberRole), so retrying the identical batch
+ * — whether because of an ambiguous commit error or an explicit caller repeat — is
+ * always safe and never creates a second family or corrupts a previously joined one.
  * @returns { familyId, babyName, babyBirthdate } — caller uses babyName/babyBirthdate
  *   to populate local settings when the device has no baby name yet.
  */
 export async function joinFamily(
   inviteCode: string,
   profile: { uid: string; name: string; role: 'dad' | 'mom' }
-): Promise<{ familyId: string; babyName: string; babyBirthdate: string }> {
+): Promise<FamilyJoinResult> {
   // Fallback: if _currentUser was not yet set by onAuthStateChanged (e.g. race on
   // session restore before the callback fires), grab it directly from the Auth instance.
   const effectiveUser = _currentUser ?? getFirebaseAuth()?.currentUser ?? null
   if (!_db || !effectiveUser) throw new Error(ERR_NOT_SIGNED_IN)
   // Keep _currentUser in sync so subsequent calls don't hit the same race.
   if (!_currentUser) _currentUser = effectiveUser
+  const db = _db
 
   // Always use the authenticated user's uid, never the (possibly empty) caller-supplied uid.
   const authUid = effectiveUser.uid
@@ -904,30 +1000,55 @@ export async function joinFamily(
   const memberRole = profile.role ?? 'mom'
 
   // F-RULES: direct get() on invites/{code} — no list needed
-  const { doc, getDoc, updateDoc } = await _firestoreOps()
+  const { doc, getDoc, writeBatch } = await _firestoreOps()
   const code = inviteCode.trim().toUpperCase()
-  const inviteRef = doc(_db, 'invites', code)
+  const inviteRef = doc(db, 'invites', code)
   const inviteSnap = await getDoc(inviteRef)
 
   if (!inviteSnap.exists()) throw new Error('invite code not found')
 
   const familyId = assertFamilyId((inviteSnap.data() as { familyId: string }).familyId)
+  const familyRef = doc(db, 'families', familyId)
+  const userRef = doc(db, 'users', authUid)
+  const proofRef = doc(db, joinProofPath(authUid, code))
 
-  // F-RULES: self-join — write ONLY the members.{uid} field-path.
-  // Do NOT read families/{familyId} before this write: a non-member cannot
-  // getDoc a family doc (rules: get requires isMember()), so any pre-join
-  // read results in permission-denied.  The rules allow an unauthenticated-
-  // member update as long as:
-  //   (a) only the 'members' top-level key is in diff.affectedKeys()
-  //   (b) auth.uid is added (not existing members removed)
-  // updateDoc with a dotted field-path satisfies (a) cleanly.
-  const familyRef = doc(_db, 'families', familyId)
-  await updateDoc(familyRef, {
-    [`members.${authUid}`]: { name: memberName, role: memberRole },
-  })
+  let joined = false
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < MAX_FAMILY_LIFECYCLE_ATTEMPTS && !joined; attempt += 1) {
+    // F4(atomic): proof + self-join + own user identity in ONE batch. This exact
+    // payload is deterministic, so re-running it (retry or explicit repeat call) is
+    // always idempotent and never touches any other family's document.
+    const batch = writeBatch(db)
+    batch.set(proofRef, exactJoinProofData(authUid, familyId, code))
+    batch.update(familyRef, {
+      [`members.${authUid}`]: { name: memberName, role: memberRole },
+    })
+    batch.set(userRef, exactOwnUserData(familyId))
 
-  // AFTER updateDoc the user is now a member — fetch baby info from family doc.
-  // This read is now permitted because isMember() is satisfied.
+    try {
+      await batch.commit()
+      joined = true
+    } catch (error) {
+      // joinProofs/{uid}/capabilities/{code} can never be read back (rules deny all
+      // reads of it by design), so acceptance is proven through the two sibling
+      // documents the same batch wrote: exact own membership and exact own identity.
+      if (await verifyJoinCompleted(db, familyId, authUid, memberName, memberRole)) {
+        joined = true
+        break
+      }
+      if (isAmbiguousCommitError(error)) {
+        lastError = error
+        continue
+      }
+      throw error
+    }
+  }
+  if (!joined) {
+    throw lastError instanceof Error ? lastError : new Error('joinFamily exceeded retry attempts')
+  }
+
+  // Membership is confirmed — fetch baby info from family doc. Best-effort: if the
+  // read fails, the caller keeps whatever baby info it already has locally.
   let babyName = ''
   let babyBirthdate = ''
   try {
@@ -941,31 +1062,24 @@ export async function joinFamily(
     // best-effort: if the read fails, caller keeps existing local baby info
   }
 
-  _familyId = familyId
-
-  // Write cloud identity truth: users/{authUid}.familyId
-  try {
-    const { doc: docFn3, setDoc: setDocFn2 } = await _firestoreOps()
-    await setDocFn2(docFn3(_db, 'users', authUid), { familyId }, { merge: true })
-  } catch (e) {
-    console.warn('[syncEngine] joinFamily: could not write users doc', e)
-  }
-
-  // Joining selects only destination history (or a blank projection); it must
-  // never upload the previous/local family pair.
-  await ipc.commitBabyInfo({
-    kind: 'family-transition',
-    familyId,
-    mode: 'join',
-  })
-
-  // P6: auth state hasn't changed so onAuthStateChanged won't re-fire;
-  // manually kick reconcile/snapshot so pending events drain without a restart.
-  if (_currentUser && _db) {
-    const context: AuthContext = { generation: _generation, db: _db, user: _currentUser }
-    runDetached(() => onUserSignedIn(context), 'family join reconnect')
-  }
+  await finalizeFamilyIdentity(familyId, 'join')
   return { familyId, babyName, babyBirthdate }
+}
+
+async function verifyJoinCompleted(
+  db: Firestore,
+  familyId: string,
+  authUid: string,
+  memberName: string,
+  memberRole: 'dad' | 'mom',
+): Promise<boolean> {
+  const { doc, getDoc } = await _firestoreOps()
+  const familySnap = await getDoc(doc(db, 'families', familyId))
+  if (!familySnap.exists()) return false
+  const member = (familySnap.data() as FamilyDoc).members?.[authUid]
+  if (!member || member.name !== memberName || member.role !== memberRole) return false
+  const userSnap = await getDoc(doc(db, 'users', authUid))
+  return userSnap.exists() && exactShapeEquals(userSnap.data(), exactOwnUserData(familyId))
 }
 
 /** Compatibility API routed through the durable local mutation path. */
