@@ -54,7 +54,7 @@ const BASELINE_MAC_ASSET = { id: '474869787', size: '351533375', sha256: '2793e9
 const baselineJob = 'baseline-v038'
 const upgradeJobs = ['upgrade-win', 'upgrade-mac-arm64', 'upgrade-mac-intel']
 const ordinaryCiJobs = ['security-check', 'build-mac', 'e2e-mac', 'e2e-win']
-const fetchDepthZeroJobs = [baselineJob, ...upgradeJobs]
+const fetchDepthZeroJobs = ['security-check', baselineJob, ...upgradeJobs]
 
 const signedJobs = [
   'release-context',
@@ -423,6 +423,11 @@ function workflowErrors(candidate: Workflow): string[] {
     }
     if (job.if != null) errors.push(`${jobName} must remain unconditional ordinary PR CI`)
     if (JSON.stringify(job).includes('secrets.')) errors.push(`${jobName} must remain secret-free ordinary PR CI`)
+  }
+
+  const securityCheckout = stepByUse(candidate.jobs['security-check'], 'actions/checkout@v4')[0]
+  if (securityCheckout?.with?.['fetch-depth'] !== 0) {
+    errors.push('security-check calls an upgrade/rules tag loader and must check out with fetch-depth 0')
   }
 
   for (const [jobName, job] of Object.entries(candidate.jobs)) {
