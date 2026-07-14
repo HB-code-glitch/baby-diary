@@ -11,10 +11,16 @@ import {
   type FirebasePersistenceClaim,
 } from '../../shared/firebasePersistence'
 import { DEFAULT_FIREBASE_CONFIG } from '../../shared/defaultFirebaseConfig'
+import { parseAppSettingsWithLegacyDefaults } from '../../shared/babyInfoSettingsCommit'
 import { writeAllSync } from './durableFs'
 
 export const FIREBASE_PERSISTENCE_REGISTRY_FILE = 'firebase-persistence-registry-v1.json'
+export const FIREBASE_PROFILE_BOOTSTRAP_FILE = 'firebase-profile-bootstrap-v1.json'
+export const FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE = 'firebase-profile-bootstrap-revocation-v1.json'
+export const FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE = 'firebase-profile-bootstrap-resolution-v1.json'
 const MAX_REGISTRY_BYTES = 64 * 1024
+const MAX_BOOTSTRAP_BYTES = 4 * 1024
+const MAX_BOOTSTRAP_DECISION_BYTES = 128 * 1024
 const MAX_SETTINGS_SNAPSHOT_BYTES = 32 * 1024 * 1024
 const MAX_LEVELDB_MANIFEST_BYTES = 16 * 1024 * 1024
 const MAX_LEVELDB_FILE_BYTES = 64 * 1024 * 1024
@@ -27,6 +33,31 @@ const FNV_DIAGNOSTIC = 'preexisting-profile-proved-unreleased-fnv; public v0.3.8
 const FRESH_DIAGNOSTIC = 'fresh profile retired the legacy namespace before Firebase initialization'
 const RESTORE_INTENT_FILE = '.baby-info-pair-restore-v1.json'
 const RESTORE_STAGING_DIR = '.baby-info-pair-restore-v1'
+const RESTORE_INTENT_TOMBSTONE_PREFIX = `${RESTORE_INTENT_FILE}.cleanup-`
+const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+interface FreshBootstrapDocument {
+  readonly version: 1
+  readonly settingsInitiallyAbsent: true
+  readonly rootFingerprint: string
+  readonly nonce: string
+}
+
+interface BootstrapResolutionDocument {
+  readonly version: 1
+  readonly rootFingerprint: string
+  readonly markerSha256: string
+  readonly registrySha256: string
+  readonly registry: RegistryDocument
+}
+
+interface BootstrapRevocationDocument {
+  readonly version: 1
+  readonly reason: 'fresh-retired'
+  readonly rootFingerprint: string
+  readonly markerSha256: string
+}
 
 interface BrowserPersistenceEvidence {
   readonly state: 'absent' | 'present'
@@ -41,6 +72,7 @@ export interface FirebaseProfileEligibilitySnapshot {
   readonly kind:
     | 'registry-present'
     | 'settings-absent'
+    | 'settings-validated-from-absence'
     | 'settings-snapshot'
     | 'settings-invalid'
     | 'settings-recovered'
@@ -49,6 +81,9 @@ export interface FirebaseProfileEligibilitySnapshot {
   readonly rootIdentity: RootIdentity
   readonly settingsIdentity: FileIdentity | null
   readonly browserEvidence: BrowserPersistenceEvidence
+  readonly freshBootstrap: boolean
+  readonly recoveryEvidencePaths: readonly string[]
+  readonly bootstrapDecisionEvidence: BootstrapDecisionEvidence
 }
 
 export interface FirebasePersistenceRegistryOptions {
@@ -59,9 +94,23 @@ export interface FirebasePersistenceRegistryOptions {
   afterFirstFileRead?: (target: string) => void
 }
 
+export interface FirebaseProfileInitialState {
+  readonly version: 1
+  readonly rootIdentity: RootIdentity
+  readonly registryExisted: boolean
+  readonly settingsExisted: boolean
+  readonly freshBootstrap: boolean
+  readonly recoveryEvidencePaths: readonly string[]
+  readonly bootstrapDecisionEvidence: BootstrapDecisionEvidence
+}
+
 export interface FirebaseProfileSnapshotOptions {
   platform?: NodeJS.Platform
   beforeRootCreate?: () => void
+  /** Existing backup roots make an absent settings file recovery evidence, not a fresh install. */
+  recoveryEvidencePaths?: readonly string[]
+  /** Existence-only state captured before startup constructors create or recover files. */
+  initialState?: FirebaseProfileInitialState
   /** Test seam used to prove browser evidence rewrites/swaps fail closed. */
   afterFirstFileRead?: (target: string) => void
 }
@@ -105,6 +154,13 @@ interface FileIdentity {
   ctimeMs: number
 }
 
+interface BootstrapDecisionEvidence {
+  readonly revocationIdentity: FileIdentity | null
+  readonly revocationSha256: string | null
+  readonly resolutionIdentity: FileIdentity | null
+  readonly resolutionSha256: string | null
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
@@ -123,6 +179,12 @@ function comparablePath(value: string, platform: NodeJS.Platform): string {
   return platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized
 }
 
+function comparableEntryName(value: string, platform: NodeJS.Platform): string {
+  return platform === 'win32' || platform === 'darwin'
+    ? value.toLocaleLowerCase('en-US')
+    : value
+}
+
 function sameObjectIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev
     && left.ino === right.ino
@@ -135,6 +197,34 @@ function sameStableFileIdentity(left: FileIdentity, right: FileIdentity): boolea
     && left.size === right.size
     && left.mtimeMs === right.mtimeMs
     && left.ctimeMs === right.ctimeMs
+}
+
+function isFileIdentityOrNull(value: unknown): value is FileIdentity | null {
+  if (value === null) return true
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, [
+      'dev', 'ino', 'mode', 'size', 'birthtimeMs', 'mtimeMs', 'ctimeMs',
+    ])) return false
+  return ['dev', 'ino', 'mode', 'size', 'birthtimeMs', 'mtimeMs', 'ctimeMs']
+    .every(key => typeof value[key] === 'number' && Number.isFinite(value[key]))
+}
+
+function isBootstrapDecisionEvidence(value: unknown): value is BootstrapDecisionEvidence {
+  return isPlainRecord(value)
+    && hasExactKeys(value, [
+      'revocationIdentity',
+      'revocationSha256',
+      'resolutionIdentity',
+      'resolutionSha256',
+    ])
+    && isFileIdentityOrNull(value.revocationIdentity)
+    && isFileIdentityOrNull(value.resolutionIdentity)
+    && (value.revocationSha256 === null
+      || (typeof value.revocationSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.revocationSha256)))
+    && (value.resolutionSha256 === null
+      || (typeof value.resolutionSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.resolutionSha256)))
+    && (value.revocationIdentity === null) === (value.revocationSha256 === null)
+    && (value.resolutionIdentity === null) === (value.resolutionSha256 === null)
 }
 
 function toFileIdentity(stats: fs.Stats): FileIdentity {
@@ -527,11 +617,6 @@ interface AuthKeyVersion {
   present: boolean
 }
 
-interface LevelDbSequenceRange {
-  first: LevelDbSequence
-  last: LevelDbSequence
-}
-
 function compareLevelDbSequence(left: LevelDbSequence, right: LevelDbSequence): number {
   if (left.high !== right.high) return left.high < right.high ? -1 : 1
   if (left.low === right.low) return 0
@@ -570,7 +655,7 @@ function inspectLevelDbWriteBatch(
   batch: Buffer,
   authKeys: ReadonlySet<string>,
   versions: Map<string, AuthKeyVersion>,
-): LevelDbSequenceRange | null {
+): void {
   if (batch.length < 12) throw new Error('Firebase LevelDB WriteBatch is truncated')
   const baseSequence: LevelDbSequence = {
     low: batch.readUInt32LE(0),
@@ -581,7 +666,7 @@ function inspectLevelDbWriteBatch(
   }
   const count = batch.readUInt32LE(8)
   if (count > 1_000_000) throw new Error('Firebase LevelDB WriteBatch count is invalid')
-  const lastSequence = count > 0 ? addLevelDbSequence(baseSequence, count - 1) : null
+  if (count > 0) addLevelDbSequence(baseSequence, count - 1)
   let offset = 12
   for (let index = 0; index < count; index += 1) {
     if (offset >= batch.length) throw new Error('Firebase LevelDB WriteBatch record is truncated')
@@ -611,7 +696,6 @@ function inspectLevelDbWriteBatch(
     }
   }
   if (offset !== batch.length) throw new Error('Firebase LevelDB WriteBatch has trailing bytes')
-  return lastSequence ? { first: baseSequence, last: lastSequence } : null
 }
 
 interface LevelDbTableScanBudget {
@@ -973,19 +1057,10 @@ function scanBrowserPersistenceEvidence(
   const authKeys = new Set([publicKey, fnvKey])
   const versions = new Map<string, AuthKeyVersion>()
   const tableBudget: LevelDbTableScanBudget = { logicalBytes: 0, blockCount: 0 }
-  let previousWalSequence: LevelDbSequence | null = null
   for (const { name } of liveLogs) {
     const bytes = readProtected(name, MAX_LEVELDB_FILE_BYTES)
     for (const batch of readLevelDbLogRecords(bytes)) {
-      const range = inspectLevelDbWriteBatch(batch, authKeys, versions)
-      if (!range) continue
-      if (previousWalSequence) {
-        const expected = addLevelDbSequence(previousWalSequence, 1)
-        if (compareLevelDbSequence(range.first, expected) !== 0) {
-          throw new Error('Firebase LevelDB live WAL sequences are not contiguous and ordered')
-        }
-      }
-      previousWalSequence = range.last
+      inspectLevelDbWriteBatch(batch, authKeys, versions)
     }
   }
   for (const name of liveTableNames) {
@@ -1165,18 +1240,21 @@ function makeRegistryDocument(snapshot: FirebaseProfileEligibilitySnapshot): Reg
   const hasBrowserClaim = snapshot.browserEvidence.publicAuthKey || snapshot.browserEvidence.fnvAuthKey
   if (snapshot.kind === 'settings-snapshot'
     || snapshot.kind === 'settings-recovered'
-    || (snapshot.kind === 'settings-absent' && hasBrowserClaim)) {
+    || ((snapshot.kind === 'settings-absent'
+      || snapshot.kind === 'settings-validated-from-absence') && hasBrowserClaim)) {
     if (snapshot.legacyConfig === null) throw new Error('Firebase legacy profile eligibility is inconsistent')
     const config = parseFirebaseConfig(snapshot.legacyConfig)
     const canonicalConfig = canonicalFirebaseConfig(config)
     const fnvOnly = !snapshot.browserEvidence.publicAuthKey && snapshot.browserEvidence.fnvAuthKey
     const appName = fnvOnly ? getUnreleasedFNVFirebaseAppName(config) : LEGACY_FIREBASE_APP_NAME
     const evidenceKind = snapshot.kind === 'settings-absent'
+      || snapshot.kind === 'settings-validated-from-absence'
       ? 'browser-persistence'
       : snapshot.kind === 'settings-recovered'
         ? 'settings-recovered'
         : 'settings-snapshot'
     const evidenceHash = snapshot.kind === 'settings-absent'
+      || snapshot.kind === 'settings-validated-from-absence'
       ? snapshot.browserEvidence.fingerprint
       : snapshot.settingsEvidenceSha256
     if (!evidenceHash) throw new Error('Firebase legacy profile evidence is incomplete')
@@ -1197,10 +1275,13 @@ function makeRegistryDocument(snapshot: FirebaseProfileEligibilitySnapshot): Reg
       },
     }
   }
-  if (snapshot.kind !== 'settings-absent'
+  if ((snapshot.kind !== 'settings-absent'
+      && snapshot.kind !== 'settings-validated-from-absence')
     || snapshot.legacyConfig !== null
-    || snapshot.settingsEvidenceSha256 !== null
-    || snapshot.settingsIdentity !== null) {
+    || (snapshot.kind === 'settings-absent'
+      && (snapshot.settingsEvidenceSha256 !== null || snapshot.settingsIdentity !== null))
+    || (snapshot.kind === 'settings-validated-from-absence'
+      && (!snapshot.settingsEvidenceSha256 || !snapshot.settingsIdentity))) {
     throw new Error('Firebase fresh profile eligibility is inconsistent')
   }
   return {
@@ -1224,6 +1305,659 @@ function sameRootIdentity(left: RootIdentity, right: RootIdentity, platform: Nod
     && comparablePath(left.realPath, platform) === comparablePath(right.realPath, platform)
 }
 
+function assertInitialRegularFile(target: string, label: string): boolean {
+  const stats = optionalLstat(target)
+  if (!stats) return false
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error(`Firebase initial ${label} path is a link/reparse point or non-file`)
+  }
+  return true
+}
+
+function bindRecoveryEvidencePaths(
+  values: readonly string[],
+  platform: NodeJS.Platform,
+): readonly string[] {
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    if (typeof value !== 'string' || !path.isAbsolute(value)) {
+      throw new Error('Firebase recovery evidence path must be absolute')
+    }
+    const normalized = path.normalize(value)
+    const comparable = comparablePath(normalized, platform)
+    if (!seen.has(comparable)) {
+      seen.add(comparable)
+      result.push(normalized)
+    }
+  }
+  return Object.freeze(result)
+}
+
+function mergeRecoveryEvidencePaths(
+  first: readonly string[],
+  second: readonly string[],
+  platform: NodeJS.Platform,
+): readonly string[] {
+  return bindRecoveryEvidencePaths([...first, ...second], platform)
+}
+
+function firebaseRootFingerprint(root: RootIdentity, platform: NodeJS.Platform): string {
+  return sha256(JSON.stringify({
+    requestedPath: comparablePath(root.requestedPath, platform),
+    realPath: comparablePath(root.realPath, platform),
+    dev: root.dev,
+    ino: root.ino,
+    mode: root.mode,
+    birthtimeMs: root.birthtimeMs,
+  }))
+}
+
+function serializeFreshBootstrapDocument(document: FreshBootstrapDocument): Buffer {
+  return Buffer.from(`${JSON.stringify(document, null, 2)}\n`, 'utf8')
+}
+
+function makeFreshBootstrapBytes(root: RootIdentity, platform: NodeJS.Platform): Buffer {
+  return serializeFreshBootstrapDocument({
+    version: 1,
+    settingsInitiallyAbsent: true,
+    rootFingerprint: firebaseRootFingerprint(root, platform),
+    nonce: randomUUID(),
+  })
+}
+
+function readFreshBootstrapEvidence(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  afterFirstRead?: (target: string) => void,
+): StableReadResult {
+  const stable = readBoundedRegularFile(
+    path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_FILE),
+    root,
+    platform,
+    MAX_BOOTSTRAP_BYTES,
+    afterFirstRead,
+  )
+  let value: unknown
+  try {
+    value = JSON.parse(stable.bytes.toString('utf8'))
+  } catch {
+    throw new Error('Firebase fresh bootstrap evidence is invalid JSON')
+  }
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['version', 'settingsInitiallyAbsent', 'rootFingerprint', 'nonce'])
+    || value.version !== 1
+    || value.settingsInitiallyAbsent !== true
+    || typeof value.rootFingerprint !== 'string'
+    || value.rootFingerprint !== firebaseRootFingerprint(root, platform)
+    || typeof value.nonce !== 'string'
+    || !UUID_PATTERN.test(value.nonce)
+    || !stable.bytes.equals(serializeFreshBootstrapDocument({
+      version: 1,
+      settingsInitiallyAbsent: true,
+      rootFingerprint: value.rootFingerprint,
+      nonce: value.nonce,
+    }))) {
+    throw new Error('Firebase fresh bootstrap evidence is invalid')
+  }
+  return stable
+}
+
+function serializeBootstrapRevocation(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  markerSha256: string,
+): Buffer {
+  return Buffer.from(`${JSON.stringify({
+    version: 1,
+    reason: 'fresh-retired',
+    rootFingerprint: firebaseRootFingerprint(root, platform),
+    markerSha256,
+  }, null, 2)}\n`, 'utf8')
+}
+
+function readBootstrapRevocation(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): { stable: StableReadResult; document: BootstrapRevocationDocument } | null {
+  const target = path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE)
+  if (!optionalLstat(target)) return null
+  const stable = readBoundedRegularFile(target, root, platform, MAX_BOOTSTRAP_DECISION_BYTES)
+  let value: unknown
+  try {
+    value = JSON.parse(stable.bytes.toString('utf8'))
+  } catch {
+    throw new Error('Firebase bootstrap revocation evidence is invalid JSON')
+  }
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['version', 'reason', 'rootFingerprint', 'markerSha256'])
+    || value.version !== 1
+    || value.reason !== 'fresh-retired'
+    || typeof value.rootFingerprint !== 'string'
+    || value.rootFingerprint !== firebaseRootFingerprint(root, platform)
+    || typeof value.markerSha256 !== 'string'
+    || !/^[0-9a-f]{64}$/.test(value.markerSha256)
+    || !stable.bytes.equals(serializeBootstrapRevocation(root, platform, value.markerSha256))) {
+    throw new Error('Firebase bootstrap revocation evidence is invalid')
+  }
+  return {
+    stable,
+    document: Object.freeze({
+      version: 1 as const,
+      reason: 'fresh-retired' as const,
+      rootFingerprint: value.rootFingerprint,
+      markerSha256: value.markerSha256,
+    }),
+  }
+}
+
+function serializeBootstrapResolution(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  document: RegistryDocument,
+  markerSha256: string,
+): Buffer {
+  const registrySha256 = sha256Bytes(serializeRegistry(document))
+  return Buffer.from(`${JSON.stringify({
+    version: 1,
+    rootFingerprint: firebaseRootFingerprint(root, platform),
+    markerSha256,
+    registrySha256,
+    registry: document,
+  }, null, 2)}\n`, 'utf8')
+}
+
+function readBootstrapResolution(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): { stable: StableReadResult; document: BootstrapResolutionDocument } | null {
+  const target = path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE)
+  if (!optionalLstat(target)) return null
+  const stable = readBoundedRegularFile(target, root, platform, MAX_BOOTSTRAP_DECISION_BYTES)
+  let value: unknown
+  try {
+    value = JSON.parse(stable.bytes.toString('utf8'))
+  } catch {
+    throw new Error('Firebase bootstrap resolution evidence is invalid JSON')
+  }
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['version', 'rootFingerprint', 'markerSha256', 'registrySha256', 'registry'])
+    || value.version !== 1
+    || typeof value.rootFingerprint !== 'string'
+    || value.rootFingerprint !== firebaseRootFingerprint(root, platform)
+    || typeof value.markerSha256 !== 'string'
+    || !/^[0-9a-f]{64}$/.test(value.markerSha256)
+    || typeof value.registrySha256 !== 'string'
+    || !/^[0-9a-f]{64}$/.test(value.registrySha256)) {
+    throw new Error('Firebase bootstrap resolution evidence is invalid')
+  }
+  const registry = parseRegistryDocument(Buffer.from(JSON.stringify(value.registry), 'utf8'))
+  if (sha256Bytes(serializeRegistry(registry)) !== value.registrySha256
+    || !stable.bytes.equals(serializeBootstrapResolution(
+      root,
+      platform,
+      registry,
+      value.markerSha256,
+    ))) {
+    throw new Error('Firebase bootstrap resolution evidence is invalid')
+  }
+  return {
+    stable,
+    document: Object.freeze({
+      version: 1 as const,
+      rootFingerprint: value.rootFingerprint,
+      markerSha256: value.markerSha256,
+      registrySha256: value.registrySha256,
+      registry,
+    }),
+  }
+}
+
+function publishImmutableBootstrapDecision(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  fileName: string,
+  bytes: Buffer,
+): void {
+  const target = path.join(root.requestedPath, fileName)
+  const candidatePath = path.join(
+    root.requestedPath,
+    `${fileName}.candidate-${process.pid}-${randomUUID()}`,
+  )
+  const noFollow = platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)
+  let candidateIdentity: FileIdentity | null = null
+  let published = false
+  try {
+    assertRootIdentity(root, platform)
+    const fd = fs.openSync(
+      candidatePath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    )
+    try {
+      writeAllSync(fd, bytes)
+      fs.fsyncSync(fd)
+      candidateIdentity = toFileIdentity(fs.fstatSync(fd))
+    } finally {
+      fs.closeSync(fd)
+    }
+    const candidateStats = fs.lstatSync(candidatePath)
+    if (!candidateIdentity
+      || candidateStats.isSymbolicLink()
+      || !candidateStats.isFile()
+      || !sameStableFileIdentity(candidateIdentity, toFileIdentity(candidateStats))
+      || candidateStats.size !== bytes.byteLength) {
+      throw new Error('Firebase bootstrap decision candidate identity changed')
+    }
+    assertPathInsideRoot(candidatePath, root, platform)
+    assertRootIdentity(root, platform)
+    try {
+      fs.linkSync(candidatePath, target)
+      published = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    const stable = readBoundedRegularFile(
+      target,
+      root,
+      platform,
+      MAX_BOOTSTRAP_DECISION_BYTES,
+    )
+    if (!stable.bytes.equals(bytes)
+      || (published && (!candidateIdentity
+        || !sameObjectIdentity(candidateIdentity, stable.identity)))) {
+      throw new Error('Firebase bootstrap decision conflicts with immutable evidence')
+    }
+  } finally {
+    cleanupOwnedCandidate(candidatePath, candidateIdentity, bytes, root, platform)
+  }
+  if (published) syncParentDirectory(root, platform)
+}
+
+function publishBootstrapRevocation(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  marker: StableReadResult,
+): void {
+  publishImmutableBootstrapDecision(
+    root,
+    platform,
+    FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE,
+    serializeBootstrapRevocation(root, platform, sha256Bytes(marker.bytes)),
+  )
+}
+
+function publishBootstrapResolution(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  document: RegistryDocument,
+  marker: StableReadResult,
+): void {
+  publishImmutableBootstrapDecision(
+    root,
+    platform,
+    FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE,
+    serializeBootstrapResolution(root, platform, document, sha256Bytes(marker.bytes)),
+  )
+}
+
+function captureBootstrapDecisionEvidence(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): BootstrapDecisionEvidence {
+  const revocation = readBootstrapRevocation(root, platform)
+  const resolution = readBootstrapResolution(root, platform)
+  if (revocation || resolution) {
+    const marker = readFreshBootstrapEvidence(root, platform)
+    const markerSha256 = sha256Bytes(marker.bytes)
+    if ((revocation && revocation.document.markerSha256 !== markerSha256)
+      || (resolution && resolution.document.markerSha256 !== markerSha256)
+      || (revocation && resolution
+        && revocation.document.markerSha256 !== resolution.document.markerSha256)) {
+      throw new Error('Firebase bootstrap decision does not match its root-bound marker')
+    }
+  }
+  return Object.freeze({
+    revocationIdentity: revocation ? Object.freeze({ ...revocation.stable.identity }) : null,
+    revocationSha256: revocation ? sha256Bytes(revocation.stable.bytes) : null,
+    resolutionIdentity: resolution ? Object.freeze({ ...resolution.stable.identity }) : null,
+    resolutionSha256: resolution ? sha256Bytes(resolution.stable.bytes) : null,
+  })
+}
+
+function verifyBootstrapDecisionEvidence(
+  expected: BootstrapDecisionEvidence,
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): void {
+  const current = captureBootstrapDecisionEvidence(root, platform)
+  const sameEvidence = (
+    expectedIdentity: FileIdentity | null,
+    expectedSha256: string | null,
+    currentIdentity: FileIdentity | null,
+    currentSha256: string | null,
+  ): boolean => expectedIdentity === null
+    ? currentIdentity === null && expectedSha256 === null && currentSha256 === null
+    : currentIdentity !== null
+      && typeof expectedSha256 === 'string'
+      && expectedSha256 === currentSha256
+      && sameStableFileIdentity(expectedIdentity, currentIdentity)
+  if (!sameEvidence(
+    expected.revocationIdentity,
+    expected.revocationSha256,
+    current.revocationIdentity,
+    current.revocationSha256,
+  ) || !sameEvidence(
+    expected.resolutionIdentity,
+    expected.resolutionSha256,
+    current.resolutionIdentity,
+    current.resolutionSha256,
+  )) {
+    throw new Error('Firebase bootstrap decision evidence changed after startup capture')
+  }
+}
+
+function cloneBootstrapDecisionEvidence(
+  evidence: BootstrapDecisionEvidence,
+): BootstrapDecisionEvidence {
+  return Object.freeze({
+    revocationIdentity: evidence.revocationIdentity
+      ? Object.freeze({ ...evidence.revocationIdentity })
+      : null,
+    revocationSha256: evidence.revocationSha256,
+    resolutionIdentity: evidence.resolutionIdentity
+      ? Object.freeze({ ...evidence.resolutionIdentity })
+      : null,
+    resolutionSha256: evidence.resolutionSha256,
+  })
+}
+
+function hasBootstrapInvalidatingEvidence(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  recoveryEvidencePaths: readonly string[],
+): boolean {
+  const entries = fs.readdirSync(root.requestedPath)
+    .map(name => comparableEntryName(name, platform))
+  const restoreIntent = comparableEntryName(RESTORE_INTENT_FILE, platform)
+  const restoreStaging = comparableEntryName(RESTORE_STAGING_DIR, platform)
+  const restoreTombstone = comparableEntryName(RESTORE_INTENT_TOMBSTONE_PREFIX, platform)
+  const settingsTemp = comparableEntryName('settings.json.tmp-', platform)
+  const journalTemp = comparableEntryName(`${BABY_INFO_JOURNAL_FILE}.tmp-`, platform)
+  if (entries.includes(restoreIntent)
+    || entries.includes(restoreStaging)
+    || entries.some(name => name.startsWith(restoreTombstone)
+      || name.startsWith(settingsTemp)
+      || name.startsWith(journalTemp))) {
+    return true
+  }
+  for (const evidencePath of recoveryEvidencePaths) {
+    if (optionalLstat(evidencePath)) return true
+  }
+  return false
+}
+
+function hasBootstrapBlockingEvidence(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  recoveryEvidencePaths: readonly string[],
+): boolean {
+  const journal = comparableEntryName(BABY_INFO_JOURNAL_FILE, platform)
+  return fs.readdirSync(root.requestedPath)
+    .some(name => comparableEntryName(name, platform) === journal)
+    || hasBootstrapInvalidatingEvidence(root, platform, recoveryEvidencePaths)
+}
+
+function validateFreshBootstrapAgainstRecovery(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  recoveryEvidencePaths: readonly string[],
+  includeInitialJournal: boolean,
+  afterFirstRead?: (target: string) => void,
+): boolean {
+  if (readBootstrapResolution(root, platform) || readBootstrapRevocation(root, platform)) {
+    return false
+  }
+  const hasInvalidatingEvidence = (): boolean => includeInitialJournal
+    ? hasBootstrapBlockingEvidence(root, platform, recoveryEvidencePaths)
+    : hasBootstrapInvalidatingEvidence(root, platform, recoveryEvidencePaths)
+  const invalidBeforeRead = hasInvalidatingEvidence()
+  const stable = readFreshBootstrapEvidence(root, platform, afterFirstRead)
+  const invalidAfterRead = hasInvalidatingEvidence()
+  if (invalidBeforeRead || invalidAfterRead) {
+    publishBootstrapRevocation(root, platform, stable)
+    return false
+  }
+  if (readBootstrapResolution(root, platform) || readBootstrapRevocation(root, platform)) {
+    return false
+  }
+  return true
+}
+
+function assertFreshBootstrapCreationEligible(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  recoveryEvidencePaths: readonly string[],
+): void {
+  assertRootIdentity(root, platform)
+  if (optionalLstat(path.join(root.requestedPath, FIREBASE_PERSISTENCE_REGISTRY_FILE))
+    || optionalLstat(path.join(root.requestedPath, 'settings.json'))
+    || readBootstrapResolution(root, platform)
+    || readBootstrapRevocation(root, platform)
+    || hasBootstrapBlockingEvidence(root, platform, recoveryEvidencePaths)) {
+    throw new Error('Firebase fresh bootstrap eligibility changed before durable publication')
+  }
+  assertRootIdentity(root, platform)
+}
+
+function publishFreshBootstrapEvidence(
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  recoveryEvidencePaths: readonly string[],
+  afterFirstRead?: (target: string) => void,
+): boolean {
+  const target = path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_FILE)
+  const bootstrapBytes = makeFreshBootstrapBytes(root, platform)
+  const candidatePath = path.join(
+    root.requestedPath,
+    `${FIREBASE_PROFILE_BOOTSTRAP_FILE}.candidate-${process.pid}-${randomUUID()}`,
+  )
+  const noFollow = platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)
+  let candidateIdentity: FileIdentity | null = null
+  let published = false
+  try {
+    assertFreshBootstrapCreationEligible(root, platform, recoveryEvidencePaths)
+    const fd = fs.openSync(
+      candidatePath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    )
+    try {
+      writeAllSync(fd, bootstrapBytes)
+      fs.fsyncSync(fd)
+      const stats = fs.fstatSync(fd)
+      if (!stats.isFile() || stats.size !== bootstrapBytes.byteLength) {
+        throw new Error('Firebase fresh bootstrap candidate verification failed')
+      }
+      candidateIdentity = toFileIdentity(stats)
+    } finally {
+      fs.closeSync(fd)
+    }
+    const candidateStats = fs.lstatSync(candidatePath)
+    if (candidateStats.isSymbolicLink()
+      || !candidateStats.isFile()
+      || !candidateIdentity
+      || !sameStableFileIdentity(candidateIdentity, toFileIdentity(candidateStats))) {
+      throw new Error('Firebase fresh bootstrap candidate identity changed')
+    }
+    assertPathInsideRoot(candidatePath, root, platform)
+    assertFreshBootstrapCreationEligible(root, platform, recoveryEvidencePaths)
+    try {
+      fs.linkSync(candidatePath, target)
+      published = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    const targetStats = fs.lstatSync(target)
+    if (published && (!candidateIdentity
+      || !sameObjectIdentity(candidateIdentity, toFileIdentity(targetStats))
+      || targetStats.size !== bootstrapBytes.byteLength)) {
+      throw new Error('Firebase fresh bootstrap final does not match its candidate')
+    }
+    const eligible = validateFreshBootstrapAgainstRecovery(
+      root,
+      platform,
+      recoveryEvidencePaths,
+      true,
+      afterFirstRead,
+    )
+    if (!eligible) return false
+  } finally {
+    cleanupOwnedCandidate(
+      candidatePath,
+      candidateIdentity,
+      bootstrapBytes,
+      root,
+      platform,
+    )
+  }
+  if (published) syncParentDirectory(root, platform)
+  return true
+}
+
+function assertFreshBootstrapEvidence(
+  snapshot: FirebaseProfileEligibilitySnapshot,
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): void {
+  if (!snapshot.freshBootstrap) return
+  const recoveryEvidencePaths = bindRecoveryEvidencePaths(snapshot.recoveryEvidencePaths, platform)
+  if (!validateFreshBootstrapAgainstRecovery(
+    root,
+    platform,
+    recoveryEvidencePaths,
+    false,
+  )) {
+    throw new Error('Firebase fresh bootstrap evidence was invalidated by recovery evidence')
+  }
+  assertRootIdentity(root, platform)
+}
+
+/**
+ * Capture only the startup facts that constructors are allowed to change.
+ * Settings contents are deliberately read later, after SettingsStore validation/recovery.
+ */
+export function captureFirebaseProfileInitialState(
+  userDataPath: string,
+  options: Pick<
+    FirebaseProfileSnapshotOptions,
+    'platform' | 'beforeRootCreate' | 'recoveryEvidencePaths' | 'afterFirstFileRead'
+  > = {},
+): FirebaseProfileInitialState {
+  const platform = options.platform ?? process.platform
+  const recoveryEvidencePaths = bindRecoveryEvidencePaths(
+    options.recoveryEvidencePaths ?? [],
+    platform,
+  )
+  ensureUserDataRoot(userDataPath, platform, options.beforeRootCreate)
+  const root = captureRootIdentity(userDataPath, platform)
+  const registryExisted = assertInitialRegularFile(
+    path.join(root.requestedPath, FIREBASE_PERSISTENCE_REGISTRY_FILE),
+    'registry',
+  )
+  const actualSettingsExisted = assertInitialRegularFile(
+    path.join(root.requestedPath, 'settings.json'),
+    'settings',
+  )
+  const bootstrapPath = path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_FILE)
+  let freshBootstrap = false
+  if (!registryExisted) {
+    const resolution = readBootstrapResolution(root, platform)
+    const revocation = readBootstrapRevocation(root, platform)
+    if (resolution || revocation) {
+      freshBootstrap = false
+    } else if (optionalLstat(bootstrapPath)) {
+      freshBootstrap = validateFreshBootstrapAgainstRecovery(
+        root,
+        platform,
+        recoveryEvidencePaths,
+        false,
+        options.afterFirstFileRead,
+      )
+    } else if (!actualSettingsExisted && !hasBootstrapBlockingEvidence(
+      root,
+      platform,
+      recoveryEvidencePaths,
+    )) {
+      freshBootstrap = publishFreshBootstrapEvidence(
+        root,
+        platform,
+        recoveryEvidencePaths,
+        options.afterFirstFileRead,
+      )
+    }
+  }
+  if (freshBootstrap) {
+    freshBootstrap = validateFreshBootstrapAgainstRecovery(
+      root,
+      platform,
+      recoveryEvidencePaths,
+      false,
+    )
+  }
+  // Without durable fresh proof, an absent primary is recovery/legacy evidence.
+  const settingsExisted = freshBootstrap
+    ? false
+    : actualSettingsExisted || !registryExisted
+  const bootstrapDecisionEvidence = captureBootstrapDecisionEvidence(root, platform)
+  assertRootIdentity(root, platform)
+  return Object.freeze({
+    version: 1 as const,
+    rootIdentity: Object.freeze({ ...root }),
+    registryExisted,
+    settingsExisted,
+    freshBootstrap,
+    recoveryEvidencePaths,
+    bootstrapDecisionEvidence,
+  })
+}
+
+function assertInitialState(
+  initialState: FirebaseProfileInitialState,
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): readonly string[] {
+  if (initialState.version !== 1
+    || typeof initialState.registryExisted !== 'boolean'
+    || typeof initialState.settingsExisted !== 'boolean'
+    || typeof initialState.freshBootstrap !== 'boolean'
+    || !Array.isArray(initialState.recoveryEvidencePaths)
+    || !isBootstrapDecisionEvidence(initialState.bootstrapDecisionEvidence)
+    || (!initialState.registryExisted
+      && !initialState.settingsExisted
+      && !initialState.freshBootstrap)
+    || !sameRootIdentity(initialState.rootIdentity, root, platform)) {
+    throw new Error('Firebase initial profile state parent directory identity changed')
+  }
+  verifyBootstrapDecisionEvidence(initialState.bootstrapDecisionEvidence, root, platform)
+  return bindRecoveryEvidencePaths(initialState.recoveryEvidencePaths, platform)
+}
+
+function assertRestoreProtocolQuiescent(root: RootIdentity, platform: NodeJS.Platform): void {
+  assertRootIdentity(root, platform)
+  const entries = fs.readdirSync(root.requestedPath)
+    .map(name => comparableEntryName(name, platform))
+  const restoreIntent = comparableEntryName(RESTORE_INTENT_FILE, platform)
+  const restoreStaging = comparableEntryName(RESTORE_STAGING_DIR, platform)
+  const restoreTombstone = comparableEntryName(RESTORE_INTENT_TOMBSTONE_PREFIX, platform)
+  if (entries.includes(restoreIntent)
+    || entries.includes(restoreStaging)
+    || entries.some(name => name.startsWith(restoreTombstone))) {
+    throw new Error('Firebase settings restore protocol is still active or awaiting cleanup')
+  }
+  assertRootIdentity(root, platform)
+}
+
 function verifyEligibilitySnapshot(
   snapshot: FirebaseProfileEligibilitySnapshot,
   root: RootIdentity,
@@ -1233,6 +1967,10 @@ function verifyEligibilitySnapshot(
   if (snapshot.version !== 1 || !sameRootIdentity(snapshot.rootIdentity, root, platform)) {
     throw new Error('Firebase eligibility snapshot parent directory identity changed')
   }
+  if (!isBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence)) {
+    throw new Error('Firebase bootstrap decision snapshot is invalid')
+  }
+  verifyBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence, root, platform)
   const settingsPath = path.join(root.requestedPath, 'settings.json')
   if (snapshot.kind === 'registry-present') {
     if (!optionalLstat(path.join(root.requestedPath, FIREBASE_PERSISTENCE_REGISTRY_FILE))) {
@@ -1243,6 +1981,8 @@ function verifyEligibilitySnapshot(
   if (snapshot.kind === 'settings-invalid') {
     throw new Error('Firebase settings recovery must complete before registry publication')
   }
+  assertRestoreProtocolQuiescent(root, platform)
+  assertFreshBootstrapEvidence(snapshot, root, platform)
   const evidenceConfig = snapshot.legacyConfig ?? DEFAULT_FIREBASE_CONFIG
   const browserEvidence = scanBrowserPersistenceEvidence(
     root,
@@ -1256,10 +1996,38 @@ function verifyEligibilitySnapshot(
     || browserEvidence.fnvAuthKey !== snapshot.browserEvidence.fnvAuthKey) {
     throw new Error('Firebase browser persistence evidence changed after eligibility snapshot')
   }
+  verifyBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence, root, platform)
   if (snapshot.kind === 'settings-absent') {
     if (optionalLstat(settingsPath)) {
       throw new Error('Firebase settings appeared after fresh eligibility snapshot')
     }
+    assertRestoreProtocolQuiescent(root, platform)
+    assertFreshBootstrapEvidence(snapshot, root, platform)
+    verifyBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence, root, platform)
+    return
+  }
+  if (snapshot.kind === 'settings-validated-from-absence') {
+    if (!snapshot.settingsIdentity || !snapshot.settingsEvidenceSha256) {
+      throw new Error('Firebase post-validation settings evidence is incomplete')
+    }
+    const stable = readBoundedRegularFile(
+      settingsPath,
+      root,
+      platform,
+      MAX_SETTINGS_SNAPSHOT_BYTES,
+    )
+    if (!sameStableFileIdentity(snapshot.settingsIdentity, stable.identity)
+      || sha256Bytes(stable.bytes) !== snapshot.settingsEvidenceSha256) {
+      throw new Error('Firebase settings changed after strict validation')
+    }
+    const currentConfig = parseStrictSettingsFile(stable.bytes).config
+    if (snapshot.legacyConfig
+      && canonicalFirebaseConfig(currentConfig) !== canonicalFirebaseConfig(snapshot.legacyConfig)) {
+      throw new Error('Firebase post-validation settings configuration changed')
+    }
+    assertRestoreProtocolQuiescent(root, platform)
+    assertFreshBootstrapEvidence(snapshot, root, platform)
+    verifyBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence, root, platform)
     return
   }
   if (!snapshot.settingsIdentity
@@ -1281,6 +2049,9 @@ function verifyEligibilitySnapshot(
   if (canonicalFirebaseConfig(effectiveConfig) !== canonicalFirebaseConfig(snapshot.legacyConfig)) {
     throw new Error('Firebase settings configuration changed after eligibility snapshot')
   }
+  assertRestoreProtocolQuiescent(root, platform)
+  assertFreshBootstrapEvidence(snapshot, root, platform)
+  verifyBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence, root, platform)
 }
 
 function serializeRegistry(document: RegistryDocument): Buffer {
@@ -1320,13 +2091,72 @@ function cleanupOwnedCandidate(
       candidatePath,
       root,
       platform,
-      MAX_REGISTRY_BYTES,
+      Math.max(MAX_REGISTRY_BYTES, expectedBytes.byteLength),
     )
     if (!sameObjectIdentity(candidateIdentity, stable.identity)
       || !stable.bytes.equals(expectedBytes)) return
+    const finalStats = fs.lstatSync(candidatePath)
+    if (finalStats.isSymbolicLink()
+      || !finalStats.isFile()
+      || !sameObjectIdentity(candidateIdentity, toFileIdentity(finalStats))
+      || !sameStableFileIdentity(stable.identity, toFileIdentity(finalStats))) return
     fs.unlinkSync(candidatePath)
   } catch {
     // Leave uncertain evidence in place. Unknown/foreign candidates are never scanned or removed.
+  }
+}
+
+function prepareBootstrapRegistryResolution(
+  document: RegistryDocument,
+  snapshot: FirebaseProfileEligibilitySnapshot,
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+): {
+  document: RegistryDocument
+  snapshot: FirebaseProfileEligibilitySnapshot
+  marker: StableReadResult | null
+  needsResolution: boolean
+} {
+  const resolution = readBootstrapResolution(root, platform)
+  const revocation = readBootstrapRevocation(root, platform)
+  if (resolution) {
+    const claim = resolution.document.registry.legacyClaim
+    if ((claim && (!snapshot.legacyConfig
+      || canonicalFirebaseConfig(snapshot.legacyConfig) !== claim.canonicalConfig))
+      || (!claim && revocation)) {
+      throw new Error('Firebase bootstrap resolution does not match strictly validated settings')
+    }
+    return {
+      document: resolution.document.registry,
+      snapshot,
+      marker: null,
+      needsResolution: false,
+    }
+  }
+
+  const markerPath = path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_FILE)
+  const marker = optionalLstat(markerPath)
+    ? readFreshBootstrapEvidence(root, platform)
+    : null
+  if (revocation && !document.legacyClaim) {
+    throw new Error('Firebase revoked bootstrap evidence cannot publish a fresh registry')
+  }
+  if (document.legacyClaim && marker && !revocation) {
+    publishBootstrapRevocation(root, platform, marker)
+  }
+  const decisionEvidence = captureBootstrapDecisionEvidence(root, platform)
+  const publicationSnapshot = document.legacyClaim && marker
+    ? Object.freeze({
+        ...snapshot,
+        freshBootstrap: false,
+        bootstrapDecisionEvidence: decisionEvidence,
+      })
+    : snapshot
+  return {
+    document,
+    snapshot: publicationSnapshot,
+    marker,
+    needsResolution: Boolean(marker),
   }
 }
 
@@ -1338,7 +2168,12 @@ function publishImmutableRegistry(
   options: FirebasePersistenceRegistryOptions,
 ): RegistryDocument {
   const platform = options.platform ?? process.platform
-  const bytes = serializeRegistry(document)
+  assertRootIdentity(root, platform)
+  verifyEligibilitySnapshot(snapshot, root, platform, options.afterFirstFileRead)
+  const prepared = prepareBootstrapRegistryResolution(document, snapshot, root, platform)
+  const publicationDocument = prepared.document
+  const publicationSnapshot = prepared.snapshot
+  const bytes = serializeRegistry(publicationDocument)
   const candidatePath = path.join(
     root.requestedPath,
     `${FIREBASE_PERSISTENCE_REGISTRY_FILE}.candidate-${process.pid}-${randomUUID()}`,
@@ -1350,7 +2185,6 @@ function publishImmutableRegistry(
 
   try {
     assertRootIdentity(root, platform)
-    verifyEligibilitySnapshot(snapshot, root, platform, options.afterFirstFileRead)
     const fd = fs.openSync(
       candidatePath,
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
@@ -1380,7 +2214,7 @@ function publishImmutableRegistry(
 
     options.beforePublish?.()
     assertRootIdentity(root, platform)
-    verifyEligibilitySnapshot(snapshot, root, platform, options.afterFirstFileRead)
+    verifyEligibilitySnapshot(publicationSnapshot, root, platform, options.afterFirstFileRead)
     try {
       fs.linkSync(candidatePath, target)
       published = true
@@ -1401,6 +2235,24 @@ function publishImmutableRegistry(
       MAX_REGISTRY_BYTES,
       options.afterFirstFileRead,
     ).bytes)
+    if (sha256Bytes(serializeRegistry(winner)) !== sha256Bytes(bytes)) {
+      throw new Error('Firebase registry winner conflicts with the validated bootstrap resolution')
+    }
+    verifyBootstrapDecisionEvidence(
+      publicationSnapshot.bootstrapDecisionEvidence,
+      root,
+      platform,
+    )
+    if (prepared.needsResolution) {
+      if (!prepared.marker) throw new Error('Firebase bootstrap resolution marker is missing')
+      publishBootstrapResolution(root, platform, winner, prepared.marker)
+      const resolved = readBootstrapResolution(root, platform)
+      if (!resolved
+        || resolved.document.registrySha256 !== sha256Bytes(serializeRegistry(winner))) {
+        throw new Error('Firebase bootstrap registry resolution publication failed')
+      }
+      captureBootstrapDecisionEvidence(root, platform)
+    }
   } finally {
     cleanupOwnedCandidate(candidatePath, candidateIdentity, bytes, root, platform)
   }
@@ -1427,7 +2279,52 @@ function readRegistry(
   ).bytes)
 }
 
-/** Snapshot only released v0.3.8 evidence, before current startup creates any files. */
+function reconcileExistingRegistryBootstrapDecision(
+  document: RegistryDocument,
+  snapshot: FirebaseProfileEligibilitySnapshot,
+  root: RootIdentity,
+  platform: NodeJS.Platform,
+  afterFirstRead?: (target: string) => void,
+): void {
+  verifyEligibilitySnapshot(snapshot, root, platform, afterFirstRead)
+  const resolution = readBootstrapResolution(root, platform)
+  const revocation = readBootstrapRevocation(root, platform)
+  if (resolution) {
+    if (resolution.document.registrySha256 !== sha256Bytes(serializeRegistry(document))
+      || (!document.legacyClaim && revocation)) {
+      throw new Error('Firebase existing registry conflicts with bootstrap decision evidence')
+    }
+    verifyBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence, root, platform)
+    return
+  }
+
+  const markerPath = path.join(root.requestedPath, FIREBASE_PROFILE_BOOTSTRAP_FILE)
+  const marker = optionalLstat(markerPath)
+    ? readFreshBootstrapEvidence(root, platform, afterFirstRead)
+    : null
+  if (revocation && !document.legacyClaim) {
+    throw new Error('Firebase fresh registry conflicts with revoked bootstrap evidence')
+  }
+  if (marker || revocation) {
+    if (!marker) throw new Error('Firebase bootstrap marker is missing from decision evidence')
+    if (document.legacyClaim && !revocation) {
+      publishBootstrapRevocation(root, platform, marker)
+    }
+    publishBootstrapResolution(root, platform, document, marker)
+    const published = readBootstrapResolution(root, platform)
+    if (!published
+      || published.document.registrySha256 !== sha256Bytes(serializeRegistry(document))) {
+      throw new Error('Firebase existing registry bootstrap resolution backfill failed')
+    }
+    captureBootstrapDecisionEvidence(root, platform)
+  }
+}
+
+/**
+ * Read immutable registry and legacy profile evidence. Main passes the
+ * pre-constructor existence state so settings contents are read only after
+ * SettingsStore has completed strict validation or verified recovery.
+ */
 export function detectPreexistingFirebaseProfile(
   userDataPath: string,
   options: FirebaseProfileSnapshotOptions = {},
@@ -1435,8 +2332,23 @@ export function detectPreexistingFirebaseProfile(
   const platform = options.platform ?? process.platform
   ensureUserDataRoot(userDataPath, platform, options.beforeRootCreate)
   const root = captureRootIdentity(userDataPath, platform)
+  const initialRecoveryEvidencePaths = options.initialState
+    ? assertInitialState(options.initialState, root, platform)
+    : Object.freeze([] as string[])
+  const bootstrapDecisionEvidence = options.initialState
+    ? cloneBootstrapDecisionEvidence(options.initialState.bootstrapDecisionEvidence)
+    : captureBootstrapDecisionEvidence(root, platform)
+  const recoveryEvidencePaths = mergeRecoveryEvidencePaths(
+    initialRecoveryEvidencePaths,
+    options.recoveryEvidencePaths ?? [],
+    platform,
+  )
   const registryPath = path.join(root.requestedPath, FIREBASE_PERSISTENCE_REGISTRY_FILE)
-  if (optionalLstat(registryPath)) {
+  const registryStats = optionalLstat(registryPath)
+  if (options.initialState?.registryExisted && !registryStats) {
+    throw new Error('Firebase registry disappeared during settings validation')
+  }
+  if (registryStats) {
     const browserEvidence = Object.freeze({
       state: 'absent' as const,
       fingerprint: sha256('registry-present'),
@@ -1452,10 +2364,85 @@ export function detectPreexistingFirebaseProfile(
       rootIdentity: Object.freeze({ ...root }),
       settingsIdentity: null,
       browserEvidence,
+      freshBootstrap: options.initialState?.freshBootstrap ?? false,
+      recoveryEvidencePaths,
+      bootstrapDecisionEvidence,
     })
   }
   const settingsPath = path.join(root.requestedPath, 'settings.json')
   const stats = optionalLstat(settingsPath)
+  if (options.initialState) {
+    assertRestoreProtocolQuiescent(root, platform)
+    if (!stats) {
+      if (options.initialState.settingsExisted) {
+        throw new Error('Firebase settings disappeared during strict validation')
+      }
+      const browserEvidence = scanBrowserPersistenceEvidence(
+        root,
+        platform,
+        DEFAULT_FIREBASE_CONFIG,
+        options.afterFirstFileRead,
+      )
+      const hasBrowserClaim = browserEvidence.publicAuthKey || browserEvidence.fnvAuthKey
+      return Object.freeze({
+        version: 1 as const,
+        existed: hasBrowserClaim,
+        kind: 'settings-absent' as const,
+        legacyConfig: hasBrowserClaim ? Object.freeze({ ...DEFAULT_FIREBASE_CONFIG }) : null,
+        settingsEvidenceSha256: null,
+        rootIdentity: Object.freeze({ ...root }),
+        settingsIdentity: null,
+        browserEvidence: Object.freeze({ ...browserEvidence }),
+        freshBootstrap: options.initialState.freshBootstrap,
+        recoveryEvidencePaths,
+        bootstrapDecisionEvidence,
+      })
+    }
+
+    const stable = readBoundedRegularFile(
+      settingsPath,
+      root,
+      platform,
+      MAX_SETTINGS_SNAPSHOT_BYTES,
+      options.afterFirstFileRead,
+    )
+    const config = parseStrictSettingsFile(stable.bytes).config
+    const browserEvidence = scanBrowserPersistenceEvidence(
+      root,
+      platform,
+      config,
+      options.afterFirstFileRead,
+    )
+    const hasBrowserClaim = browserEvidence.publicAuthKey || browserEvidence.fnvAuthKey
+    if (!options.initialState.settingsExisted) {
+      return Object.freeze({
+        version: 1 as const,
+        existed: hasBrowserClaim,
+        kind: 'settings-validated-from-absence' as const,
+        legacyConfig: hasBrowserClaim ? Object.freeze({ ...config }) : null,
+        settingsEvidenceSha256: sha256Bytes(stable.bytes),
+        rootIdentity: Object.freeze({ ...root }),
+        settingsIdentity: Object.freeze({ ...stable.identity }),
+        browserEvidence: Object.freeze({ ...browserEvidence }),
+        freshBootstrap: options.initialState.freshBootstrap,
+        recoveryEvidencePaths,
+        bootstrapDecisionEvidence,
+      })
+    }
+    return Object.freeze({
+      version: 1 as const,
+      existed: true,
+      kind: 'settings-snapshot' as const,
+      legacyConfig: Object.freeze({ ...config }),
+      settingsEvidenceSha256: sha256Bytes(stable.bytes),
+      rootIdentity: Object.freeze({ ...root }),
+      settingsIdentity: Object.freeze({ ...stable.identity }),
+      browserEvidence: Object.freeze({ ...browserEvidence }),
+      freshBootstrap: options.initialState.freshBootstrap,
+      recoveryEvidencePaths,
+      bootstrapDecisionEvidence,
+    })
+  }
   if (!stats) {
     const browserEvidence = scanBrowserPersistenceEvidence(
       root,
@@ -1473,6 +2460,9 @@ export function detectPreexistingFirebaseProfile(
       rootIdentity: Object.freeze({ ...root }),
       settingsIdentity: null,
       browserEvidence: Object.freeze({ ...browserEvidence }),
+      freshBootstrap: false,
+      recoveryEvidencePaths,
+      bootstrapDecisionEvidence,
     })
   }
   const stable = readBoundedRegularFile(
@@ -1501,6 +2491,9 @@ export function detectPreexistingFirebaseProfile(
       rootIdentity: Object.freeze({ ...root }),
       settingsIdentity: Object.freeze({ ...stable.identity }),
       browserEvidence: Object.freeze({ ...browserEvidence }),
+      freshBootstrap: false,
+      recoveryEvidencePaths,
+      bootstrapDecisionEvidence,
     })
   }
   const browserEvidence = scanBrowserPersistenceEvidence(
@@ -1518,19 +2511,71 @@ export function detectPreexistingFirebaseProfile(
     rootIdentity: Object.freeze({ ...root }),
     settingsIdentity: Object.freeze({ ...stable.identity }),
     browserEvidence: Object.freeze({ ...browserEvidence }),
+    freshBootstrap: false,
+    recoveryEvidencePaths,
+    bootstrapDecisionEvidence,
   })
 }
 
-function recoveredSettingsFirebase(value: unknown): FirebaseConfig {
-  if (!isPlainRecord(value)) throw new Error('Firebase recovered settings are invalid')
-  if (!Object.prototype.hasOwnProperty.call(value, 'firebase') || value.firebase === null) {
+type StrictAppSettings = ReturnType<typeof parseAppSettingsWithLegacyDefaults>
+
+function canonicalStrictSettings(settings: StrictAppSettings): string {
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize)
+    if (!isPlainRecord(value)) return value
+    const result: Record<string, unknown> = {}
+    for (const key of Object.keys(value).sort()) {
+      if (value[key] !== undefined) result[key] = normalize(value[key])
+    }
+    return result
+  }
+  return JSON.stringify(normalize(settings))
+}
+
+function sameStrictSettings(left: StrictAppSettings, right: StrictAppSettings): boolean {
+  return canonicalStrictSettings(left) === canonicalStrictSettings(right)
+}
+
+function strictSettings(value: unknown): StrictAppSettings {
+  let settings: ReturnType<typeof parseAppSettingsWithLegacyDefaults>
+  try {
+    settings = parseAppSettingsWithLegacyDefaults(value)
+  } catch {
+    throw new Error('Firebase validated settings failed strict application validation')
+  }
+  return settings
+}
+
+function strictSettingsFirebase(value: StrictAppSettings): FirebaseConfig {
+  const settings = value
+  if (settings.firebase === null) {
     return parseFirebaseConfig(DEFAULT_FIREBASE_CONFIG)
   }
   try {
-    return parseFirebaseConfig(value.firebase)
+    return parseFirebaseConfig(settings.firebase)
   } catch {
-    throw new Error('Firebase recovered settings configuration is invalid')
+    throw new Error('Firebase validated settings configuration is invalid')
   }
+}
+
+function parseStrictSettingsFile(bytes: Buffer): {
+  config: FirebaseConfig
+  settings: StrictAppSettings
+} {
+  let value: unknown
+  try {
+    const raw = bytes.toString('utf8')
+    value = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw)
+  } catch {
+    throw new Error('Firebase settings file is invalid after strict validation')
+  }
+  let settings: StrictAppSettings
+  try {
+    settings = strictSettings(value)
+  } catch {
+    throw new Error('Firebase settings file failed strict application validation')
+  }
+  return { settings, config: strictSettingsFirebase(settings) }
 }
 
 function completeRecoveredEligibility(
@@ -1547,10 +2592,7 @@ function completeRecoveredEligibility(
   if (!sameRootIdentity(snapshot.rootIdentity, root, platform)) {
     throw new Error('Firebase settings recovery parent directory identity changed')
   }
-  if (optionalLstat(path.join(root.requestedPath, RESTORE_INTENT_FILE))
-    || optionalLstat(path.join(root.requestedPath, RESTORE_STAGING_DIR))) {
-    throw new Error('Firebase settings recovery protocol is still in progress')
-  }
+  assertRestoreProtocolQuiescent(root, platform)
   const stable = readBoundedRegularFile(
     path.join(root.requestedPath, 'settings.json'),
     root,
@@ -1558,8 +2600,13 @@ function completeRecoveredEligibility(
     MAX_SETTINGS_SNAPSHOT_BYTES,
     options.afterFirstFileRead,
   )
-  const config = parseReleasedSettingsFirebase(stable.bytes)
-  const suppliedConfig = recoveredSettingsFirebase(recoveredSettings)
+  const currentSettings = parseStrictSettingsFile(stable.bytes)
+  const suppliedSettings = strictSettings(recoveredSettings)
+  const config = currentSettings.config
+  const suppliedConfig = strictSettingsFirebase(suppliedSettings)
+  if (!sameStrictSettings(currentSettings.settings, suppliedSettings)) {
+    throw new Error('Firebase recovered settings do not match the SettingsStore result')
+  }
   if (canonicalFirebaseConfig(config) !== canonicalFirebaseConfig(suppliedConfig)) {
     throw new Error('Firebase recovered settings do not match the verified primary file')
   }
@@ -1582,7 +2629,118 @@ function completeRecoveredEligibility(
     rootIdentity: Object.freeze({ ...root }),
     settingsIdentity: Object.freeze({ ...stable.identity }),
     browserEvidence: Object.freeze({ ...browserEvidence }),
+    freshBootstrap: snapshot.freshBootstrap,
+    recoveryEvidencePaths: snapshot.recoveryEvidencePaths,
+    bootstrapDecisionEvidence: cloneBootstrapDecisionEvidence(snapshot.bootstrapDecisionEvidence),
   })
+}
+
+function completeValidatedEligibility(
+  userDataPath: string,
+  snapshot: FirebaseProfileEligibilitySnapshot,
+  validatedSettings: unknown,
+  options: FirebasePersistenceRegistryOptions,
+): FirebaseProfileEligibilitySnapshot {
+  if (snapshot.kind === 'settings-invalid') {
+    return completeRecoveredEligibility(userDataPath, snapshot, validatedSettings, options)
+  }
+  const platform = options.platform ?? process.platform
+  const root = captureRootIdentity(userDataPath, platform)
+  if (!sameRootIdentity(snapshot.rootIdentity, root, platform)) {
+    throw new Error('Firebase settings validation parent directory identity changed')
+  }
+  assertRestoreProtocolQuiescent(root, platform)
+  const suppliedSettings = strictSettings(validatedSettings)
+  const suppliedConfig = strictSettingsFirebase(suppliedSettings)
+  if (snapshot.kind === 'registry-present') return snapshot
+  const settingsPath = path.join(root.requestedPath, 'settings.json')
+  const settingsStats = optionalLstat(settingsPath)
+  if (snapshot.kind === 'settings-absent') {
+    const expectedConfig = snapshot.legacyConfig ?? DEFAULT_FIREBASE_CONFIG
+    if (canonicalFirebaseConfig(suppliedConfig) !== canonicalFirebaseConfig(expectedConfig)) {
+      throw new Error('Firebase initially absent settings changed configuration during validation')
+    }
+    if (!settingsStats) return snapshot
+    const stable = readBoundedRegularFile(
+      settingsPath,
+      root,
+      platform,
+      MAX_SETTINGS_SNAPSHOT_BYTES,
+      options.afterFirstFileRead,
+    )
+    const currentSettings = parseStrictSettingsFile(stable.bytes)
+    const currentConfig = currentSettings.config
+    if (!sameStrictSettings(currentSettings.settings, suppliedSettings)) {
+      throw new Error('Firebase settings created during validation do not match SettingsStore')
+    }
+    if (canonicalFirebaseConfig(currentConfig) !== canonicalFirebaseConfig(suppliedConfig)) {
+      throw new Error('Firebase settings created during validation do not match SettingsStore')
+    }
+    return Object.freeze({
+      ...snapshot,
+      kind: 'settings-validated-from-absence' as const,
+      settingsEvidenceSha256: sha256Bytes(stable.bytes),
+      settingsIdentity: Object.freeze({ ...stable.identity }),
+      browserEvidence: Object.freeze({ ...snapshot.browserEvidence }),
+    })
+  }
+  if (snapshot.kind === 'settings-validated-from-absence') {
+    if (!settingsStats || !snapshot.settingsIdentity || !snapshot.settingsEvidenceSha256) {
+      throw new Error('Firebase post-validation settings snapshot is incomplete')
+    }
+    const stable = readBoundedRegularFile(
+      settingsPath,
+      root,
+      platform,
+      MAX_SETTINGS_SNAPSHOT_BYTES,
+      options.afterFirstFileRead,
+    )
+    if (!sameStableFileIdentity(snapshot.settingsIdentity, stable.identity)
+      || sha256Bytes(stable.bytes) !== snapshot.settingsEvidenceSha256) {
+      throw new Error('Firebase settings changed after strict validation')
+    }
+    const currentSettings = parseStrictSettingsFile(stable.bytes)
+    const currentConfig = currentSettings.config
+    if (!sameStrictSettings(currentSettings.settings, suppliedSettings)) {
+      throw new Error('Firebase post-validation settings do not match SettingsStore')
+    }
+    if (canonicalFirebaseConfig(currentConfig) !== canonicalFirebaseConfig(suppliedConfig)
+      || (snapshot.legacyConfig
+        && canonicalFirebaseConfig(currentConfig) !== canonicalFirebaseConfig(snapshot.legacyConfig))) {
+      throw new Error('Firebase post-validation settings do not match SettingsStore')
+    }
+    return Object.freeze({
+      ...snapshot,
+      browserEvidence: Object.freeze({ ...snapshot.browserEvidence }),
+    })
+  }
+  if (!settingsStats
+    || !snapshot.settingsIdentity
+    || !snapshot.settingsEvidenceSha256
+    || !snapshot.legacyConfig) {
+    throw new Error('Firebase validated settings snapshot is incomplete')
+  }
+  const stable = readBoundedRegularFile(
+    settingsPath,
+    root,
+    platform,
+    MAX_SETTINGS_SNAPSHOT_BYTES,
+    options.afterFirstFileRead,
+  )
+  if (!sameStableFileIdentity(snapshot.settingsIdentity, stable.identity)
+    || sha256Bytes(stable.bytes) !== snapshot.settingsEvidenceSha256) {
+    throw new Error('Firebase settings changed after strict validation')
+  }
+  const currentSettings = parseStrictSettingsFile(stable.bytes)
+  const currentConfig = currentSettings.config
+  if (!sameStrictSettings(currentSettings.settings, suppliedSettings)) {
+    throw new Error('Firebase validated settings do not match SettingsStore')
+  }
+  if (canonicalFirebaseConfig(currentConfig) !== canonicalFirebaseConfig(suppliedConfig)
+    || canonicalFirebaseConfig(currentConfig) !== canonicalFirebaseConfig(snapshot.legacyConfig)) {
+    throw new Error('Firebase strictly validated settings configuration changed')
+  }
+  return snapshot
 }
 
 export class FirebasePersistenceRegistry {
@@ -1597,15 +2755,25 @@ export class FirebasePersistenceRegistry {
     const root = captureRootIdentity(userDataPath, platform)
     const registryPath = path.join(root.requestedPath, FIREBASE_PERSISTENCE_REGISTRY_FILE)
     const existing = optionalLstat(registryPath)
-    const document = existing
-      ? readRegistry(registryPath, root, platform, options.afterFirstFileRead)
-      : publishImmutableRegistry(
-          registryPath,
-          makeRegistryDocument(snapshot),
-          snapshot,
-          root,
-          options,
-        )
+    let document: RegistryDocument
+    if (existing) {
+      document = readRegistry(registryPath, root, platform, options.afterFirstFileRead)
+      reconcileExistingRegistryBootstrapDecision(
+        document,
+        snapshot,
+        root,
+        platform,
+        options.afterFirstFileRead,
+      )
+    } else {
+      document = publishImmutableRegistry(
+        registryPath,
+        makeRegistryDocument(snapshot),
+        snapshot,
+        root,
+        options,
+      )
+    }
     return new FirebasePersistenceRegistry(document)
   }
 
@@ -1616,10 +2784,25 @@ export class FirebasePersistenceRegistry {
     recoveredSettings: unknown,
     options: FirebasePersistenceRegistryOptions = {},
   ): FirebasePersistenceRegistry {
-    const completed = completeRecoveredEligibility(
+    return FirebasePersistenceRegistry.openAfterSettingsValidation(
       userDataPath,
       snapshot,
       recoveredSettings,
+      options,
+    )
+  }
+
+  /** Publish only after SettingsStore strict validation and pair recovery have both completed. */
+  static openAfterSettingsValidation(
+    userDataPath: string,
+    snapshot: FirebaseProfileEligibilitySnapshot,
+    validatedSettings: unknown,
+    options: FirebasePersistenceRegistryOptions = {},
+  ): FirebasePersistenceRegistry {
+    const completed = completeValidatedEligibility(
+      userDataPath,
+      snapshot,
+      validatedSettings,
       options,
     )
     return FirebasePersistenceRegistry.open(userDataPath, completed, options)

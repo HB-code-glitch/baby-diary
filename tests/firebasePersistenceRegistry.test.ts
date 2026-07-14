@@ -8,6 +8,7 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  unlinkSync,
   writeFileSync,
 } from 'fs'
 import { tmpdir } from 'os'
@@ -16,7 +17,11 @@ import { createHash } from 'crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   FIREBASE_PERSISTENCE_REGISTRY_FILE,
+  FIREBASE_PROFILE_BOOTSTRAP_FILE,
+  FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE,
+  FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE,
   FirebasePersistenceRegistry,
+  captureFirebaseProfileInitialState,
   detectPreexistingFirebaseProfile,
 } from '../electron/store/firebasePersistenceRegistry'
 import { BABY_INFO_JOURNAL_FILE } from '../electron/store/babyInfoJournal'
@@ -196,18 +201,42 @@ function makeChromiumIndexedDbAuthLog(
     operation?: 'put' | 'delete'
   } = {},
 ): Buffer {
-  const indexedDbKey = makeChromiumIndexedDbAuthKey(apiKey, appName)
-  const operation = options.operation ?? 'put'
+  return makeChromiumIndexedDbAuthBatchLog([{
+    apiKey,
+    appName,
+    operation: options.operation,
+  }], options)
+}
+
+function makeChromiumIndexedDbAuthBatchLog(
+  records: Array<{
+    apiKey: string
+    appName: string
+    operation?: 'put' | 'delete'
+  }>,
+  options: {
+    sequenceLow?: number
+    sequenceHigh?: number
+  } = {},
+): Buffer {
+  const encodedRecords = records.flatMap(record => {
+    const indexedDbKey = makeChromiumIndexedDbAuthKey(record.apiKey, record.appName)
+    const operation = record.operation ?? 'put'
+    return [
+      Buffer.from([operation === 'put' ? 0x01 : 0x00]),
+      encodeVarint(indexedDbKey.length),
+      indexedDbKey,
+      ...(operation === 'put' ? [Buffer.from([0x01, 0x00])] : []),
+    ]
+  })
   const batch = Buffer.concat([
     Buffer.alloc(8),
-    Buffer.from([0x01, 0x00, 0x00, 0x00]),
-    Buffer.from([operation === 'put' ? 0x01 : 0x00]),
-    encodeVarint(indexedDbKey.length),
-    indexedDbKey,
-    ...(operation === 'put' ? [Buffer.from([0x01, 0x00])] : []),
+    Buffer.alloc(4),
+    ...encodedRecords,
   ])
   batch.writeUInt32LE(options.sequenceLow ?? 0, 0)
   batch.writeUInt32LE(options.sequenceHigh ?? 0, 4)
+  batch.writeUInt32LE(records.length, 8)
   return makeLevelDbPhysicalRecord(batch)
 }
 
@@ -553,14 +582,14 @@ describe('main-owned Firebase persistence registry', () => {
   })
 
   it.each([
-    ['gap', 3],
-    ['duplicate', 1],
-  ])('fails closed on a %s between ordered live WAL WriteBatch sequences', (_label, nextSequence) => {
+    ['gap', 1, 3],
+    ['overlap', 5, 5],
+  ])('accepts a valid %s between live WAL sequence ranges', (_label, firstSequence, nextSequence) => {
     const root = makeRoot(`higher-live-wal-${_label}`)
     const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
       'unrelated',
       'unrelated',
-      { sequenceLow: 1 },
+      { sequenceLow: firstSequence },
     ))
     writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
       DEFAULT_FIREBASE_CONFIG.apiKey,
@@ -568,7 +597,51 @@ describe('main-owned Firebase persistence registry', () => {
       { sequenceLow: nextSequence },
     ))
 
-    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/sequence|ordered|contiguous/i)
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('replays a later WAL with a lower valid sequence while keeping the highest Auth version', () => {
+    const root = makeRoot('higher-live-wal-backward-sequence')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 9 },
+    ))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 7, operation: 'delete' },
+    ))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('increments the sequence for each record inside one WAL WriteBatch', () => {
+    const root = makeRoot('wal-write-batch-sequence-increment')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+      { sequenceLow: 0, operation: 'delete' },
+    ))
+    writeFileSync(join(levelDb, '000006.log'), makeChromiumIndexedDbAuthBatchLog([
+      { apiKey: 'unrelated', appName: 'unrelated' },
+      { apiKey: DEFAULT_FIREBASE_CONFIG.apiKey, appName: LEGACY_FIREBASE_APP_NAME },
+    ], { sequenceLow: 0 }))
+
+    const registry = FirebasePersistenceRegistry.open(root, detectPreexistingFirebaseProfile(root))
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('rejects a WAL WriteBatch whose final increment exceeds the 56-bit sequence domain', () => {
+    const root = makeRoot('wal-write-batch-sequence-end-overflow')
+    writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthBatchLog([
+      { apiKey: 'unrelated-a', appName: 'unrelated-a' },
+      { apiKey: 'unrelated-b', appName: 'unrelated-b' },
+    ], { sequenceLow: 0xffffffff, sequenceHigh: 0x00ffffff }))
+
+    expect(() => detectPreexistingFirebaseProfile(root)).toThrow(/sequence|56-bit|domain/i)
     expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
@@ -1073,17 +1146,588 @@ describe('main-owned Firebase persistence registry', () => {
     expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
+  it('does not publish a firebase-valid settings file that fails SettingsStore strict validation', () => {
+    const root = makeRoot('strict-settings-before-registry')
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({
+      firebase: otherConfig,
+      profile: 42,
+    }))
+    const initialState = captureFirebaseProfileInitialState(root)
+
+    expect(() => new SettingsStore(root)).toThrow(/strict validation|settings/i)
+    expect(initialState.settingsExisted).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('publishes a valid legacy claim only after SettingsStore completes strict validation', () => {
+    const root = makeRoot('strict-settings-validated-registry')
+    writeSettingsEvidence(root, customConfig)
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    const registry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+    )
+
+    expect(registry.claim(customConfig).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('rejects a same-config settings replacement after post-validation detection', () => {
+    const root = makeRoot('strict-settings-replaced-after-detection')
+    writeSettingsEvidence(root, customConfig)
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({
+      ...settingsStore.get(),
+      language: 'ja',
+    }))
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+    )).toThrow(/settings.*changed|identity|evidence/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects a same-config settings replacement between SettingsStore and detection', () => {
+    const root = makeRoot('strict-settings-replaced-before-detection')
+    writeSettingsEvidence(root, customConfig)
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const validatedSettings = settingsStore.get()
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({
+      ...validatedSettings,
+      language: 'ja',
+    }))
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      validatedSettings,
+    )).toThrow(/settings.*SettingsStore|validated settings.*match|settings.*changed/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('keeps an initially settings-absent profile fresh after SettingsStore creates journal state', () => {
+    const root = makeRoot('fresh-after-settings-validation')
+    const initialState = captureFirebaseProfileInitialState(root)
+    expect(initialState.settingsExisted).toBe(false)
+    const settingsStore = new SettingsStore(root)
+    expect(existsSync(join(root, BABY_INFO_JOURNAL_FILE))).toBe(true)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    const registry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+    )
+
+    expect(registry.diagnostic().classification).toBe('fresh-v0.3.9-or-newer')
+    expect(registry.claim(customConfig).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(customConfig).appName)
+  })
+
+  it('keeps a fresh profile fresh after a crash before first registry publication', () => {
+    const root = makeRoot('fresh-bootstrap-crash-before-registry')
+    const firstInitialState = captureFirebaseProfileInitialState(root)
+    expect(firstInitialState.settingsExisted).toBe(false)
+    expect(firstInitialState.freshBootstrap).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE))).toBe(true)
+    new SettingsStore(root)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+
+    const secondInitialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState: secondInitialState })
+    const registry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+    )
+
+    expect(registry.diagnostic().classification).toBe('fresh-v0.3.9-or-newer')
+    expect(registry.claim(customConfig).appName)
+      .toBe(getDigestFirebasePersistenceIdentity(customConfig).appName)
+  })
+
+  it('fails closed when durable fresh bootstrap evidence is corrupted after a crash', () => {
+    const root = makeRoot('fresh-bootstrap-corrupt-after-crash')
+    captureFirebaseProfileInitialState(root)
+    new SettingsStore(root)
+    writeFileSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE), '{"version":2}')
+
+    expect(() => captureFirebaseProfileInitialState(root)).toThrow(/bootstrap|evidence|invalid/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('rejects a copied bootstrap marker whose provenance belongs to another profile root', () => {
+    const source = makeRoot('fresh-bootstrap-copy-source')
+    const target = makeRoot('fresh-bootstrap-copy-target')
+    captureFirebaseProfileInitialState(source)
+    writeSettingsEvidence(target, customConfig)
+    writeFileSync(
+      join(target, FIREBASE_PROFILE_BOOTSTRAP_FILE),
+      readFileSync(join(source, FIREBASE_PROFILE_BOOTSTRAP_FILE)),
+    )
+
+    expect(() => captureFirebaseProfileInitialState(target)).toThrow(/bootstrap|root|evidence|invalid/i)
+    expect(existsSync(join(target, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('revalidates durable fresh bootstrap evidence immediately before publication', () => {
+    const root = makeRoot('fresh-bootstrap-removed-before-publish')
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+      {
+        beforePublish: () => unlinkSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE)),
+      },
+    )).toThrow(/bootstrap|evidence|ENOENT/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('never creates fresh bootstrap evidence over an active recovery protocol', () => {
+    const root = makeRoot('fresh-bootstrap-blocked-by-recovery')
+    writeFileSync(join(root, '.baby-info-pair-restore-v1.json'), '{}')
+
+    const initialState = captureFirebaseProfileInitialState(root)
+
+    expect(initialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE))).toBe(false)
+  })
+
+  it.each([
+    ['restore intent', '.BaBy-InFo-PaIr-ReStOrE-V1.JsOn', 'file'],
+    ['restore staging', '.BaBy-InFo-PaIr-ReStOrE-V1', 'directory'],
+    ['restore tombstone', `.BaBy-InFo-PaIr-ReStOrE-V1.JsOn.ClEaNuP-${'a'.repeat(32)}`, 'file'],
+    ['settings temp', `SeTtInGs.JsOn.TmP-${'a'.repeat(32)}`, 'file'],
+    ['journal temp', `BaBy-InFo-JoUrNaL-V1.JsOnL.TmP-${'a'.repeat(32)}`, 'file'],
+    ['journal', 'BaBy-InFo-JoUrNaL-V1.JsOnL', 'file'],
+  ])('uses Windows case-insensitive semantics for mixed-case %s evidence', (_label, name, kind) => {
+    const root = makeRoot(`windows-mixed-case-${_label.replace(' ', '-')}`)
+    if (kind === 'directory') mkdirSync(join(root, name))
+    else writeFileSync(join(root, name), '{}')
+
+    const initialState = captureFirebaseProfileInitialState(root, { platform: 'win32' })
+
+    expect(initialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE))).toBe(false)
+  })
+
+  it.each([
+    ['restore intent', '.BaBy-InFo-PaIr-ReStOrE-V1.JsOn', 'file'],
+    ['restore staging', '.BaBy-InFo-PaIr-ReStOrE-V1', 'directory'],
+    ['restore tombstone', `.BaBy-InFo-PaIr-ReStOrE-V1.JsOn.ClEaNuP-${'a'.repeat(32)}`, 'file'],
+    ['settings temp', `SeTtInGs.JsOn.TmP-${'a'.repeat(32)}`, 'file'],
+    ['journal temp', `BaBy-InFo-JoUrNaL-V1.JsOnL.TmP-${'a'.repeat(32)}`, 'file'],
+    ['journal', 'BaBy-InFo-JoUrNaL-V1.JsOnL', 'file'],
+  ])('uses conservative macOS case-insensitive semantics for mixed-case %s evidence', (_label, name, kind) => {
+    const root = makeRoot(`darwin-mixed-case-${_label.replace(' ', '-')}`)
+    if (kind === 'directory') mkdirSync(join(root, name))
+    else writeFileSync(join(root, name), '{}')
+
+    const initialState = captureFirebaseProfileInitialState(root, { platform: 'darwin' })
+
+    expect(initialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE))).toBe(false)
+  })
+
+  it('invalidates pending fresh bootstrap evidence when recovery starts later', () => {
+    const root = makeRoot('fresh-bootstrap-invalidated-by-later-recovery')
+    captureFirebaseProfileInitialState(root)
+    writeFileSync(join(root, '.baby-info-pair-restore-v1.json'), '{}')
+
+    const initialState = captureFirebaseProfileInitialState(root)
+
+    expect(initialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('invalidates pending fresh bootstrap evidence when a configured backup root appears later', () => {
+    const root = makeRoot('fresh-bootstrap-invalidated-by-later-backup-root')
+    const recoveryEvidencePath = join(root, 'external-backups')
+    const options = { recoveryEvidencePaths: [recoveryEvidencePath] }
+    const firstInitialState = captureFirebaseProfileInitialState(root, options)
+    expect(firstInitialState).toMatchObject({ settingsExisted: false, freshBootstrap: true })
+    mkdirSync(recoveryEvidencePath)
+
+    const secondInitialState = captureFirebaseProfileInitialState(root, options)
+
+    expect(secondInitialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('revokes an existing bootstrap marker when recovery appears during its stable read', () => {
+    const root = makeRoot('fresh-bootstrap-recovery-during-existing-read')
+    const recoveryEvidencePath = join(root, 'external-backups')
+    const recoveryEvidencePaths = [recoveryEvidencePath]
+    captureFirebaseProfileInitialState(root, { recoveryEvidencePaths })
+    new SettingsStore(root)
+    let injected = false
+
+    const initialState = captureFirebaseProfileInitialState(root, {
+      recoveryEvidencePaths,
+      afterFirstFileRead: target => {
+        if (!injected && target === join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE)) {
+          injected = true
+          mkdirSync(recoveryEvidencePath)
+        }
+      },
+    })
+
+    expect(injected).toBe(true)
+    expect(initialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE))).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE))).toBe(true)
+
+    rmSync(recoveryEvidencePath, { recursive: true, force: true })
+    expect(captureFirebaseProfileInitialState(root, { recoveryEvidencePaths }))
+      .toMatchObject({ settingsExisted: true, freshBootstrap: false })
+  })
+
+  it('revokes a newly linked bootstrap marker when recovery appears during its final read', () => {
+    const root = makeRoot('fresh-bootstrap-recovery-during-publish-read')
+    const recoveryEvidencePath = join(root, 'external-backups')
+    const recoveryEvidencePaths = [recoveryEvidencePath]
+    let injected = false
+
+    const initialState = captureFirebaseProfileInitialState(root, {
+      recoveryEvidencePaths,
+      afterFirstFileRead: target => {
+        if (!injected && target === join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE)) {
+          injected = true
+          mkdirSync(recoveryEvidencePath)
+        }
+      },
+    })
+
+    expect(injected).toBe(true)
+    expect(initialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE))).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE))).toBe(true)
+  })
+
+  it('never deletes a foreign replacement swapped onto the predictable bootstrap marker path', () => {
+    const root = makeRoot('fresh-bootstrap-foreign-marker-swap')
+    captureFirebaseProfileInitialState(root)
+    new SettingsStore(root)
+    const markerPath = join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE)
+    const ownedArchive = join(root, 'owned-bootstrap-marker.archive')
+    const foreignBytes = Buffer.from('{"foreign":true}\n')
+    let injected = false
+
+    expect(() => captureFirebaseProfileInitialState(root, {
+      afterFirstFileRead: target => {
+        if (!injected && target === markerPath) {
+          injected = true
+          renameSync(markerPath, ownedArchive)
+          writeFileSync(markerPath, foreignBytes)
+        }
+      },
+    })).toThrow(/bootstrap|identity|changed|evidence/i)
+
+    expect(injected).toBe(true)
+    expect(readFileSync(markerPath)).toEqual(foreignBytes)
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE))).toBe(false)
+  })
+
+  it('binds a legacy browser decision durably so registry loss and logout cannot reactivate fresh bootstrap', () => {
+    const root = makeRoot('legacy-browser-bootstrap-resolution-survives-logout')
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    ))
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+    const firstRegistry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+    )
+    expect(firstRegistry.diagnostic().classification).toBe('legacy-v0.3.8-upgrade')
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE))).toBe(true)
+
+    unlinkSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))
+    rmSync(levelDb, { recursive: true, force: true })
+    const restartedInitialState = captureFirebaseProfileInitialState(root)
+    const restartedSettingsStore = new SettingsStore(root)
+    const restartedSnapshot = detectPreexistingFirebaseProfile(root, {
+      initialState: restartedInitialState,
+    })
+    const restartedRegistry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      restartedSnapshot,
+      restartedSettingsStore.get(),
+    )
+
+    expect(restartedInitialState).toMatchObject({ settingsExisted: true, freshBootstrap: false })
+    expect(restartedRegistry.diagnostic().classification).toBe('legacy-v0.3.8-upgrade')
+    expect(restartedRegistry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it('rejects a copied legacy resolution whose provenance belongs to another profile root', () => {
+    const source = makeRoot('bootstrap-resolution-copy-source')
+    writeV038AuthLevelDb(source, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    ))
+    const sourceInitialState = captureFirebaseProfileInitialState(source)
+    const sourceSettings = new SettingsStore(source)
+    FirebasePersistenceRegistry.openAfterSettingsValidation(
+      source,
+      detectPreexistingFirebaseProfile(source, { initialState: sourceInitialState }),
+      sourceSettings.get(),
+    )
+
+    const target = makeRoot('bootstrap-resolution-copy-target')
+    writeSettingsEvidence(target, DEFAULT_FIREBASE_CONFIG)
+    writeFileSync(
+      join(target, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE),
+      readFileSync(join(source, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE)),
+    )
+
+    expect(() => captureFirebaseProfileInitialState(target)).toThrow(/bootstrap|root|resolution|invalid/i)
+    expect(existsSync(join(target, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('pins bootstrap resolution identity from capture through registry reconstruction', () => {
+    const root = makeRoot('bootstrap-resolution-identity-pinned')
+    writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    ))
+    const firstInitialState = captureFirebaseProfileInitialState(root)
+    const firstSettings = new SettingsStore(root)
+    FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      detectPreexistingFirebaseProfile(root, { initialState: firstInitialState }),
+      firstSettings.get(),
+    )
+    unlinkSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))
+    const restartedInitialState = captureFirebaseProfileInitialState(root)
+    const resolutionPath = join(root, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE)
+    const sameBytes = readFileSync(resolutionPath)
+    renameSync(resolutionPath, join(root, 'bootstrap-resolution.archive'))
+    writeFileSync(resolutionPath, sameBytes)
+
+    expect(() => detectPreexistingFirebaseProfile(root, {
+      initialState: restartedInitialState,
+    })).toThrow(/bootstrap|decision|changed|identity/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('backfills a final resolution for a pre-witness registry that still has its root-bound marker', () => {
+    const root = makeRoot('bootstrap-resolution-existing-registry-backfill')
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      detectPreexistingFirebaseProfile(root, { initialState }),
+      settingsStore.get(),
+    )
+    unlinkSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE))
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(true)
+
+    const restartedInitialState = captureFirebaseProfileInitialState(root)
+    const restartedSnapshot = detectPreexistingFirebaseProfile(root, {
+      initialState: restartedInitialState,
+    })
+    FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      restartedSnapshot,
+      new SettingsStore(root).get(),
+    )
+
+    expect(existsSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE))).toBe(true)
+  })
+
+  it('rejects a fresh registry combined with durable bootstrap revocation evidence', () => {
+    const root = makeRoot('fresh-registry-revocation-conflict')
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      detectPreexistingFirebaseProfile(root, { initialState }),
+      settingsStore.get(),
+    )
+    const registryBytes = readFileSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))
+    unlinkSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))
+    unlinkSync(join(root, FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE))
+    const recoveryEvidencePath = join(root, 'late-recovery')
+    let injected = false
+    captureFirebaseProfileInitialState(root, {
+      recoveryEvidencePaths: [recoveryEvidencePath],
+      afterFirstFileRead: target => {
+        if (!injected && target === join(root, FIREBASE_PROFILE_BOOTSTRAP_FILE)) {
+          injected = true
+          mkdirSync(recoveryEvidencePath)
+        }
+      },
+    })
+    writeFileSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE), registryBytes)
+
+    const conflictedInitialState = captureFirebaseProfileInitialState(root, {
+      recoveryEvidencePaths: [recoveryEvidencePath],
+    })
+    const conflictedSnapshot = detectPreexistingFirebaseProfile(root, {
+      initialState: conflictedInitialState,
+    })
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      conflictedSnapshot,
+      new SettingsStore(root).get(),
+    )).toThrow(/fresh registry|revoked|conflict|bootstrap/i)
+  })
+
+  it.each([
+    FIREBASE_PROFILE_BOOTSTRAP_REVOCATION_FILE,
+    FIREBASE_PROFILE_BOOTSTRAP_RESOLUTION_FILE,
+  ])('fails closed on corrupt durable bootstrap decision evidence %s', (fileName) => {
+    const root = makeRoot(`corrupt-bootstrap-decision-${fileName}`)
+    writeFileSync(join(root, fileName), '{"version":1}')
+
+    expect(() => captureFirebaseProfileInitialState(root)).toThrow(/bootstrap|decision|evidence|invalid/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('binds recovery roots to the snapshot and rechecks them before registry linking', () => {
+    const root = makeRoot('fresh-bootstrap-bound-recovery-before-registry-link')
+    const recoveryEvidencePath = join(root, 'external-backups')
+    const initialState = captureFirebaseProfileInitialState(root, {
+      recoveryEvidencePaths: [recoveryEvidencePath],
+    })
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+      { beforePublish: () => mkdirSync(recoveryEvidencePath) },
+    )).toThrow(/bootstrap|recovery|evidence|eligibility/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('preserves browser-proved legacy Auth evidence after settings validation', () => {
+    const root = makeRoot('browser-legacy-after-settings-validation')
+    writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      DEFAULT_FIREBASE_CONFIG.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    ))
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+    expect(snapshot).toMatchObject({ kind: 'settings-validated-from-absence', existed: true })
+
+    const registry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+    )
+
+    expect(registry.claim(DEFAULT_FIREBASE_CONFIG).appName).toBe(LEGACY_FIREBASE_APP_NAME)
+  })
+
+  it.each([
+    ['intent', (root: string) => writeFileSync(join(root, '.baby-info-pair-restore-v1.json'), '{}')],
+    ['staging', (root: string) => mkdirSync(join(root, '.baby-info-pair-restore-v1'))],
+    ['tombstone', (root: string) => writeFileSync(
+      join(root, `.baby-info-pair-restore-v1.json.cleanup-${'a'.repeat(32)}`),
+      '{}',
+    )],
+  ])('revalidates restore %s state immediately before registry publication', (_label, mutate) => {
+    const root = makeRoot(`restore-${_label}-before-publish`)
+    writeSettingsEvidence(root, customConfig)
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+      { beforePublish: () => mutate(root) },
+    )).toThrow(/restore|staging|tombstone|protocol/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it.each([
+    ['intent', (root: string) => writeFileSync(join(root, '.BaBy-InFo-PaIr-ReStOrE-V1.JsOn'), '{}')],
+    ['staging', (root: string) => mkdirSync(join(root, '.BaBy-InFo-PaIr-ReStOrE-V1'))],
+    ['tombstone', (root: string) => writeFileSync(
+      join(root, `.BaBy-InFo-PaIr-ReStOrE-V1.JsOn.ClEaNuP-${'a'.repeat(32)}`),
+      '{}',
+    )],
+  ])('blocks a mixed-case Windows restore %s immediately before registry publication', (_label, mutate) => {
+    const root = makeRoot(`windows-mixed-case-restore-${_label}`)
+    writeSettingsEvidence(root, customConfig)
+    const initialState = captureFirebaseProfileInitialState(root, { platform: 'win32' })
+    const settingsStore = new SettingsStore(root, { platform: 'win32' })
+    const snapshot = detectPreexistingFirebaseProfile(root, { platform: 'win32', initialState })
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+      { platform: 'win32', beforePublish: () => mutate(root) },
+    )).toThrow(/restore|staging|tombstone|protocol/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
+  it('revalidates restore state after the final browser evidence scan', () => {
+    const root = makeRoot('restore-intent-during-final-browser-scan')
+    writeSettingsEvidence(root, customConfig)
+    const levelDb = writeV038AuthLevelDb(root, makeChromiumIndexedDbAuthLog(
+      customConfig.apiKey,
+      LEGACY_FIREBASE_APP_NAME,
+    ))
+    const initialState = captureFirebaseProfileInitialState(root)
+    const settingsStore = new SettingsStore(root)
+    const snapshot = detectPreexistingFirebaseProfile(root, { initialState })
+    const currentPath = join(levelDb, 'CURRENT')
+    let finalScanArmed = false
+    let injected = false
+
+    expect(() => FirebasePersistenceRegistry.openAfterSettingsValidation(
+      root,
+      snapshot,
+      settingsStore.get(),
+      {
+        beforePublish: () => { finalScanArmed = true },
+        afterFirstFileRead: target => {
+          if (finalScanArmed && !injected && target === currentPath) {
+            injected = true
+            writeFileSync(join(root, '.baby-info-pair-restore-v1.json'), '{}')
+          }
+        },
+      },
+    )).toThrow(/restore|protocol|cleanup/i)
+    expect(injected).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+  })
+
   it('keeps the registry absent through every Windows restart-required recovery phase', () => {
     const root = makeRoot('windows-recovery-publication-gate')
     writeVerifiedRecoveryBackup(root)
     writeFileSync(join(root, 'settings.json'), '{ broken settings')
     writeFileSync(join(root, BABY_INFO_JOURNAL_FILE), '{"version":1,"type":"mutation"')
-    const snapshot = detectPreexistingFirebaseProfile(root, { platform: 'win32' })
-    expect(snapshot.kind).toBe('settings-invalid')
-
     const startLikeMain = (startupId: string): FirebasePersistenceRegistry => {
+      const initialState = captureFirebaseProfileInitialState(root, { platform: 'win32' })
       const settingsStore = new SettingsStore(root, { platform: 'win32', startupId })
-      return FirebasePersistenceRegistry.openAfterSettingsRecovery(
+      const snapshot = detectPreexistingFirebaseProfile(root, { platform: 'win32', initialState })
+      return FirebasePersistenceRegistry.openAfterSettingsValidation(
         root,
         snapshot,
         settingsStore.get(),
@@ -1105,7 +1749,56 @@ describe('main-owned Firebase persistence registry', () => {
       join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE),
       'utf8',
     ))
-    expect(document.eligibilityEvidence.kind).toBe('settings-recovered')
+    expect(document.eligibilityEvidence.kind).toBe('settings-snapshot')
+  })
+
+  it('never publishes transient config B after a Windows primary-verified restore of config A', () => {
+    const root = makeRoot('windows-transient-config-publication-gate')
+    writeVerifiedRecoveryBackup(root)
+    writeFileSync(join(root, 'settings.json'), '{ broken settings')
+    writeFileSync(join(root, BABY_INFO_JOURNAL_FILE), '{ broken journal')
+    const startLikeMain = (startupId: string): FirebasePersistenceRegistry => {
+      const initialState = captureFirebaseProfileInitialState(root, { platform: 'win32' })
+      const settingsStore = new SettingsStore(root, { platform: 'win32', startupId })
+      const snapshot = detectPreexistingFirebaseProfile(root, { platform: 'win32', initialState })
+      return FirebasePersistenceRegistry.openAfterSettingsValidation(
+        root,
+        snapshot,
+        settingsStore.get(),
+        { platform: 'win32' },
+      )
+    }
+
+    for (const startupId of ['transient-boot-0', 'transient-boot-1', 'transient-boot-2']) {
+      expect(() => startLikeMain(startupId)).toThrow(expect.objectContaining({
+        restartRequired: true,
+      }))
+      expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+    }
+
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({
+      firebase: otherConfig,
+      profile: 42,
+    }))
+    expect(() => startLikeMain('transient-boot-3')).toThrow(/settings|restore|primary|validation/i)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
+    expect(readFileSync(join(root, 'settings.json'), 'utf8')).toContain(otherConfig.apiKey)
+  })
+
+  it('keeps the registry absent when strict settings validation has no valid backup', () => {
+    const root = makeRoot('invalid-settings-invalid-backup-gate')
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({
+      firebase: otherConfig,
+      profile: 42,
+    }))
+    const invalidBackup = join(root, 'backups', '2026-07-14_01-02-03')
+    mkdirSync(invalidBackup, { recursive: true })
+    writeFileSync(join(invalidBackup, 'settings.json'), '{ invalid backup')
+    const initialState = captureFirebaseProfileInitialState(root)
+
+    expect(() => new SettingsStore(root)).toThrow(/settings|backup|recovery|validation/i)
+    expect(initialState.settingsExisted).toBe(true)
+    expect(existsSync(join(root, FIREBASE_PERSISTENCE_REGISTRY_FILE))).toBe(false)
   })
 
   it('claims the exact shared default when released settings stored firebase:null', () => {

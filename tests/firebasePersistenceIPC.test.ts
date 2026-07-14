@@ -9,33 +9,27 @@ import {
 } from '../shared/firebasePersistence'
 
 describe('Firebase persistence claim IPC boundary', () => {
-  it('recovers corrupt settings before publication and otherwise publishes before SettingsStore', () => {
+  it('strictly validates or recovers settings before every registry publication path', () => {
     const main = readFileSync(resolve(import.meta.dirname, '../electron/main.ts'), 'utf8')
     const startup = main.slice(main.indexOf('app.whenReady().then'))
-    const snapshot = startup.indexOf('detectPreexistingFirebaseProfile(userDataPath)')
+    const initialState = startup.indexOf('captureFirebaseProfileInitialState(userDataPath,')
     const backup = startup.indexOf('new BackupManager(userDataPath)')
-    const recoveryBranch = startup.indexOf("if (firebaseProfileEligibility.kind === 'settings-invalid')")
-    const recoverySettings = startup.indexOf('new SettingsStore(userDataPath', recoveryBranch)
-    const recoveredRegistry = startup.indexOf(
-      'FirebasePersistenceRegistry.openAfterSettingsRecovery(',
-      recoverySettings,
+    const settings = startup.indexOf('new SettingsStore(userDataPath', backup)
+    const snapshot = startup.indexOf('detectPreexistingFirebaseProfile(userDataPath', settings)
+    const registry = startup.indexOf(
+      'FirebasePersistenceRegistry.openAfterSettingsValidation(',
+      settings,
     )
-    const normalBranch = startup.indexOf('} else {', recoveredRegistry)
-    const normalRegistry = startup.indexOf('FirebasePersistenceRegistry.open(', normalBranch)
-    const normalSettings = startup.indexOf('new SettingsStore(userDataPath', normalRegistry)
-    const eventLog = startup.indexOf('new EventLog(', normalSettings)
+    const eventLog = startup.indexOf('new EventLog(', registry)
     const ipc = startup.indexOf('setupIPC()')
     const renderer = startup.indexOf('createWindow()')
 
-    expect(snapshot).toBeGreaterThanOrEqual(0)
-    expect(snapshot).toBeLessThan(backup)
-    expect(backup).toBeLessThan(recoveryBranch)
-    expect(recoveryBranch).toBeLessThan(recoverySettings)
-    expect(recoverySettings).toBeLessThan(recoveredRegistry)
-    expect(recoveredRegistry).toBeLessThan(normalBranch)
-    expect(normalBranch).toBeLessThan(normalRegistry)
-    expect(normalRegistry).toBeLessThan(normalSettings)
-    expect(normalSettings).toBeLessThan(eventLog)
+    expect(initialState).toBeGreaterThanOrEqual(0)
+    expect(initialState).toBeLessThan(backup)
+    expect(backup).toBeLessThan(settings)
+    expect(settings).toBeLessThan(snapshot)
+    expect(snapshot).toBeLessThan(registry)
+    expect(registry).toBeLessThan(eventLog)
     expect(eventLog).toBeLessThan(ipc)
     expect(ipc).toBeLessThan(renderer)
   })

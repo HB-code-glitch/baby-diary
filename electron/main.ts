@@ -22,6 +22,7 @@ import { readFirebaseEmulatorBridge } from './firebaseEmulatorConfig'
 import { createSyncE2EGuard, readSyncE2EGuardConfig } from './syncE2EGuard'
 import {
   FirebasePersistenceRegistry,
+  captureFirebaseProfileInitialState,
   detectPreexistingFirebaseProfile,
 } from './store/firebasePersistenceRegistry'
 import { registerFirebasePersistenceIPC } from './firebasePersistenceIPC'
@@ -581,32 +582,28 @@ app.on('second-instance', () => {
 app.whenReady().then(() => {
   syncE2EGuard?.installSessionGuard(session.defaultSession, rendererResourceRoot)
   const userDataPath = app.getPath('userData')
-  // Snapshot released-profile eligibility before current startup constructors can
-  // create settings/journal/backup files. The immutable registry then prevents
-  // every later restart from reclassifying a fresh profile as legacy.
-  const firebaseProfileEligibility = detectPreexistingFirebaseProfile(userDataPath)
+  // Persist the pre-SettingsStore absence decision before constructors can
+  // create files. Existing recovery evidence is conservatively never fresh.
+  const firebaseProfileInitialState = captureFirebaseProfileInitialState(userDataPath, {
+    recoveryEvidencePaths: [
+      path.join(userDataPath, 'backups'),
+      path.join(app.getPath('documents'), 'BabyDiary-백업'),
+    ],
+  })
   backupManager = new BackupManager(userDataPath)
-  if (firebaseProfileEligibility.kind === 'settings-invalid') {
-    // SettingsStore owns verified pair recovery. On Windows it throws until the
-    // independent restart protocol is fully complete, so no immutable Firebase
-    // ownership can be published from damaged or half-restored settings.
-    settingsStore = new SettingsStore(userDataPath, {
-      documentsBackupDir: backupManager.getDocumentsBackupDir(),
-    })
-    firebasePersistenceRegistry = FirebasePersistenceRegistry.openAfterSettingsRecovery(
-      userDataPath,
-      firebaseProfileEligibility,
-      settingsStore.get(),
-    )
-  } else {
-    firebasePersistenceRegistry = FirebasePersistenceRegistry.open(
-      userDataPath,
-      firebaseProfileEligibility,
-    )
-    settingsStore = new SettingsStore(userDataPath, {
-      documentsBackupDir: backupManager.getDocumentsBackupDir(),
-    })
-  }
+  // SettingsStore owns strict schema validation and verified pair recovery. No
+  // immutable Firebase ownership is published until both have fully completed.
+  settingsStore = new SettingsStore(userDataPath, {
+    documentsBackupDir: backupManager.getDocumentsBackupDir(),
+  })
+  const firebaseProfileEligibility = detectPreexistingFirebaseProfile(userDataPath, {
+    initialState: firebaseProfileInitialState,
+  })
+  firebasePersistenceRegistry = FirebasePersistenceRegistry.openAfterSettingsValidation(
+    userDataPath,
+    firebaseProfileEligibility,
+    settingsStore.get(),
+  )
   eventLog = new EventLog({ dataDir: path.join(userDataPath, 'data') })
 
   // P20: Explicit startup scan so index is warm before any IPC arrives.
