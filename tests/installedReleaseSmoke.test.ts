@@ -136,7 +136,7 @@ describe('installed Windows release smoke script', () => {
   const script = source('scripts/windows-installed-release-smoke.ps1')
   const workflow = source('.github/workflows/build.yml')
 
-  it('preserves raw Node temp spelling for lexical isolation and canonicalizes only cleanup paths', () => {
+  it('canonicalizes an aliased Node temp root for manifest and Electron isolation checks', () => {
     const allocator = embeddedNodeSource(script, 'New-IsolatedSmokePaths')
     const runId = '0123456789abcdef0123456789abcdef'
     const contractRoot = mkdtempSync(join(tmpdir(), 'baby-diary-installed-smoke-alias-'))
@@ -144,16 +144,10 @@ describe('installed Windows release smoke script', () => {
     const lexicalTempRoot = join(contractRoot, 'raw-temp-alias')
 
     expect(script).not.toContain('[IO.Path]::GetTempPath()')
-    expect(script).not.toMatch(/\$env:(?:TEMP|TMP)\s*=/i)
     expect(allocator).toContain("import { mkdtempSync, realpathSync } from 'node:fs'")
     expect(allocator).toContain("import { tmpdir } from 'node:os'")
-    expect(allocator).toContain('const tempRoot = tmpdir()')
-    expect(allocator).toContain('const runRoot = mkdtempSync(')
-    expect(allocator).toContain('const referenceProfileRoot = mkdtempSync(')
-    expect(allocator).toContain('const installedProfileRoot = mkdtempSync(')
-    expect(allocator).toContain('const cleanupTempRoot = realpathSync(tempRoot)')
-    expect(allocator).toContain('const cleanupRunRoot = realpathSync(runRoot)')
-    expect(allocator).not.toContain('realpathSync(mkdtempSync(')
+    expect(allocator).toContain('const tempRoot = realpathSync(tmpdir())')
+    expect(allocator.match(/realpathSync\(mkdtempSync\(/g)).toHaveLength(3)
     expect(Array.from(allocator).filter(character => character.codePointAt(0)! > 0x7f)).toEqual([])
 
     try {
@@ -176,24 +170,57 @@ describe('installed Windows release smoke script', () => {
         runRoot: string
         referenceProfileRoot: string
         installedProfileRoot: string
-        cleanupTempRoot: string
-        cleanupRunRoot: string
       }
 
-      expect(resolve(allocated.tempRoot)).toBe(resolve(lexicalTempRoot))
-      expect(realpathSync(allocated.tempRoot)).not.toBe(resolve(allocated.tempRoot))
+      expect(allocated.tempRoot).toBe(realpathSync(lexicalTempRoot))
+      expect(allocated.tempRoot).not.toBe(resolve(lexicalTempRoot))
+      expect(realpathSync(allocated.runRoot)).toBe(allocated.runRoot)
       expect(allocated.referenceProfileRoot).not.toBe(allocated.installedProfileRoot)
       for (const profileRoot of [allocated.referenceProfileRoot, allocated.installedProfileRoot]) {
         expect(resolve(profileRoot).startsWith(`${resolve(allocated.tempRoot)}${sep}`)).toBe(true)
         expect(realpathSync(profileRoot).startsWith(`${realpathSync(allocated.tempRoot)}${sep}`)).toBe(true)
+        expect(realpathSync(profileRoot)).toBe(profileRoot)
       }
-      expect(allocated.cleanupTempRoot).toBe(realpathSync(allocated.tempRoot))
-      expect(allocated.cleanupRunRoot).toBe(realpathSync(allocated.runRoot))
-      expect(script).toContain('$cleanupTempRoot = [string]$smokePaths.cleanupTempRoot')
-      expect(script).toContain('$cleanupRunRoot = [string]$smokePaths.cleanupRunRoot')
     } finally {
       rmSync(contractRoot, { recursive: true, force: true })
     }
+  })
+
+  it('pins canonical child temp variables before fixtures and restores exact prior state after cleanup', () => {
+    const main = script.slice(script.indexOf('$SetupPath ='))
+    const originalTemp = main.indexOf('$originalTemp = $env:TEMP')
+    const originalTmp = main.indexOf('$originalTmp = $env:TMP')
+    const outerTry = main.indexOf('try {', originalTmp)
+    const setTemp = main.indexOf('$env:TEMP = $tempRoot', outerTry)
+    const setTmp = main.indexOf('$env:TMP = $tempRoot', outerTry)
+    const firstFixture = main.indexOf('New-FalsePositivePrePublicationEvidence `')
+    const syncE2e = main.indexOf("Invoke-NpmScript -Name 'test:e2e:sync'")
+    const outerFinally = main.indexOf('finally {', syncE2e)
+    const cleanup = main.indexOf('Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force', outerFinally)
+    const restorationFinally = main.indexOf('finally {', outerFinally + 1)
+    const restoreTemp = main.indexOf('if ($null -eq $originalTemp)', restorationFinally)
+    const restoreTmp = main.indexOf('if ($null -eq $originalTmp)', restorationFinally)
+    const restoration = main.slice(restorationFinally)
+
+    expect(originalTemp).toBeGreaterThanOrEqual(0)
+    expect(originalTmp).toBeGreaterThan(originalTemp)
+    expect(outerTry).toBeGreaterThan(originalTmp)
+    expect(setTemp).toBeGreaterThan(outerTry)
+    expect(setTmp).toBeGreaterThan(setTemp)
+    expect(setTmp).toBeLessThan(firstFixture)
+    expect(syncE2e).toBeLessThan(outerFinally)
+    expect(cleanup).toBeGreaterThan(outerFinally)
+    expect(restorationFinally).toBeGreaterThan(cleanup)
+    expect(restoreTemp).toBeGreaterThan(restorationFinally)
+    expect(restoreTmp).toBeGreaterThan(restoreTemp)
+    expect(restoration).toContain(
+      'if ($null -eq $originalTemp) { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }',
+    )
+    expect(restoration).toContain('else { $env:TEMP = $originalTemp }')
+    expect(restoration).toContain(
+      'if ($null -eq $originalTmp) { Remove-Item Env:TMP -ErrorAction SilentlyContinue }',
+    )
+    expect(restoration).toContain('else { $env:TMP = $originalTmp }')
   })
 
   it('runs the packaged regression on an isolated nonce profile with the exact v0.3.8 recovery fixture', () => {

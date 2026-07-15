@@ -89,20 +89,11 @@ import path from 'node:path'
 
 const [runId] = process.argv.slice(1)
 if (!/^[0-9a-f]{32}$/i.test(runId)) throw new Error('run id must be a 32-character hexadecimal nonce')
-const tempRoot = tmpdir()
-const runRoot = mkdtempSync(path.join(tempRoot, `baby-diary-installed-smoke-${runId}-`))
-const referenceProfileRoot = mkdtempSync(path.join(runRoot, 'reference-profile-'))
-const installedProfileRoot = mkdtempSync(path.join(runRoot, 'installed-profile-'))
-const cleanupTempRoot = realpathSync(tempRoot)
-const cleanupRunRoot = realpathSync(runRoot)
-process.stdout.write(JSON.stringify({
-  tempRoot,
-  runRoot,
-  referenceProfileRoot,
-  installedProfileRoot,
-  cleanupTempRoot,
-  cleanupRunRoot,
-}))
+const tempRoot = realpathSync(tmpdir())
+const runRoot = realpathSync(mkdtempSync(path.join(tempRoot, `baby-diary-installed-smoke-${runId}-`)))
+const referenceProfileRoot = realpathSync(mkdtempSync(path.join(runRoot, 'reference-profile-')))
+const installedProfileRoot = realpathSync(mkdtempSync(path.join(runRoot, 'installed-profile-')))
+process.stdout.write(JSON.stringify({ tempRoot, runRoot, referenceProfileRoot, installedProfileRoot }))
 '@
   $json = Invoke-NodeInline -Label 'installed smoke temp path allocation' -Source $source -Arguments @($RunId)
   return ($json | ConvertFrom-Json)
@@ -593,8 +584,6 @@ $tempRoot = [string]$smokePaths.tempRoot
 $runRoot = [string]$smokePaths.runRoot
 $referenceProfileRoot = [string]$smokePaths.referenceProfileRoot
 $profileRoot = [string]$smokePaths.installedProfileRoot
-$cleanupTempRoot = [string]$smokePaths.cleanupTempRoot
-$cleanupRunRoot = [string]$smokePaths.cleanupRunRoot
 $referenceBeforeManifestPath = Join-Path $runRoot 'reference-before-manifest.json'
 $referenceBeforeProjectionPath = Join-Path $runRoot 'reference-before-projection.json'
 $referenceRuntimeEvidencePath = Join-Path $runRoot 'reference-renderer-readiness.json'
@@ -609,12 +598,17 @@ $comparisonPath = Join-Path $runRoot 'preservation-comparison.json'
 $evidencePath = Join-Path $runRoot 'installed-release-smoke-evidence.json'
 $installLocation = $null
 $installedExecutable = $null
+$originalTemp = $env:TEMP
+$originalTmp = $env:TMP
 $originalTestUserData = $env:BABYDIARY_TEST_USERDATA
 $originalE2eExecutable = $env:BABYDIARY_E2E_EXECUTABLE
 $originalSyncE2eExecutable = $env:BABYDIARY_SYNC_E2E_EXECUTABLE
 $originalExpectedE2eArch = $env:BABYDIARY_EXPECTED_E2E_ARCH
 
 try {
+  $env:TEMP = $tempRoot
+  $env:TMP = $tempRoot
+
   if ($SignaturePolicy -eq 'RequireTrusted') {
     Assert-TrustedSignature -Path $SetupPath
     Assert-TrustedSignature -Path $ReferenceExecutablePath
@@ -765,6 +759,7 @@ try {
   }
 }
 finally {
+  try {
   if ($null -eq $originalTestUserData) { Remove-Item Env:BABYDIARY_TEST_USERDATA -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_TEST_USERDATA = $originalTestUserData }
   if ($null -eq $originalE2eExecutable) { Remove-Item Env:BABYDIARY_E2E_EXECUTABLE -ErrorAction SilentlyContinue }
@@ -807,9 +802,9 @@ finally {
     throw 'Baby Diary installation cleanup did not remove the registry entry and install directory'
   }
 
-  if (Test-Path -LiteralPath $cleanupRunRoot) {
-    $resolvedRunRoot = [IO.Path]::GetFullPath($cleanupRunRoot)
-    $resolvedTempRoot = [IO.Path]::GetFullPath($cleanupTempRoot)
+  if (Test-Path -LiteralPath $runRoot) {
+    $resolvedRunRoot = [IO.Path]::GetFullPath($runRoot)
+    $resolvedTempRoot = [IO.Path]::GetFullPath($tempRoot)
     $resolvedRunParent = [IO.Path]::GetFullPath((Split-Path -Parent $resolvedRunRoot))
     $expectedRunLeafPrefix = "baby-diary-installed-smoke-$runId-"
     if (-not [string]::Equals(
@@ -824,5 +819,12 @@ finally {
       throw 'Refusing to clean a non-nonce installed smoke directory'
     }
     Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force
+  }
+  }
+  finally {
+    if ($null -eq $originalTemp) { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
+    else { $env:TEMP = $originalTemp }
+    if ($null -eq $originalTmp) { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
+    else { $env:TMP = $originalTmp }
   }
 }
