@@ -5,11 +5,11 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
 } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import ts from 'typescript'
@@ -136,7 +136,7 @@ describe('installed Windows release smoke script', () => {
   const script = source('scripts/windows-installed-release-smoke.ps1')
   const workflow = source('.github/workflows/build.yml')
 
-  it('canonicalizes an aliased Node temp root for manifest and Electron isolation checks', () => {
+  it('canonicalizes an aliased Node temp root with the manifest contract async realpath API', async () => {
     const allocator = embeddedNodeSource(script, 'New-IsolatedSmokePaths')
     const runId = '0123456789abcdef0123456789abcdef'
     const contractRoot = mkdtempSync(join(tmpdir(), 'baby-diary-installed-smoke-alias-'))
@@ -144,10 +144,12 @@ describe('installed Windows release smoke script', () => {
     const lexicalTempRoot = join(contractRoot, 'raw-temp-alias')
 
     expect(script).not.toContain('[IO.Path]::GetTempPath()')
-    expect(allocator).toContain("import { mkdtempSync, realpathSync } from 'node:fs'")
+    expect(allocator).toContain("import { mkdtempSync } from 'node:fs'")
+    expect(allocator).toContain("import { realpath } from 'node:fs/promises'")
     expect(allocator).toContain("import { tmpdir } from 'node:os'")
-    expect(allocator).toContain('const tempRoot = realpathSync(tmpdir())')
-    expect(allocator.match(/realpathSync\(mkdtempSync\(/g)).toHaveLength(3)
+    expect(allocator).toContain('const tempRoot = await realpath(tmpdir())')
+    expect(allocator.match(/await realpath\(mkdtempSync\(/g)).toHaveLength(3)
+    expect(allocator).not.toContain('realpathSync')
     expect(Array.from(allocator).filter(character => character.codePointAt(0)! > 0x7f)).toEqual([])
 
     try {
@@ -172,14 +174,15 @@ describe('installed Windows release smoke script', () => {
         installedProfileRoot: string
       }
 
-      expect(allocated.tempRoot).toBe(realpathSync(lexicalTempRoot))
+      const contractTempRoot = await realpath(lexicalTempRoot)
+      expect(allocated.tempRoot).toBe(contractTempRoot)
       expect(allocated.tempRoot).not.toBe(resolve(lexicalTempRoot))
-      expect(realpathSync(allocated.runRoot)).toBe(allocated.runRoot)
+      expect(await realpath(allocated.runRoot)).toBe(allocated.runRoot)
       expect(allocated.referenceProfileRoot).not.toBe(allocated.installedProfileRoot)
       for (const profileRoot of [allocated.referenceProfileRoot, allocated.installedProfileRoot]) {
         expect(resolve(profileRoot).startsWith(`${resolve(allocated.tempRoot)}${sep}`)).toBe(true)
-        expect(realpathSync(profileRoot).startsWith(`${realpathSync(allocated.tempRoot)}${sep}`)).toBe(true)
-        expect(realpathSync(profileRoot)).toBe(profileRoot)
+        expect((await realpath(profileRoot)).startsWith(`${contractTempRoot}${sep}`)).toBe(true)
+        expect(await realpath(profileRoot)).toBe(profileRoot)
       }
     } finally {
       rmSync(contractRoot, { recursive: true, force: true })

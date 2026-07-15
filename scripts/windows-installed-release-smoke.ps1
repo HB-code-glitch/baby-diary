@@ -83,16 +83,17 @@ function Invoke-NodeInline {
 function New-IsolatedSmokePaths {
   param([string]$RunId)
   $source = @'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 const [runId] = process.argv.slice(1)
 if (!/^[0-9a-f]{32}$/i.test(runId)) throw new Error('run id must be a 32-character hexadecimal nonce')
-const tempRoot = realpathSync(tmpdir())
-const runRoot = realpathSync(mkdtempSync(path.join(tempRoot, `baby-diary-installed-smoke-${runId}-`)))
-const referenceProfileRoot = realpathSync(mkdtempSync(path.join(runRoot, 'reference-profile-')))
-const installedProfileRoot = realpathSync(mkdtempSync(path.join(runRoot, 'installed-profile-')))
+const tempRoot = await realpath(tmpdir())
+const runRoot = await realpath(mkdtempSync(path.join(tempRoot, `baby-diary-installed-smoke-${runId}-`)))
+const referenceProfileRoot = await realpath(mkdtempSync(path.join(runRoot, 'reference-profile-')))
+const installedProfileRoot = await realpath(mkdtempSync(path.join(runRoot, 'installed-profile-')))
 process.stdout.write(JSON.stringify({ tempRoot, runRoot, referenceProfileRoot, installedProfileRoot }))
 '@
   $json = Invoke-NodeInline -Label 'installed smoke temp path allocation' -Source $source -Arguments @($RunId)
