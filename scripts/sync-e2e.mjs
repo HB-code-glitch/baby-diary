@@ -1385,6 +1385,52 @@ export async function withTimeout(promise, timeoutMs, label) {
   }
 }
 
+export async function waitForClipboardText({
+  readText,
+  expectedText,
+  timeoutMs,
+  pollIntervalMs,
+  now = Date.now,
+  sleep = delay,
+}) {
+  invariant(typeof readText === 'function', 'Clipboard reader is required')
+  invariant(typeof expectedText === 'string' && expectedText.length > 0,
+    'Expected clipboard marker is required')
+  invariant(Number.isFinite(timeoutMs) && timeoutMs > 0,
+    'Clipboard propagation timeout must be positive')
+  invariant(Number.isFinite(pollIntervalMs) && pollIntervalMs > 0,
+    'Clipboard propagation poll interval must be positive')
+  invariant(typeof now === 'function', 'Clipboard propagation clock is required')
+  invariant(typeof sleep === 'function', 'Clipboard propagation sleep is required')
+
+  const deadline = now() + timeoutMs
+  const timeoutError = () => new Error(`Clipboard marker was not observed within ${timeoutMs}ms`)
+  const runWithinBudget = async (operation, label) => {
+    const remaining = deadline - now()
+    if (remaining <= 0) throw timeoutError()
+    try {
+      return await withTimeout(Promise.resolve().then(operation), remaining, label)
+    } catch (error) {
+      if (now() >= deadline || /timed out after \d+ms$/i.test(error?.message ?? '')) {
+        throw timeoutError()
+      }
+      throw error
+    }
+  }
+
+  while (true) {
+    const observedText = await runWithinBudget(readText, 'Clipboard marker read')
+    if (observedText === expectedText) return observedText
+
+    const remaining = deadline - now()
+    if (remaining <= 0) throw timeoutError()
+    await runWithinBudget(
+      () => sleep(Math.min(pollIntervalMs, remaining)),
+      'Clipboard propagation poll',
+    )
+  }
+}
+
 function parseProcessTable(output) {
   return String(output).split(/\r?\n/).flatMap(line => {
     const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)

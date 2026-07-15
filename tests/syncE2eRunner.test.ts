@@ -58,7 +58,89 @@ import {
   semanticEventsEqual,
   selectMutationWinner,
   writeSeed,
+  waitForClipboardText,
 } from '../scripts/sync-e2e.mjs'
+
+describe('packaged macOS clipboard propagation boundary', () => {
+  it.each([
+    ['missing reader', { readText: null }, 'Clipboard reader is required'],
+    ['non-string marker', { expectedText: 42 }, 'Expected clipboard marker is required'],
+    ['empty marker', { expectedText: '' }, 'Expected clipboard marker is required'],
+    ['zero timeout', { timeoutMs: 0 }, 'Clipboard propagation timeout must be positive'],
+    ['infinite timeout', { timeoutMs: Number.POSITIVE_INFINITY }, 'Clipboard propagation timeout must be positive'],
+    ['zero poll interval', { pollIntervalMs: 0 }, 'Clipboard propagation poll interval must be positive'],
+    ['non-finite poll interval', { pollIntervalMs: Number.NaN }, 'Clipboard propagation poll interval must be positive'],
+  ])('fails closed for %s', async (_label, overrides, expectedError) => {
+    const readText = vi.fn(async () => 'renderer marker')
+    await expect(waitForClipboardText({
+      readText,
+      expectedText: 'renderer marker',
+      timeoutMs: 20,
+      pollIntervalMs: 5,
+      now: () => 0,
+      sleep: async () => undefined,
+      ...overrides,
+    })).rejects.toThrow(expectedError)
+  })
+
+  it('polls until the main process actually observes the renderer marker', async () => {
+    const observations = ['previous clipboard', 'previous clipboard', 'renderer marker']
+    let elapsedMs = 0
+    const readText = vi.fn(async () => observations.shift() ?? 'renderer marker')
+    const sleep = vi.fn(async (milliseconds: number) => {
+      elapsedMs += milliseconds
+    })
+
+    await expect(waitForClipboardText({
+      readText,
+      expectedText: 'renderer marker',
+      timeoutMs: 20,
+      pollIntervalMs: 5,
+      now: () => elapsedMs,
+      sleep,
+    })).resolves.toBe('renderer marker')
+
+    expect(readText).toHaveBeenCalledTimes(3)
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([5, 5])
+  })
+
+  it('fails at the bounded deadline when the marker never propagates', async () => {
+    let elapsedMs = 0
+    const readText = vi.fn(async () => 'previous clipboard')
+    const sleep = vi.fn(async (milliseconds: number) => {
+      elapsedMs += milliseconds
+    })
+
+    await expect(waitForClipboardText({
+      readText,
+      expectedText: 'renderer marker',
+      timeoutMs: 12,
+      pollIntervalMs: 5,
+      now: () => elapsedMs,
+      sleep,
+    })).rejects.toThrow('Clipboard marker was not observed within 12ms')
+
+    expect(readText).toHaveBeenCalledTimes(3)
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([5, 5, 2])
+    expect(elapsedMs).toBe(12)
+  })
+
+  it('keeps original clipboard restoration in teardown after propagation verification', () => {
+    const runner = readFileSync(path.resolve(import.meta.dirname, '../scripts/mac-e2e.mjs'), 'utf8')
+    const finallyStart = runner.lastIndexOf('} finally {')
+    const cleanupStart = runner.indexOf('    // Clean temp dir', finallyStart)
+    const teardown = runner.slice(finallyStart, cleanupStart)
+
+    expect(runner).toContain('await waitForClipboardText({')
+    expect(runner).not.toContain('const mainClipboard = await app.evaluate(({ clipboard }) => clipboard.readText())')
+    expect(finallyStart).toBeGreaterThan(-1)
+    expect(cleanupStart).toBeGreaterThan(finallyStart)
+    expect(teardown).toContain('if (app && clipboardCaptured)')
+    expect(teardown).toContain('clipboard.writeText(value), originalClipboard')
+    expect(teardown.indexOf('clipboard.writeText(value), originalClipboard'))
+      .toBeLessThan(teardown.indexOf("await closeDevice({ name: 'packaged-ui-e2e', app })"))
+  })
+})
 
 describe('packaged cross-platform sync E2E runner contract', () => {
   it('launches packaged Windows Electron through CDP without the Node inspector injection', async () => {

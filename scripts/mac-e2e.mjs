@@ -16,6 +16,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 import { fileURLToPath } from 'url'
+import { closeDevice, waitForClipboardText } from './sync-e2e.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -231,11 +232,18 @@ async function main() {
         }
       }
     }, clipboardMarker)
-    const mainClipboard = await app.evaluate(({ clipboard }) => clipboard.readText())
     assert(
       clipboardWrite.ok,
       `renderer navigator.clipboard.writeText succeeds${clipboardWrite.ok ? '' : ` (${clipboardWrite.name}: ${clipboardWrite.message})`}`,
     )
+    const mainClipboard = clipboardWrite.ok
+      ? await waitForClipboardText({
+        readText: () => app.evaluate(({ clipboard }) => clipboard.readText()),
+        expectedText: clipboardMarker,
+        timeoutMs: 2_000,
+        pollIntervalMs: 25,
+      })
+      : null
     assert(mainClipboard === clipboardMarker, 'main process reads the renderer clipboard marker')
 
     // ---------------------------------------------------------------------------
@@ -1372,7 +1380,12 @@ async function main() {
       }
     }
     if (app) {
-      try { await app.close() } catch { /* ignore */ }
+      try {
+        await closeDevice({ name: 'packaged-ui-e2e', app })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        failures.push(`Failed to close the packaged UI E2E process tree: ${message}`)
+      }
     }
 
     // Clean temp dir
