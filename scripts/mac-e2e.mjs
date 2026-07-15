@@ -16,7 +16,11 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 import { fileURLToPath } from 'url'
-import { closeDevice, waitForClipboardText } from './sync-e2e.mjs'
+import {
+  closeDevice,
+  createPlaywrightElectronCloseAdapter,
+  waitForClipboardText,
+} from './sync-e2e.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -1381,7 +1385,10 @@ async function main() {
     }
     if (app) {
       try {
-        await closeDevice({ name: 'packaged-ui-e2e', app })
+        await closeDevice({
+          name: 'packaged-ui-e2e',
+          app: createPlaywrightElectronCloseAdapter(app),
+        })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         failures.push(`Failed to close the packaged UI E2E process tree: ${message}`)

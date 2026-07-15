@@ -34,6 +34,7 @@ import {
   classifyFirstLaunchState,
   cleanupPartialDevice,
   closeDevice,
+  createPlaywrightElectronCloseAdapter,
   collectPersistentGuardDiagnostics,
   decodeFirestoreEventDocument,
   finalizeRun,
@@ -62,6 +63,37 @@ import {
 } from '../scripts/sync-e2e.mjs'
 
 describe('packaged macOS clipboard propagation boundary', () => {
+  it('adapts Playwright Electron close to a scheduled main-process quit without losing process identity', async () => {
+    const childProcess = { pid: 4343, exitCode: null, signalCode: null }
+    const order: string[] = []
+    const app = {
+      process: vi.fn(() => childProcess),
+      evaluate: vi.fn(async (requestQuit: (electron: { app: { quit: () => void } }) => void) => {
+        order.push('evaluate-start')
+        requestQuit({ app: { quit: () => order.push('quit') } })
+        order.push('evaluate-return')
+      }),
+    }
+
+    const adapter = createPlaywrightElectronCloseAdapter(app)
+
+    expect(adapter.process()).toBe(childProcess)
+    await adapter.close()
+    expect(order).toEqual(['evaluate-start', 'evaluate-return'])
+    await new Promise(resolve => setImmediate(resolve))
+    expect(order).toEqual(['evaluate-start', 'evaluate-return', 'quit'])
+  })
+
+  it('propagates a Playwright Electron quit-request failure', async () => {
+    const failure = new Error('injected evaluate failure')
+    const app = {
+      process: vi.fn(() => ({ pid: 4343 })),
+      evaluate: vi.fn(async () => { throw failure }),
+    }
+
+    await expect(createPlaywrightElectronCloseAdapter(app).close()).rejects.toBe(failure)
+  })
+
   it.each([
     ['missing reader', { readText: null }, 'Clipboard reader is required'],
     ['non-string marker', { expectedText: 42 }, 'Expected clipboard marker is required'],
@@ -138,7 +170,9 @@ describe('packaged macOS clipboard propagation boundary', () => {
     expect(teardown).toContain('if (app && clipboardCaptured)')
     expect(teardown).toContain('clipboard.writeText(value), originalClipboard')
     expect(teardown.indexOf('clipboard.writeText(value), originalClipboard'))
-      .toBeLessThan(teardown.indexOf("await closeDevice({ name: 'packaged-ui-e2e', app })"))
+      .toBeLessThan(teardown.indexOf('await closeDevice({'))
+    expect(teardown).toContain('createPlaywrightElectronCloseAdapter(app)')
+    expect(teardown).toContain('failures.push(`Failed to close the packaged UI E2E process tree: ${message}`)')
   })
 })
 

@@ -15,7 +15,7 @@ describe('security runtime dependency pins', () => {
       'electron-updater': '^6.8.9',
     })
     expect(packageJson.devDependencies).toMatchObject({
-      electron: '43.1.0',
+      electron: '41.10.2',
       'electron-builder': '26.15.3',
     })
     expect(packageJson.devDependencies).not.toHaveProperty('@types/uuid')
@@ -26,7 +26,7 @@ describe('security runtime dependency pins', () => {
     expect(packageJson.devDependencies.vitest).toBe('^1.6.0')
   })
 
-  it('keeps every setup-node job on the exact Electron 43 bundled Node version', () => {
+  it('keeps every setup-node job on the exact supported Node 24 runner version', () => {
     const versions = nodeVersions(workflowSource)
     const setupNodeJobs = [...workflowSource.matchAll(/uses:\s*actions\/setup-node@/g)]
 

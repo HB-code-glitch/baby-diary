@@ -582,7 +582,9 @@ describe('packaged E2E architecture attestation', () => {
   it('holds the packaged UI E2E boundary until its owned process identities exit', () => {
     const e2e = source('scripts/mac-e2e.mjs')
     expect(e2e).toMatch(/import\s*\{[^}]*\bcloseDevice\b[^}]*\}\s*from\s*['"]\.\/sync-e2e\.mjs['"]/)
-    expect(e2e).toContain("await closeDevice({ name: 'packaged-ui-e2e', app })")
+    expect(e2e).toContain('await closeDevice({')
+    expect(e2e).toContain("name: 'packaged-ui-e2e'")
+    expect(e2e).toContain('app: createPlaywrightElectronCloseAdapter(app)')
     expect(e2e).not.toContain('try { await app.close() } catch { /* ignore */ }')
   })
 })

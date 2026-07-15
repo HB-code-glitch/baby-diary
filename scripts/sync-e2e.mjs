@@ -1763,6 +1763,15 @@ function remainingCloseBudget(deadline, label) {
   return remaining
 }
 
+export function createPlaywrightElectronCloseAdapter(app) {
+  return {
+    process: () => app.process(),
+    close: () => app.evaluate(({ app: electronApp }) => {
+      setImmediate(() => electronApp.quit())
+    }),
+  }
+}
+
 export async function closeDevice(
   device,
   {
