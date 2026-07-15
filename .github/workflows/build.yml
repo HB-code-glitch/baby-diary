@@ -226,6 +226,7 @@ jobs:
         run: >-
           ./scripts/windows-installed-release-smoke.ps1
           -SetupPath "release/Baby Diary Setup $((Get-Content -Raw package.json | ConvertFrom-Json).version).exe"
+          -ReferenceExecutablePath "${{ github.workspace }}/release/win-unpacked/Baby Diary.exe"
           -SignaturePolicy AllowUnsigned
           -EvidenceDirectory ".artifacts/installed-release-smoke"
         timeout-minutes: 20
@@ -848,6 +849,7 @@ jobs:
         run: >-
           ./scripts/windows-installed-release-smoke.ps1
           -SetupPath "release/Baby Diary Setup ${{ needs.release-context.outputs.version }}.exe"
+          -ReferenceExecutablePath "${{ github.workspace }}/release/win-unpacked/Baby Diary.exe"
           -SignaturePolicy RequireTrusted
           -ExpectedPublisher "${env:WIN_EXPECTED_PUBLISHER}"
           -ExpectedCertificateSha256 "${env:WIN_EXPECTED_CERT_SHA256}"

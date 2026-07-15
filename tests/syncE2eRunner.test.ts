@@ -282,6 +282,9 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       platform: 'darwin',
       timeoutMs: 1_000,
       killTree: vi.fn(async () => undefined),
+      queryDarwinProcessTable: () => child.exitCode == null && child.signalCode == null
+        ? [{ pid: 8124, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' }]
+        : [],
     }).then(() => { closeResolved = true })
 
     await new Promise(resolve => setImmediate(resolve))
@@ -319,6 +322,9 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       const closing = closeDevice(device, {
         platform: 'darwin',
         killTree,
+        queryDarwinProcessTable: () => child.exitCode == null && child.signalCode == null
+          ? [{ pid: 8126, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' }]
+          : [],
       }).then(
         () => { closeResolved = true },
         error => { closeError = error },
@@ -1401,6 +1407,89 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     releasePoll?.()
     await closing
     expect(device.app).toBeNull()
+  })
+
+  it('does not release a macOS profile while a snapshotted renderer descendant still exists', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4343,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+    })
+    const order: string[] = []
+    let rows = [
+      { pid: 4343, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' },
+      { pid: 4344, parentPid: 4343, startedAt: 'Wed Jul 15 09:00:01 2026' },
+    ]
+    let releasePoll: (() => void) | undefined
+    const poll = new Promise<void>(resolve => { releasePoll = resolve })
+    const device = {
+      name: 'A-conflict',
+      app: {
+        close: async () => {
+          order.push('app-close-resolved')
+          child.exitCode = 0
+          child.emit('exit', 0, null)
+        },
+        process: () => child,
+      },
+    }
+
+    let closeResolved = false
+    const closing = closeDevice(device, {
+      timeoutMs: 1_000,
+      platform: 'darwin',
+      queryDarwinProcessTable: () => rows,
+      processPollSleep: async () => {
+        order.push('descendant-poll-wait')
+        await poll
+      },
+      killTree: async () => undefined,
+    }).then(() => { closeResolved = true })
+
+    await new Promise(resolve => setImmediate(resolve))
+    expect(order).toEqual(['app-close-resolved', 'descendant-poll-wait'])
+    expect(closeResolved).toBe(false)
+
+    // Reuse of a PID with a different process start identity is not the
+    // snapshotted renderer and must not hold the isolated profile open.
+    rows = [
+      { pid: 4344, parentPid: 1, startedAt: 'Wed Jul 15 09:01:00 2026' },
+    ]
+    releasePoll?.()
+    await closing
+    expect(device.app).toBeNull()
+  })
+
+  it('reads stable macOS process start identities without command-line data', async () => {
+    const runner = await import('../scripts/sync-e2e.mjs')
+    const queryDarwinProcessTable = Reflect.get(runner, 'queryDarwinProcessTable')
+    expect(queryDarwinProcessTable).toBeTypeOf('function')
+    const calls: Array<{ command: string, args: string[], locale: string | undefined }> = []
+
+    const rows = queryDarwinProcessTable({
+      spawnSyncImpl: (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        calls.push({ command, args, locale: options.env?.LC_ALL })
+        return {
+          status: 0,
+          stdout: [
+            ' 4343     1 Wed Jul 15 09:00:00 2026',
+            ' 4344  4343 Wed Jul 15 09:00:01 2026',
+            '',
+          ].join('\n'),
+          stderr: '',
+        }
+      },
+    })
+
+    expect(calls).toEqual([{
+      command: '/bin/ps',
+      args: ['-ax', '-o', 'pid=,ppid=,lstart='],
+      locale: 'C',
+    }])
+    expect(rows).toEqual([
+      { pid: 4343, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' },
+      { pid: 4344, parentPid: 4343, startedAt: 'Wed Jul 15 09:00:01 2026' },
+    ])
   })
 
   it('fails closed when a Windows owned-process snapshot query errors', async () => {

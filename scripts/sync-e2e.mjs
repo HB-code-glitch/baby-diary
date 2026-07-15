@@ -55,7 +55,7 @@ const CLOSE_TIMEOUT_MS = 10_000
 // making progress, so keep a bounded platform-specific grace window.
 const MAC_CLOSE_TIMEOUT_MS = 30_000
 const CLOSE_CLEANUP_TIMEOUT_MS = 5_000
-const WINDOWS_PROCESS_POLL_MS = 75
+const OWNED_PROCESS_POLL_MS = 75
 const LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS = 30_000
 const LISTEN_SHUTDOWN_ERROR = 'net::ERR_NO_BUFFER_SPACE'
 const LISTEN_SHUTDOWN_TARGET = 'firestore-listen-channel'
@@ -1392,6 +1392,49 @@ function parseProcessTable(output) {
   })
 }
 
+const DARWIN_PROCESS_START_PATTERN = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/
+
+function normalizeDarwinProcessRows(rows) {
+  invariant(Array.isArray(rows), 'macOS process snapshot must be an array')
+  const seen = new Set()
+  return rows.map(row => {
+    invariant(row && typeof row === 'object', 'macOS process snapshot row is invalid')
+    const pid = Number(row.pid)
+    const parentPid = Number(row.parentPid)
+    const startedAt = String(row.startedAt ?? '').trim().replace(/\s+/g, ' ')
+    invariant(Number.isInteger(pid) && pid >= 0, 'macOS process snapshot pid is invalid')
+    invariant(Number.isInteger(parentPid) && parentPid >= 0, 'macOS process snapshot parent pid is invalid')
+    invariant(DARWIN_PROCESS_START_PATTERN.test(startedAt),
+      `macOS process snapshot start identity is invalid for pid ${pid}`)
+    invariant(!seen.has(pid), `macOS process snapshot contains duplicate pid ${pid}`)
+    seen.add(pid)
+    return { pid, parentPid, startedAt }
+  })
+}
+
+function parseDarwinProcessTable(output) {
+  const rows = []
+  for (const line of String(output).split(/\r?\n/)) {
+    const normalized = line.trim().replace(/\s+/g, ' ')
+    if (!normalized) continue
+    const match = /^(\d+) (\d+) (.+)$/.exec(normalized)
+    invariant(match, 'macOS process snapshot returned an unrecognized row')
+    rows.push({ pid: Number(match[1]), parentPid: Number(match[2]), startedAt: match[3] })
+  }
+  return normalizeDarwinProcessRows(rows)
+}
+
+export function queryDarwinProcessTable({ spawnSyncImpl = spawnSync } = {}) {
+  const result = spawnSyncImpl('/bin/ps', ['-ax', '-o', 'pid=,ppid=,lstart='], {
+    encoding: 'utf8',
+    env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+    maxBuffer: 8 * 1024 * 1024,
+  })
+  invariant(!result.error, `macOS process snapshot query failed: ${result.error?.message ?? 'spawn failed'}`)
+  invariant(result.status === 0, 'macOS process snapshot query failed')
+  return parseDarwinProcessTable(result.stdout)
+}
+
 export function ownedProcessTreePids(rootPid, rows) {
   invariant(Number.isInteger(rootPid) && rootPid > 1, `Refusing unsafe process id: ${rootPid}`)
   const children = new Map()
@@ -1486,6 +1529,81 @@ function lingeringWindowsOwnedProcesses(snapshot, rows) {
     invariant(!actual || /^\d+$/.test(actual.startedAt),
       `Windows owned process start identity became unavailable for pid ${expected.pid}`)
     return actual && sameWindowsProcessIdentity(expected, actual)
+  })
+}
+
+function captureDarwinOwnedProcessSnapshot(rootPid, rows) {
+  const normalized = normalizeDarwinProcessRows(rows)
+  const byPid = new Map(normalized.map(row => [row.pid, row]))
+  invariant(byPid.has(rootPid), `macOS process snapshot did not contain owned root pid ${rootPid}`)
+  return ownedProcessTreePids(rootPid, normalized).map(pid => ({ ...byPid.get(pid) }))
+}
+
+function sameDarwinProcessIdentity(expected, actual) {
+  return expected.pid === actual.pid && expected.startedAt === actual.startedAt
+}
+
+function lingeringDarwinOwnedProcesses(snapshot, rows) {
+  const currentByPid = new Map(normalizeDarwinProcessRows(rows).map(row => [row.pid, row]))
+  return snapshot.filter(expected => {
+    const actual = currentByPid.get(expected.pid)
+    return actual && sameDarwinProcessIdentity(expected, actual)
+  })
+}
+
+async function waitForDarwinOwnedProcessExit(snapshot, {
+  queryProcessTable,
+  timeoutMs,
+  pollIntervalMs,
+  sleep,
+  label,
+}) {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    let rows
+    try {
+      rows = queryProcessTable()
+    } catch (error) {
+      throw new Error(`macOS owned process snapshot query failed during ${label}: ${error?.message ?? String(error)}`)
+    }
+    const lingering = lingeringDarwinOwnedProcesses(snapshot, rows)
+    if (lingering.length === 0) return
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      throw new Error(`${label} timed out with owned macOS process identities still live: ${lingering.map(row => row.pid).join(', ')}`)
+    }
+    await withTimeout(
+      Promise.resolve().then(() => sleep(Math.min(pollIntervalMs, remaining))),
+      remaining,
+      `${label} process poll`,
+    )
+  }
+}
+
+async function killAndConfirmDarwinOwnedSnapshot(snapshot, {
+  queryProcessTable,
+  killTree,
+  timeoutMs,
+  pollIntervalMs,
+  sleep,
+  label,
+}) {
+  for (const expected of snapshot) {
+    const lingering = lingeringDarwinOwnedProcesses(snapshot, queryProcessTable())
+    if (!lingering.some(current => sameDarwinProcessIdentity(expected, current))) continue
+    try {
+      await killTree(expected.pid)
+    } catch (error) {
+      const afterFailure = lingeringDarwinOwnedProcesses(snapshot, queryProcessTable())
+      if (afterFailure.some(current => sameDarwinProcessIdentity(expected, current))) throw error
+    }
+  }
+  await waitForDarwinOwnedProcessExit(snapshot, {
+    queryProcessTable,
+    timeoutMs,
+    pollIntervalMs,
+    sleep,
+    label: `${label} forced cleanup`,
   })
 }
 
@@ -1607,8 +1725,9 @@ export async function closeDevice(
     cleanupTimeoutMs = CLOSE_CLEANUP_TIMEOUT_MS,
     killTree = killOwnedProcessTree,
     queryWindowsProcessTable: queryProcessTable = queryWindowsProcessTable,
+    queryDarwinProcessTable: queryDarwinTable = queryDarwinProcessTable,
     processPollSleep = delay,
-    processPollIntervalMs = WINDOWS_PROCESS_POLL_MS,
+    processPollIntervalMs = OWNED_PROCESS_POLL_MS,
   } = {},
 ) {
   if (!device?.app) return
@@ -1626,11 +1745,16 @@ export async function closeDevice(
   const label = `${device.name ?? 'device'} close`
   const deadline = Date.now() + timeoutMs
   let windowsSnapshot
+  let darwinSnapshot
   try {
     if (platform === 'win32') {
       invariant(Number.isInteger(pid) && pid > 1 && pid !== process.pid,
         `${device.name ?? 'device'} did not expose a safe owned pid`)
       windowsSnapshot = captureWindowsOwnedProcessSnapshot(pid, queryProcessTable())
+    } else if (platform === 'darwin') {
+      invariant(Number.isInteger(pid) && pid > 1 && pid !== process.pid,
+        `${device.name ?? 'device'} did not expose a safe owned pid`)
+      darwinSnapshot = captureDarwinOwnedProcessSnapshot(pid, queryDarwinTable())
     }
     await withTimeout(
       Promise.resolve().then(() => app.close()),
@@ -1650,6 +1774,14 @@ export async function closeDevice(
         sleep: processPollSleep,
         label,
       })
+    } else if (darwinSnapshot) {
+      await waitForDarwinOwnedProcessExit(darwinSnapshot, {
+        queryProcessTable: queryDarwinTable,
+        timeoutMs: remainingCloseBudget(deadline, label),
+        pollIntervalMs: processPollIntervalMs,
+        sleep: processPollSleep,
+        label,
+      })
     }
   } catch (error) {
     closeErrors.push(error)
@@ -1658,6 +1790,19 @@ export async function closeDevice(
       try {
         await killAndConfirmWindowsOwnedSnapshot(windowsSnapshot, {
           queryProcessTable,
+          killTree,
+          timeoutMs: cleanupTimeoutMs,
+          pollIntervalMs: processPollIntervalMs,
+          sleep: processPollSleep,
+          label,
+        })
+      } catch (killError) {
+        closeErrors.push(killError)
+      }
+    } else if (darwinSnapshot) {
+      try {
+        await killAndConfirmDarwinOwnedSnapshot(darwinSnapshot, {
+          queryProcessTable: queryDarwinTable,
           killTree,
           timeoutMs: cleanupTimeoutMs,
           pollIntervalMs: processPollIntervalMs,

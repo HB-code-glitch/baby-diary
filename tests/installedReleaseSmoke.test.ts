@@ -3,12 +3,15 @@ import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import {
@@ -131,12 +134,74 @@ describe('installed Mac release smoke script', () => {
 
 describe('installed Windows release smoke script', () => {
   const script = source('scripts/windows-installed-release-smoke.ps1')
+  const workflow = source('.github/workflows/build.yml')
+
+  it('preserves raw Node temp spelling for lexical isolation and canonicalizes only cleanup paths', () => {
+    const allocator = embeddedNodeSource(script, 'New-IsolatedSmokePaths')
+    const runId = '0123456789abcdef0123456789abcdef'
+    const contractRoot = mkdtempSync(join(tmpdir(), 'baby-diary-installed-smoke-alias-'))
+    const canonicalTempRoot = join(contractRoot, 'canonical-temp')
+    const lexicalTempRoot = join(contractRoot, 'raw-temp-alias')
+
+    expect(script).not.toContain('[IO.Path]::GetTempPath()')
+    expect(script).not.toMatch(/\$env:(?:TEMP|TMP)\s*=/i)
+    expect(allocator).toContain("import { mkdtempSync, realpathSync } from 'node:fs'")
+    expect(allocator).toContain("import { tmpdir } from 'node:os'")
+    expect(allocator).toContain('const tempRoot = tmpdir()')
+    expect(allocator).toContain('const runRoot = mkdtempSync(')
+    expect(allocator).toContain('const referenceProfileRoot = mkdtempSync(')
+    expect(allocator).toContain('const installedProfileRoot = mkdtempSync(')
+    expect(allocator).toContain('const cleanupTempRoot = realpathSync(tempRoot)')
+    expect(allocator).toContain('const cleanupRunRoot = realpathSync(runRoot)')
+    expect(allocator).not.toContain('realpathSync(mkdtempSync(')
+    expect(Array.from(allocator).filter(character => character.codePointAt(0)! > 0x7f)).toEqual([])
+
+    try {
+      mkdirSync(canonicalTempRoot)
+      symlinkSync(canonicalTempRoot, lexicalTempRoot, process.platform === 'win32' ? 'junction' : 'dir')
+      const childEnv = { ...process.env }
+      if (process.platform === 'win32') {
+        childEnv.TEMP = lexicalTempRoot
+        childEnv.TMP = lexicalTempRoot
+      } else {
+        childEnv.TMPDIR = lexicalTempRoot
+      }
+      const allocated = JSON.parse(execFileSync(process.execPath, [
+        '--input-type=module',
+        '-e',
+        allocator,
+        runId,
+      ], { cwd: root, env: childEnv, stdio: 'pipe' }).toString('utf8')) as {
+        tempRoot: string
+        runRoot: string
+        referenceProfileRoot: string
+        installedProfileRoot: string
+        cleanupTempRoot: string
+        cleanupRunRoot: string
+      }
+
+      expect(resolve(allocated.tempRoot)).toBe(resolve(lexicalTempRoot))
+      expect(realpathSync(allocated.tempRoot)).not.toBe(resolve(allocated.tempRoot))
+      expect(allocated.referenceProfileRoot).not.toBe(allocated.installedProfileRoot)
+      for (const profileRoot of [allocated.referenceProfileRoot, allocated.installedProfileRoot]) {
+        expect(resolve(profileRoot).startsWith(`${resolve(allocated.tempRoot)}${sep}`)).toBe(true)
+        expect(realpathSync(profileRoot).startsWith(`${realpathSync(allocated.tempRoot)}${sep}`)).toBe(true)
+      }
+      expect(allocated.cleanupTempRoot).toBe(realpathSync(allocated.tempRoot))
+      expect(allocated.cleanupRunRoot).toBe(realpathSync(allocated.runRoot))
+      expect(script).toContain('$cleanupTempRoot = [string]$smokePaths.cleanupTempRoot')
+      expect(script).toContain('$cleanupRunRoot = [string]$smokePaths.cleanupRunRoot')
+    } finally {
+      rmSync(contractRoot, { recursive: true, force: true })
+    }
+  })
 
   it('runs the packaged regression on an isolated nonce profile with the exact v0.3.8 recovery fixture', () => {
     expect(script).toContain("[ValidateSet('AllowUnsigned', 'RequireTrusted')]")
     expect(script).toContain("[string]$SignaturePolicy = 'AllowUnsigned'")
     expect(script).toMatch(/\$runId\s*=\s*\[Guid\]::NewGuid\(\)\.ToString\('N'\)/)
-    expect(script).toContain("$profileRoot = Join-Path $runRoot 'user-data\\baby-diary'")
+    expect(script).toContain('$referenceProfileRoot = [string]$smokePaths.referenceProfileRoot')
+    expect(script).toContain('$profileRoot = [string]$smokePaths.installedProfileRoot')
     expect(script).toContain('writeV038Fixture')
     expect(script).toContain('New-FalsePositivePrePublicationEvidence')
     expect(script).toContain('.baby-info-pair-restore-v1.json')
@@ -146,6 +211,35 @@ describe('installed Windows release smoke script', () => {
     expect(script).toContain('launchCdpElectronApplication')
     expect(script).toContain('firstWindow')
     expect(script).toContain('window.babyDiary')
+  })
+
+  it('runs the same recovery probe on the co-built unpacked reference before Setup', () => {
+    const main = script.slice(script.indexOf('$SetupPath ='))
+    const referenceFixture = main.indexOf('New-FalsePositivePrePublicationEvidence `')
+    const referenceProbe = main.indexOf('Invoke-PackagedRecoveryProbe `')
+    const installedFixture = main.indexOf('New-FalsePositivePrePublicationEvidence `', referenceFixture + 1)
+    const setup = main.indexOf('$setupProcess = Start-Process')
+    const installedProbe = main.indexOf('Invoke-PackagedRecoveryProbe `', referenceProbe + 1)
+
+    expect(script).toContain('[string]$ReferenceExecutablePath')
+    expect(referenceFixture).toBeGreaterThanOrEqual(0)
+    expect(referenceFixture).toBeLessThan(referenceProbe)
+    expect(referenceProbe).toBeLessThan(installedFixture)
+    expect(installedFixture).toBeLessThan(setup)
+    expect(setup).toBeLessThan(installedProbe)
+    expect(main.slice(referenceFixture, referenceProbe)).toContain('-ProfileRoot $referenceProfileRoot')
+    expect(main.slice(referenceProbe, installedFixture)).toContain('-ExecutablePath $ReferenceExecutablePath')
+    expect(main.slice(referenceProbe, installedFixture)).toContain('-ProfileRoot $referenceProfileRoot')
+    expect(main.slice(installedFixture, setup)).toContain('-ProfileRoot $profileRoot')
+    expect(main.slice(installedProbe)).toContain('-ExecutablePath $installedExecutable')
+    expect(main.slice(installedProbe)).toContain('-ProfileRoot $profileRoot')
+    expect(main.match(/Invoke-PackagedRecoveryProbe `/g)).toHaveLength(2)
+  })
+
+  it('passes the co-built unpacked reference to both Windows installed smoke jobs', () => {
+    expect(workflow.match(
+      /-ReferenceExecutablePath "\$\{\{ github\.workspace \}\}\/release\/win-unpacked\/Baby Diary\.exe"/g,
+    )).toHaveLength(2)
   })
 
   it('attaches to the installed recovery probe over Chromium CDP without the Electron Node inspector', () => {
@@ -369,6 +463,31 @@ describe('installed Windows release smoke script', () => {
     expect(script).toContain('installed-release-smoke-evidence.json')
   })
 
+  it('records path-free reference and installed payload hash comparisons in success evidence', () => {
+    const main = script.slice(script.indexOf('$SetupPath ='))
+    const evidenceStart = main.indexOf('$evidence = [ordered]@{')
+    const evidenceEnd = main.indexOf('($evidence | ConvertTo-Json', evidenceStart)
+    const evidence = main.slice(evidenceStart, evidenceEnd)
+
+    expect(main).toContain("$referenceAppAsarPath = Join-Path (Split-Path -Parent $ReferenceExecutablePath) 'resources\\app.asar'")
+    expect(main).toContain("$installedAppAsarPath = Join-Path $installLocation 'resources\\app.asar'")
+    expect(main).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath $ReferenceExecutablePath')
+    expect(main).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath $referenceAppAsarPath')
+    expect(main).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath $installedExecutable')
+    expect(main).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath $installedAppAsarPath')
+    expect(main).toContain('$executableSha256Match = [string]::Equals(')
+    expect(main).toContain('$appAsarSha256Match = [string]::Equals(')
+    expect(main).toMatch(/if \(-not \$executableSha256Match -or -not \$appAsarSha256Match\)[\s\S]*payload hashes do not match/i)
+
+    expect(evidence).toContain('referenceExecutableSha256 = $referenceExecutableSha256')
+    expect(evidence).toContain('installedExecutableSha256 = $installedExecutableSha256')
+    expect(evidence).toContain('executableSha256Match = [bool]$executableSha256Match')
+    expect(evidence).toContain('referenceAppAsarSha256 = $referenceAppAsarSha256')
+    expect(evidence).toContain('installedAppAsarSha256 = $installedAppAsarSha256')
+    expect(evidence).toContain('appAsarSha256Match = [bool]$appAsarSha256Match')
+    expect(evidence).not.toMatch(/^\s*(?:setupPath|referenceExecutablePath|installedExecutable|profileRoot)\s*=/m)
+  })
+
   it('fails on a pre-existing install and performs a silent install with deterministic registry discovery', () => {
     expect(script).toContain("PSObject.Properties['DisplayName']")
     expect(script).toContain("$displayName.Value -eq 'Baby Diary'")
@@ -392,7 +511,7 @@ describe('installed Windows release smoke script', () => {
     expect(script).toMatch(/unexpectedly launched the installed application/i)
     expect(script).not.toMatch(/Stop-Process|taskkill/i)
     expect(main.indexOf('$unexpectedInstalledProcesses = @('))
-      .toBeLessThan(main.indexOf('Invoke-PackagedRecoveryProbe'))
+      .toBeLessThan(main.indexOf('-ExecutablePath $installedExecutable'))
   })
 
   it('checks trusted publisher/updater metadata, runs both E2E suites, and always uninstalls', () => {

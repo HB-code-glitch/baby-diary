@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$SetupPath,
+  [Parameter(Mandatory = $true)]
+  [string]$ReferenceExecutablePath,
   [ValidateSet('AllowUnsigned', 'RequireTrusted')]
   [string]$SignaturePolicy = 'AllowUnsigned',
   [string]$ExpectedPublisher = $env:WIN_EXPECTED_PUBLISHER,
@@ -76,6 +78,34 @@ function Invoke-NodeInline {
   if ($LASTEXITCODE -ne 0) {
     throw "$Label failed with exit code $LASTEXITCODE"
   }
+}
+
+function New-IsolatedSmokePaths {
+  param([string]$RunId)
+  $source = @'
+import { mkdtempSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+
+const [runId] = process.argv.slice(1)
+if (!/^[0-9a-f]{32}$/i.test(runId)) throw new Error('run id must be a 32-character hexadecimal nonce')
+const tempRoot = tmpdir()
+const runRoot = mkdtempSync(path.join(tempRoot, `baby-diary-installed-smoke-${runId}-`))
+const referenceProfileRoot = mkdtempSync(path.join(runRoot, 'reference-profile-'))
+const installedProfileRoot = mkdtempSync(path.join(runRoot, 'installed-profile-'))
+const cleanupTempRoot = realpathSync(tempRoot)
+const cleanupRunRoot = realpathSync(runRoot)
+process.stdout.write(JSON.stringify({
+  tempRoot,
+  runRoot,
+  referenceProfileRoot,
+  installedProfileRoot,
+  cleanupTempRoot,
+  cleanupRunRoot,
+}))
+'@
+  $json = Invoke-NodeInline -Label 'installed smoke temp path allocation' -Source $source -Arguments @($RunId)
+  return ($json | ConvertFrom-Json)
 }
 
 function Get-UninstallerPath {
@@ -541,15 +571,34 @@ if ($SignaturePolicy -eq 'RequireTrusted') {
 }
 
 $SetupPath = (Resolve-Path -LiteralPath $SetupPath).Path
+$ReferenceExecutablePath = (Resolve-Path -LiteralPath $ReferenceExecutablePath).Path
+$referenceAppAsarPath = Join-Path (Split-Path -Parent $ReferenceExecutablePath) 'resources\app.asar'
+if (-not (Test-Path -LiteralPath $ReferenceExecutablePath -PathType Leaf)) {
+  throw 'Co-built unpacked reference executable was not found'
+}
+if (-not (Test-Path -LiteralPath $referenceAppAsarPath -PathType Leaf)) {
+  throw 'Co-built unpacked reference app.asar was not found'
+}
 $packageSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $SetupPath).Hash.ToLowerInvariant()
+$referenceExecutableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ReferenceExecutablePath).Hash.ToLowerInvariant()
+$referenceAppAsarSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $referenceAppAsarPath).Hash.ToLowerInvariant()
 $existing = @(Get-BabyDiaryInstall)
 if ($existing.Count -ne 0) {
   throw 'Refusing to overwrite a pre-existing Baby Diary installation on the clean smoke runner'
 }
 
 $runId = [Guid]::NewGuid().ToString('N')
-$runRoot = Join-Path ([IO.Path]::GetTempPath()) "baby-diary-installed-smoke-$runId"
-$profileRoot = Join-Path $runRoot 'user-data\baby-diary'
+$smokePaths = New-IsolatedSmokePaths -RunId $runId
+$tempRoot = [string]$smokePaths.tempRoot
+$runRoot = [string]$smokePaths.runRoot
+$referenceProfileRoot = [string]$smokePaths.referenceProfileRoot
+$profileRoot = [string]$smokePaths.installedProfileRoot
+$cleanupTempRoot = [string]$smokePaths.cleanupTempRoot
+$cleanupRunRoot = [string]$smokePaths.cleanupRunRoot
+$referenceBeforeManifestPath = Join-Path $runRoot 'reference-before-manifest.json'
+$referenceBeforeProjectionPath = Join-Path $runRoot 'reference-before-projection.json'
+$referenceRuntimeEvidencePath = Join-Path $runRoot 'reference-renderer-readiness.json'
+$referenceProcessLogPath = Join-Path $runRoot 'reference-electron-startup.log'
 $beforeManifestPath = Join-Path $runRoot 'before-manifest.json'
 $afterManifestPath = Join-Path $runRoot 'after-manifest.json'
 $beforeProjectionPath = Join-Path $runRoot 'before-projection.json'
@@ -564,17 +613,28 @@ $originalTestUserData = $env:BABYDIARY_TEST_USERDATA
 $originalE2eExecutable = $env:BABYDIARY_E2E_EXECUTABLE
 $originalSyncE2eExecutable = $env:BABYDIARY_SYNC_E2E_EXECUTABLE
 $originalExpectedE2eArch = $env:BABYDIARY_EXPECTED_E2E_ARCH
-New-Item -ItemType Directory -Path $profileRoot -Force | Out-Null
 
 try {
+  if ($SignaturePolicy -eq 'RequireTrusted') {
+    Assert-TrustedSignature -Path $SetupPath
+    Assert-TrustedSignature -Path $ReferenceExecutablePath
+  }
+
+  New-FalsePositivePrePublicationEvidence `
+    -ProfileRoot $referenceProfileRoot `
+    -BeforeManifestPath $referenceBeforeManifestPath `
+    -BeforeProjectionPath $referenceBeforeProjectionPath
+  Invoke-PackagedRecoveryProbe `
+    -ExecutablePath $ReferenceExecutablePath `
+    -ProfileRoot $referenceProfileRoot `
+    -RuntimeEvidencePath $referenceRuntimeEvidencePath `
+    -ProcessLogPath $referenceProcessLogPath
+
   New-FalsePositivePrePublicationEvidence `
     -ProfileRoot $profileRoot `
     -BeforeManifestPath $beforeManifestPath `
     -BeforeProjectionPath $beforeProjectionPath
 
-  if ($SignaturePolicy -eq 'RequireTrusted') {
-    Assert-TrustedSignature -Path $SetupPath
-  }
   $setupProcess = Start-Process -FilePath $SetupPath -ArgumentList '/S' -Wait -PassThru
   if ($setupProcess.ExitCode -ne 0) {
     throw "Silent Setup failed with exit code $($setupProcess.ExitCode)"
@@ -599,6 +659,26 @@ try {
   $installedExecutable = Join-Path $installLocation 'Baby Diary.exe'
   if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
     throw "Installed executable not found: $installedExecutable"
+  }
+  $installedAppAsarPath = Join-Path $installLocation 'resources\app.asar'
+  if (-not (Test-Path -LiteralPath $installedAppAsarPath -PathType Leaf)) {
+    throw 'Installed app.asar was not found'
+  }
+
+  $installedExecutableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedExecutable).Hash.ToLowerInvariant()
+  $installedAppAsarSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedAppAsarPath).Hash.ToLowerInvariant()
+  $executableSha256Match = [string]::Equals(
+    $referenceExecutableSha256,
+    $installedExecutableSha256,
+    [StringComparison]::OrdinalIgnoreCase
+  )
+  $appAsarSha256Match = [string]::Equals(
+    $referenceAppAsarSha256,
+    $installedAppAsarSha256,
+    [StringComparison]::OrdinalIgnoreCase
+  )
+  if (-not $executableSha256Match -or -not $appAsarSha256Match) {
+    throw 'Installed payload hashes do not match the co-built unpacked reference'
   }
 
   $unexpectedInstalledProcesses = @(
@@ -639,16 +719,23 @@ try {
   Invoke-NpmScript -Name 'test:e2e'
   Invoke-NpmScript -Name 'test:e2e:sync'
 
+  $referenceRuntimeEvidence = Get-Content -Raw -Encoding utf8 -LiteralPath $referenceRuntimeEvidencePath | ConvertFrom-Json
   $runtimeEvidence = Get-Content -Raw -Encoding utf8 -LiteralPath $runtimeEvidencePath | ConvertFrom-Json
   $comparison = Get-Content -Raw -Encoding utf8 -LiteralPath $comparisonPath | ConvertFrom-Json
   $evidence = [ordered]@{
     schemaVersion = 1
     runId = $runId
     signaturePolicy = $SignaturePolicy
-    setupPath = $SetupPath
     packageSha256 = $packageSha256
-    installedExecutable = $installedExecutable
-    profileRoot = $profileRoot
+    referenceExecutableSha256 = $referenceExecutableSha256
+    installedExecutableSha256 = $installedExecutableSha256
+    executableSha256Match = [bool]$executableSha256Match
+    referenceAppAsarSha256 = $referenceAppAsarSha256
+    installedAppAsarSha256 = $installedAppAsarSha256
+    appAsarSha256Match = [bool]$appAsarSha256Match
+    referenceBeforeManifest = 'reference-before-manifest.json'
+    referenceBeforeProjection = 'reference-before-projection.json'
+    referenceRendererReady = [bool]$referenceRuntimeEvidence.rendererReady
     beforeManifest = 'before-manifest.json'
     afterManifest = 'after-manifest.json'
     beforeProjection = 'before-projection.json'
@@ -664,6 +751,9 @@ try {
   New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
   foreach ($artifact in @(
       $evidencePath,
+      $referenceBeforeManifestPath,
+      $referenceBeforeProjectionPath,
+      $referenceRuntimeEvidencePath,
       $beforeManifestPath,
       $afterManifestPath,
       $beforeProjectionPath,
@@ -686,10 +776,11 @@ finally {
 
   # Preserve observable failure evidence before nonce cleanup. This stays
   # best-effort so evidence publication cannot hide the original smoke error.
-  if (Test-Path -LiteralPath $runtimeEvidencePath -PathType Leaf) {
+  foreach ($failureEvidencePath in @($referenceRuntimeEvidencePath, $runtimeEvidencePath)) {
+    if (-not (Test-Path -LiteralPath $failureEvidencePath -PathType Leaf)) { continue }
     try {
       New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
-      Copy-Item -LiteralPath $runtimeEvidencePath -Destination $EvidenceDirectory -Force
+      Copy-Item -LiteralPath $failureEvidencePath -Destination $EvidenceDirectory -Force
     }
     catch {
       Write-Warning "Could not preserve packaged recovery probe evidence: $($_.Exception.Message)"
@@ -716,11 +807,20 @@ finally {
     throw 'Baby Diary installation cleanup did not remove the registry entry and install directory'
   }
 
-  if (Test-Path -LiteralPath $runRoot) {
-    $resolvedRunRoot = [IO.Path]::GetFullPath($runRoot)
-    $resolvedTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-    if (-not $resolvedRunRoot.StartsWith($resolvedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Leaf $resolvedRunRoot) -ne "baby-diary-installed-smoke-$runId") {
+  if (Test-Path -LiteralPath $cleanupRunRoot) {
+    $resolvedRunRoot = [IO.Path]::GetFullPath($cleanupRunRoot)
+    $resolvedTempRoot = [IO.Path]::GetFullPath($cleanupTempRoot)
+    $resolvedRunParent = [IO.Path]::GetFullPath((Split-Path -Parent $resolvedRunRoot))
+    $expectedRunLeafPrefix = "baby-diary-installed-smoke-$runId-"
+    if (-not [string]::Equals(
+          $resolvedRunParent,
+          $resolvedTempRoot,
+          [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not (Split-Path -Leaf $resolvedRunRoot).StartsWith(
+          $expectedRunLeafPrefix,
+          [StringComparison]::Ordinal
+        )) {
       throw 'Refusing to clean a non-nonce installed smoke directory'
     }
     Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force
