@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AppSettings } from '../shared/types'
+import type { AppSettings, DiaryEvent } from '../shared/types'
 
 type Scenario = 'healthy' | 'permission-denied' | 'unavailable' | 'unauthenticated' | 'missing' | 'no-member'
+type SyncEngineModule = typeof import('../src/sync/syncEngine')
+
+const connectedEngines = new Set<SyncEngineModule>()
 
 const harness = vi.hoisted(() => ({
   scenario: 'healthy' as Scenario,
+  cloudFamilyId: 'family-A',
+  familyOverrides: {} as Record<string, Scenario>,
+  ownershipFamilyId: undefined as string | undefined,
+  legacyPhysicalPresent: false,
   settings: {
     baby: { name: '', birthdate: '' },
     profile: { uid: 'user-1', name: 'Parent', role: 'mom' as const },
@@ -23,6 +30,17 @@ const harness = vi.hoisted(() => ({
     error: (error: Error) => void
     active: boolean
   }>,
+  legacyEvent: {
+    id: 'legacy-unbound-A',
+    type: 'formula',
+    at: '2026-07-15T01:00:00.000Z',
+    data: { ml: 60 },
+    author: { uid: 'user-1', name: 'Parent', role: 'mom' },
+    createdAt: '2026-07-15T01:00:00.000Z',
+    updatedAt: '2026-07-15T01:00:00.000Z',
+    rev: 1,
+    deleted: false,
+  } as DiaryEvent,
 }))
 
 vi.mock('../src/sync/firebase', () => ({
@@ -41,9 +59,36 @@ vi.mock('../src/sync/firebase', () => ({
 
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
+    getFirebaseEmulator: vi.fn(async () => null),
     listEvents: vi.fn(async () => []),
-    listEventMutations: vi.fn(async () => []),
-    appendEvent: vi.fn(async () => 'ok'),
+    listEventMutations: vi.fn(async (expectedFamilyId?: string) => {
+      if (expectedFamilyId !== undefined && expectedFamilyId !== harness.settings.familyId) {
+        throw new Error('EVENT_FAMILY_MISMATCH')
+      }
+      return harness.legacyPhysicalPresent && harness.ownershipFamilyId === expectedFamilyId
+        ? [structuredClone(harness.legacyEvent)]
+        : []
+    }),
+    appendEvent: vi.fn(async (_event: unknown, expectedFamilyId?: string) => (
+      expectedFamilyId === undefined || expectedFamilyId === harness.settings.familyId ? 'ok' : 'error'
+    )),
+    confirmEventFamily: vi.fn(async (familyId: string, allowLegacyAdoption = true) => {
+      if (familyId !== harness.settings.familyId) return { status: 'error' as const, adoptedCount: 0 }
+      if (!allowLegacyAdoption) return { status: 'ok' as const, adoptedCount: 0 }
+      if (harness.ownershipFamilyId && harness.ownershipFamilyId !== familyId) {
+        return {
+          status: 'different-family' as const,
+          adoptionFamilyId: harness.ownershipFamilyId,
+          adoptedCount: 0,
+        }
+      }
+      harness.ownershipFamilyId = familyId
+      return {
+        status: 'ok' as const,
+        adoptionFamilyId: familyId,
+        adoptedCount: harness.legacyPhysicalPresent ? 1 : 0,
+      }
+    }),
     getSettings: vi.fn(async () => structuredClone(harness.settings)),
     mergeSettings: (...args: unknown[]) => harness.mergeSettings(...args),
     saveSettings: vi.fn(async (settings: AppSettings) => settings),
@@ -123,12 +168,12 @@ const config = {
   appId: 'app',
 }
 
-function familyData() {
+function familyData(scenario = harness.scenario) {
   return {
     name: 'Family',
     babyName: '',
     babyBirthdate: '',
-    members: harness.scenario === 'no-member'
+    members: scenario === 'no-member'
       ? {}
       : { 'user-1': { name: 'Parent', role: 'mom' } },
     inviteCode: 'ABC234',
@@ -138,7 +183,8 @@ function familyData() {
 
 async function connect() {
   const engine = await import('../src/sync/syncEngine')
-  await engine.configure(config, 'family-A')
+  connectedEngines.add(engine)
+  await engine.configure(config, harness.settings.familyId)
   await engine.start()
   await vi.waitFor(() => expect(harness.authCallbacks).toHaveLength(1))
   harness.authCallbacks[0]({ uid: 'user-1', email: 'parent@example.test' })
@@ -152,6 +198,10 @@ describe('non-destructive family identity reconciliation', () => {
     vi.clearAllMocks()
     localStorage.clear()
     harness.scenario = 'healthy'
+    harness.cloudFamilyId = 'family-A'
+    harness.familyOverrides = {}
+    harness.ownershipFamilyId = undefined
+    harness.legacyPhysicalPresent = false
     harness.authCallbacks.length = 0
     harness.snapshotCalls.length = 0
     harness.settings = {
@@ -167,18 +217,25 @@ describe('non-destructive family identity reconciliation', () => {
     harness.setDoc.mockResolvedValue(undefined)
     harness.getDoc.mockImplementation(async (ref: { path: string; id: string }) => {
       if (ref.path === 'users/user-1') {
-        return { id: ref.id, exists: () => true, data: () => ({ familyId: 'family-A' }) }
-      }
-      if (ref.path === 'families/family-A') {
-        if (harness.scenario === 'permission-denied'
-          || harness.scenario === 'unavailable'
-          || harness.scenario === 'unauthenticated') {
-          throw Object.assign(new Error(harness.scenario), { code: harness.scenario })
+        return {
+          id: ref.id,
+          exists: () => true,
+          data: () => harness.cloudFamilyId ? { familyId: harness.cloudFamilyId } : {},
         }
-        if (harness.scenario === 'missing') {
+      }
+      if (ref.path.startsWith('families/')) {
+        const familyId = ref.path.split('/')[1]
+        const scenario = harness.familyOverrides[familyId]
+          ?? (familyId === 'family-A' ? harness.scenario : 'healthy')
+        if (scenario === 'permission-denied'
+          || scenario === 'unavailable'
+          || scenario === 'unauthenticated') {
+          throw Object.assign(new Error(scenario), { code: scenario })
+        }
+        if (scenario === 'missing') {
           return { id: ref.id, exists: () => false, data: () => undefined }
         }
-        return { id: ref.id, exists: () => true, data: familyData }
+        return { id: ref.id, exists: () => true, data: () => familyData(scenario) }
       }
       return { id: ref.id, exists: () => false, data: () => undefined }
     })
@@ -192,8 +249,15 @@ describe('non-destructive family identity reconciliation', () => {
     })
   })
 
-  afterEach(() => {
-    vi.useRealTimers()
+  afterEach(async () => {
+    const engines = Array.from(connectedEngines)
+    connectedEngines.clear()
+    try {
+      await Promise.all(engines.map(engine => engine.stop()))
+    } finally {
+      if (vi.isFakeTimers()) vi.clearAllTimers()
+      vi.useRealTimers()
+    }
   })
 
   it.each(['permission-denied', 'unavailable', 'unauthenticated'] as const)(
@@ -237,6 +301,93 @@ describe('non-destructive family identity reconciliation', () => {
       { familyId: '' },
       expect.anything(),
     )
+  })
+
+  it('pins local A before a verified cloud-B transition and never adopts A bytes into B after restart', async () => {
+    harness.cloudFamilyId = 'family-B'
+    harness.legacyPhysicalPresent = true
+    const engine = await connect()
+    await vi.waitFor(() => expect(engine.getStatus().status).toBe('online'))
+
+    expect(harness.settings.familyId).toBe('family-B')
+    expect(harness.ownershipFamilyId).toBe('family-A')
+    expect(harness.setDoc.mock.calls.filter(([ref]) => (
+      (ref as { path?: string }).path?.startsWith('families/family-B/events/')
+    ))).toHaveLength(0)
+
+    await engine.stop()
+    harness.authCallbacks.length = 0
+    harness.snapshotCalls.length = 0
+    vi.resetModules()
+    const restarted = await connect()
+    await vi.waitFor(() => expect(restarted.getStatus().status).toBe('online'))
+
+    expect(harness.settings.familyId).toBe('family-B')
+    expect(harness.ownershipFamilyId).toBe('family-A')
+    expect(harness.setDoc.mock.calls.filter(([ref]) => (
+      (ref as { path?: string }).path?.startsWith('families/family-B/events/')
+    ))).toHaveLength(0)
+    const { ipc } = await import('../src/lib/ipc')
+    expect(ipc.confirmEventFamily).toHaveBeenCalledWith('family-B', true)
+  })
+
+  it('pins local A before clearing a gone family so a later B join cannot adopt A bytes', async () => {
+    harness.scenario = 'missing'
+    harness.legacyPhysicalPresent = true
+    const engine = await connect()
+    await vi.waitFor(() => expect(engine.getStatus().detail).toBe(engine.DETAIL_FAMILY_GONE))
+
+    expect(harness.settings.familyId).toBe('')
+    expect(harness.ownershipFamilyId).toBe('family-A')
+
+    await engine.stop()
+    harness.cloudFamilyId = 'family-B'
+    harness.authCallbacks.length = 0
+    harness.snapshotCalls.length = 0
+    vi.resetModules()
+    const joined = await connect()
+    await vi.waitFor(() => expect(joined.getStatus().status).toBe('online'))
+
+    expect(harness.settings.familyId).toBe('family-B')
+    expect(harness.ownershipFamilyId).toBe('family-A')
+    expect(harness.setDoc.mock.calls.filter(([ref]) => (
+      (ref as { path?: string }).path?.startsWith('families/family-B/events/')
+    ))).toHaveLength(0)
+  })
+
+  it('validates a cloud-B candidate before changing local A and self-heals to verified A when B is stale', async () => {
+    harness.cloudFamilyId = 'family-B'
+    harness.familyOverrides['family-B'] = 'missing'
+    harness.legacyPhysicalPresent = true
+    const engine = await connect()
+    await vi.waitFor(() => expect(engine.getStatus().status).toBe('online'))
+
+    expect(harness.settings.familyId).toBe('family-A')
+    expect(harness.mergeSettings).not.toHaveBeenCalledWith({ familyId: 'family-B' })
+    expect(harness.setDoc).toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'users/user-1' }),
+      { familyId: 'family-A' },
+      { merge: true },
+    )
+    expect(harness.setDoc.mock.calls.filter(([ref]) => (
+      (ref as { path?: string }).path?.startsWith('families/family-B/events/')
+    ))).toHaveLength(0)
+  })
+
+  it('preserves local A and fails closed when both stale cloud B and local A membership are invalid', async () => {
+    harness.cloudFamilyId = 'family-B'
+    harness.familyOverrides['family-B'] = 'no-member'
+    harness.scenario = 'missing'
+    harness.legacyPhysicalPresent = true
+    const engine = await connect()
+    await vi.waitFor(() => expect(engine.getStatus().detail).toBe(engine.DETAIL_FAMILY_ACCESS_UNCERTAIN))
+
+    expect(harness.settings.familyId).toBe('family-A')
+    expect(harness.ownershipFamilyId).toBe('family-A')
+    expect(harness.mergeSettings).not.toHaveBeenCalledWith({ familyId: 'family-B' })
+    expect(harness.setDoc.mock.calls.filter(([ref]) => (
+      (ref as { path?: string }).path?.startsWith('families/family-B/events/')
+    ))).toHaveLength(0)
   })
 
   it('retries a zero-pending initial cloud read failure and reaches online', async () => {

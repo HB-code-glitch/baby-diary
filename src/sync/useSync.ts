@@ -95,9 +95,10 @@ export {
  * 로컬 저장 + 클라우드 큐잉이 한 번에 처리됨.
  */
 export async function appendAndEnqueue(event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> {
-  const result = await ipc.appendEvent(event)
+  const familyId = (await ipc.getSettings()).familyId
+  const result = await ipc.appendEvent(event, familyId)
   if (result !== 'error') {
-    enqueue(event)
+    enqueue(event, familyId)
   }
   return result
 }

@@ -1,3 +1,7 @@
+import { isSameDay, parseISO, startOfDay } from 'date-fns'
+import type { DiaryEvent } from '../../shared/types'
+import { eventTimestampMs, sortEventsNewestFirst } from './eventTime'
+
 export const HOME_PRIMARY_INSIGHT_LIMIT = 3
 export const STATS_PRIMARY_SECTION_LIMIT = 2
 
@@ -23,6 +27,31 @@ export interface StatsVisibility {
   feeding: boolean
   diaper: boolean
   temperature: boolean
+}
+
+export function selectTodaySummaryEvents(
+  events: readonly DiaryEvent[],
+  options: { now?: Date; birthdate?: string | null } = {},
+): DiaryEvent[] {
+  const now = options.now ?? new Date()
+  const nowMs = now.getTime()
+  if (!Number.isFinite(nowMs)) return []
+
+  const parsedBirthdate = options.birthdate?.trim()
+    ? startOfDay(parseISO(options.birthdate))
+    : null
+  const birthdateMs = parsedBirthdate?.getTime()
+  const validBirthdateMs = birthdateMs != null && Number.isFinite(birthdateMs)
+    ? birthdateMs
+    : null
+
+  return sortEventsNewestFirst(events.filter(event => {
+    if (event.deleted) return false
+    const eventMs = eventTimestampMs(event.at)
+    if (eventMs === null || eventMs > nowMs) return false
+    if (!isSameDay(parseISO(event.at), now)) return false
+    return validBirthdateMs === null || eventMs >= validBirthdateMs
+  }))
 }
 
 export function getVisibleHomeMetrics(input: {

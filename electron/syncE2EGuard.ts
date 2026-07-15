@@ -7,6 +7,7 @@ import {
   realpathSync,
   writeSync,
 } from 'fs'
+import { createHash } from 'crypto'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -21,6 +22,16 @@ export interface SyncE2EGuardConfig {
 
 type Environment = Record<string, string | undefined>
 type DiagnosticValue = string | number | boolean | null
+type GuardPhase = 'active' | 'closing'
+
+interface GuardRequestErrorDetails {
+  url: string
+  method: string
+  error: string
+  webContentsId?: number
+}
+
+type GuardRequestErrorListener = (details: GuardRequestErrorDetails) => void
 
 interface GuardSession {
   webRequest: {
@@ -31,10 +42,16 @@ interface GuardSession {
         callback: (result: { cancel: boolean }) => void,
       ) => void,
     ) => void
+    onErrorOccurred(
+      filter: { urls: string[] },
+      listener: GuardRequestErrorListener | null,
+    ): void
+    onErrorOccurred(listener: GuardRequestErrorListener | null): void
   }
 }
 
 interface GuardWebContents {
+  id: number
   on: (...args: any[]) => unknown
 }
 
@@ -85,6 +102,62 @@ function safeUrlFields(rawUrl: unknown, resourceRoot: string): Record<string, Di
 function safeReason(value: unknown): string {
   return typeof value === 'string' && /^[a-z][a-z0-9-]{0,39}$/i.test(value)
     ? value.toLowerCase()
+    : 'unknown'
+}
+
+function isExactFirestoreListenChannel(rawUrl: string): boolean {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return false
+  }
+  if (
+    url.username
+    || url.password
+    || url.hash
+    || url.protocol !== 'http:'
+    || url.hostname !== '127.0.0.1'
+    || url.port !== '8080'
+    || url.pathname !== '/google.firestore.v1.Firestore/Listen/channel'
+  ) return false
+
+  const expectedKeys = ['VER', 'database', 'RID', 'SID', 'AID', 'CI', 'TYPE', 'zx', 't']
+  const entries = Array.from(url.searchParams.entries())
+  if (entries.length !== expectedKeys.length) return false
+  if (expectedKeys.some(key => url.searchParams.getAll(key).length !== 1)) return false
+  if (entries.some(([key]) => !expectedKeys.includes(key))) return false
+
+  const sid = url.searchParams.get('SID') ?? ''
+  const aid = url.searchParams.get('AID') ?? ''
+  const zx = url.searchParams.get('zx') ?? ''
+  const attempt = url.searchParams.get('t') ?? ''
+  const canonicalNonNegativeInteger = (value: string): boolean => /^(?:0|[1-9]\d*)$/.test(value)
+    && Number.isSafeInteger(Number(value))
+  const canonicalPositiveInteger = (value: string): boolean => /^[1-9]\d*$/.test(value)
+    && Number.isSafeInteger(Number(value))
+
+  return url.searchParams.get('VER') === '8'
+    && url.searchParams.get('database') === `projects/${PROJECT_ID}/databases/(default)`
+    && url.searchParams.get('RID') === 'rpc'
+    && sid.length <= 256
+    && /^[A-Za-z0-9_-]{1,254}={0,2}$/.test(sid)
+    && canonicalNonNegativeInteger(aid)
+    && /^(?:0|1)$/.test(url.searchParams.get('CI') ?? '')
+    && url.searchParams.get('TYPE') === 'xmlhttp'
+    && /^[a-z0-9]{1,64}$/.test(zx)
+    && canonicalPositiveInteger(attempt)
+}
+
+function safeRequestMethod(value: unknown): string {
+  return typeof value === 'string' && /^[A-Z]{1,16}$/.test(value)
+    ? value
+    : 'UNKNOWN'
+}
+
+function safeNetworkError(value: unknown): string {
+  return typeof value === 'string' && /^net::ERR_[A-Z0-9_]{1,48}$/.test(value)
+    ? value
     : 'unknown'
 }
 
@@ -221,17 +294,39 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
   let closed = false
   let shuttingDown = false
   let sessionInstalled = false
+  let installedSession: GuardSession | null = null
+  let sequence = 0
   const attached = new WeakSet<object>()
+  const windowPhases = new Map<number, GuardPhase>()
+  const webContentsById = new Map<number, object>()
+  const windowCloseRecorded = new Set<number>()
   const record = (kind: string, fields: Record<string, DiagnosticValue> = {}): void => {
     invariant(!closed, 'Sync E2E diagnostic file is already closed')
-    const line = `${JSON.stringify({ kind, timestamp: new Date().toISOString(), ...fields })}\n`
+    const line = `${JSON.stringify({
+      kind,
+      sequence: sequence += 1,
+      timestamp: new Date().toISOString(),
+      ...fields,
+    })}\n`
     writeSync(descriptor, line, undefined, 'utf8')
     fsyncSync(descriptor)
+  }
+
+  const markWindowClosing = (webContentsId: number): void => {
+    windowPhases.set(webContentsId, 'closing')
+    if (windowCloseRecorded.has(webContentsId)) return
+    windowCloseRecorded.add(webContentsId)
+    record('teardown-start', {
+      phase: 'closing',
+      source: 'window-close',
+      webContentsId,
+    })
   }
 
   const installSessionGuard = (session: GuardSession, resourceRoot: string): void => {
     invariant(!sessionInstalled, 'Sync E2E session guard was installed more than once')
     sessionInstalled = true
+    installedSession = session
     session.webRequest.onBeforeRequest(
       { urls: ['<all_urls>'] },
       (details, callback) => {
@@ -240,16 +335,43 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
         callback({ cancel: !allowed })
       },
     )
+    session.webRequest.onErrorOccurred(
+      { urls: ['<all_urls>'] },
+      details => {
+        const webContentsId = details.webContentsId
+        if (!Number.isInteger(webContentsId) || Number(webContentsId) <= 0) return
+        const phase = windowPhases.get(Number(webContentsId))
+        if (!phase) return
+        const rawUrl = typeof details.url === 'string' ? details.url : ''
+        record('network-error', {
+          phase,
+          webContentsId: Number(webContentsId),
+          method: safeRequestMethod(details.method),
+          error: safeNetworkError(details.error),
+          target: isExactFirestoreListenChannel(rawUrl) ? 'firestore-listen-channel' : 'other',
+          urlSha256: createHash('sha256').update(rawUrl).digest('hex'),
+        })
+      },
+    )
     record('guard-ready')
   }
 
   const attachWindowDiagnostics = (window: GuardWindow, resourceRoot: string): void => {
     const webContents = window.webContents
     if (attached.has(webContents as object)) return
+    invariant(
+      Number.isInteger(webContents.id) && webContents.id > 0,
+      'Sync E2E window requires a positive webContents id',
+    )
+    invariant(
+      !webContentsById.has(webContents.id),
+      `Sync E2E webContents id ${webContents.id} was attached more than once`,
+    )
     attached.add(webContents as object)
-    let phase: 'active' | 'closing' = 'active'
+    webContentsById.set(webContents.id, webContents as object)
+    windowPhases.set(webContents.id, shuttingDown ? 'closing' : 'active')
     window.on('close', () => {
-      phase = 'closing'
+      markWindowClosing(webContents.id)
     })
 
     webContents.on('console-message', (...args: unknown[]) => {
@@ -260,7 +382,8 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
       const lineNumber = details?.lineNumber ?? args[3]
       const message = details?.message ?? args[2]
       record('console-error', {
-        phase: shuttingDown || phase === 'closing' ? 'closing' : 'active',
+        phase: windowPhases.get(webContents.id) ?? 'active',
+        webContentsId: webContents.id,
         ...safeUrlFields(source, resourceRoot),
         ...(typeof lineNumber === 'number' ? { line: lineNumber } : {}),
         summary: safeConsoleSummary(message),
@@ -307,9 +430,14 @@ export function createSyncE2EGuard(config: SyncE2EGuardConfig): {
     attachWindowDiagnostics,
     beginShutdown: () => {
       shuttingDown = true
+      for (const webContentsId of Array.from(windowPhases.keys())) {
+        windowPhases.set(webContentsId, 'closing')
+      }
     },
     close: () => {
       if (closed) return
+      installedSession?.webRequest.onErrorOccurred(null)
+      installedSession = null
       closed = true
       fsyncSync(descriptor)
       closeSync(descriptor)

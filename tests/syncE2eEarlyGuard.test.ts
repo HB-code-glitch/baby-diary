@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
   mkdirSync,
@@ -141,6 +142,7 @@ describe('packaged sync E2E early main-process guard', () => {
             beforeRequestFilter = filter
             beforeRequest = handler
           },
+          onErrorOccurred: () => undefined,
         },
       }
       const guard = createSyncE2EGuard(config)
@@ -169,6 +171,133 @@ describe('packaged sync E2E early main-process guard', () => {
     }
   })
 
+  it('durably attributes an exact Firestore Listen failure to one closing window without storing its URL', () => {
+    const userData = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-early-guard-')))
+    const resourceRoot = path.resolve('release', 'win-unpacked', 'resources', 'app.asar')
+    try {
+      const config = readSyncE2EGuardConfig(guardEnvironment(userData), userData)
+      expect(config).not.toBeNull()
+      if (!config) return
+
+      type ErrorDetails = {
+        url: string
+        method: string
+        error: string
+        webContentsId: number
+      }
+      type ErrorListener = (details: ErrorDetails) => void
+      type ErrorFilter = { urls: string[] }
+      let errorFilter: ErrorFilter | null | undefined
+      let errorOccurred: ErrorListener | null | undefined
+      const errorRegistrations: Array<{
+        filterOrListener: ErrorFilter | ErrorListener | null
+        listener?: ErrorListener | null
+      }> = []
+      function onErrorOccurred(filter: ErrorFilter, listener: ErrorListener | null): void
+      function onErrorOccurred(listener: ErrorListener | null): void
+      function onErrorOccurred(
+        filterOrListener: ErrorFilter | ErrorListener | null,
+        listener?: ErrorListener | null,
+      ): void {
+        if (filterOrListener && typeof filterOrListener === 'object') {
+          errorFilter = filterOrListener
+          errorOccurred = listener
+        } else if (filterOrListener === null) {
+          errorOccurred = null
+        }
+        errorRegistrations.push({ filterOrListener, listener })
+      }
+      const session = {
+        webRequest: {
+          onBeforeRequest: () => undefined,
+          onErrorOccurred,
+        },
+      }
+      const windowA = new EventEmitter() as EventEmitter & { webContents: EventEmitter & { id: number } }
+      windowA.webContents = Object.assign(new EventEmitter(), { id: 101 })
+      const windowB = new EventEmitter() as EventEmitter & { webContents: EventEmitter & { id: number } }
+      windowB.webContents = Object.assign(new EventEmitter(), { id: 202 })
+      const guard = createSyncE2EGuard(config)
+      guard.installSessionGuard(session, resourceRoot)
+      guard.attachWindowDiagnostics(windowA, resourceRoot)
+      guard.attachWindowDiagnostics(windowB, resourceRoot)
+
+      expect(errorFilter).toEqual({ urls: ['<all_urls>'] })
+      expect(errorOccurred).toBeTypeOf('function')
+      const params = new URLSearchParams({
+        VER: '8',
+        database: 'projects/demo-baby-diary/databases/(default)',
+        RID: 'rpc',
+        SID: 'private-session-id==',
+        AID: '33',
+        CI: '1',
+        TYPE: 'xmlhttp',
+        zx: 'rryrrnxmbofc',
+        t: '1',
+      })
+      const listenUrl = `http://127.0.0.1:8080/google.firestore.v1.Firestore/Listen/channel?${params}`
+      const details = {
+        url: listenUrl,
+        method: 'GET',
+        error: 'net::ERR_NO_BUFFER_SPACE',
+      }
+
+      errorOccurred?.({ ...details, webContentsId: 999 })
+      errorOccurred?.({ ...details, webContentsId: 101 })
+      windowA.emit('close')
+      errorOccurred?.({ ...details, webContentsId: 101 })
+      errorOccurred?.({ ...details, webContentsId: 202 })
+      guard.close()
+
+      expect(errorRegistrations.at(-1)).toEqual({ filterOrListener: null, listener: undefined })
+      const records = readFileSync(config.diagnosticPath, 'utf8')
+        .trim()
+        .split(/\r?\n/)
+        .map(line => JSON.parse(line))
+      const networkRecords = records.filter(record => record.kind === 'network-error')
+      expect(networkRecords).toEqual([
+        expect.objectContaining({
+          phase: 'active',
+          webContentsId: 101,
+          method: 'GET',
+          error: 'net::ERR_NO_BUFFER_SPACE',
+          target: 'firestore-listen-channel',
+          urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        }),
+        expect.objectContaining({
+          phase: 'closing',
+          webContentsId: 101,
+          method: 'GET',
+          error: 'net::ERR_NO_BUFFER_SPACE',
+          target: 'firestore-listen-channel',
+          urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        }),
+        expect.objectContaining({
+          phase: 'active',
+          webContentsId: 202,
+          method: 'GET',
+          error: 'net::ERR_NO_BUFFER_SPACE',
+          target: 'firestore-listen-channel',
+          urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        }),
+      ])
+      const teardown = records.find(record => record.kind === 'teardown-start')
+      expect(teardown).toEqual(expect.objectContaining({
+        phase: 'closing',
+        source: 'window-close',
+        webContentsId: 101,
+      }))
+      expect(networkRecords[1].sequence).toBeGreaterThan(teardown.sequence)
+      expect(Date.parse(networkRecords[1].timestamp)).toBeGreaterThanOrEqual(Date.parse(teardown.timestamp))
+      expect(records.every((record, index) => record.sequence === index + 1)).toBe(true)
+      const durableText = readFileSync(config.diagnosticPath, 'utf8')
+      expect(durableText).not.toContain(listenUrl)
+      expect(durableText).not.toContain('private-session-id')
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
   it('attaches window diagnostics before load with redacted modern and legacy summaries', () => {
     const userData = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-early-guard-')))
     const resourceRoot = path.resolve('release', 'win-unpacked', 'resources', 'app.asar')
@@ -177,8 +306,8 @@ describe('packaged sync E2E early main-process guard', () => {
       expect(config).not.toBeNull()
       if (!config) return
       const guard = createSyncE2EGuard(config)
-      const webContents = new EventEmitter()
-      const window = new EventEmitter() as EventEmitter & { webContents: EventEmitter }
+      const webContents = Object.assign(new EventEmitter(), { id: 101 })
+      const window = new EventEmitter() as EventEmitter & { webContents: EventEmitter & { id: number } }
       window.webContents = webContents
       guard.attachWindowDiagnostics(window, resourceRoot)
       const packagedSource = `${pathToFileURL(path.join(resourceRoot, 'dist', 'index.html')).href}?token=secret`

@@ -26,6 +26,10 @@ const firebase = vi.hoisted(() => ({
   })),
 }))
 
+const ipcHarness = vi.hoisted(() => ({
+  getFirebaseEmulator: vi.fn(async () => null as import('../shared/types').FirebaseEmulatorBridge | null),
+}))
+
 vi.mock('../src/sync/firebase', () => firebase)
 
 vi.mock('../src/lib/ipc', () => ({
@@ -34,6 +38,7 @@ vi.mock('../src/lib/ipc', () => ({
     appendEvent: vi.fn(async () => 'ok'),
     getSettings: vi.fn(async () => ({ firebase: null, familyId: '' })),
     onEventAppended: vi.fn(() => () => undefined),
+    getFirebaseEmulator: ipcHarness.getFirebaseEmulator,
   },
 }))
 
@@ -46,13 +51,63 @@ const config = {
   appId: 'app',
 }
 
+const demoConfig = {
+  apiKey: 'demo-api-key',
+  authDomain: 'demo-baby-diary.firebaseapp.com',
+  projectId: 'demo-baby-diary',
+  storageBucket: 'demo-baby-diary.appspot.com',
+  messagingSenderId: '123456789',
+  appId: '1:123456789:web:sync-e2e',
+}
+
 describe('sync auth persistence forwarding', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
+    ipcHarness.getFirebaseEmulator.mockResolvedValue(null)
+    firebase.preflightFirebasePersistence.mockImplementation(async firebaseConfig => ({
+      version: 1,
+      configIdentity: JSON.stringify(firebaseConfig),
+      appName: 'baby-diary-test',
+    }))
     firebase.initFirebase.mockResolvedValue({ auth: firebase.auth, db: firebase.db })
     firebase.fbSignIn.mockResolvedValue({ user: { uid: 'login-user' } })
     firebase.fbSignUp.mockResolvedValue({ user: { uid: 'signup-user' } })
+  })
+
+  it('preflights and initializes the main-owned demo config for an isolated emulator renderer', async () => {
+    ipcHarness.getFirebaseEmulator.mockResolvedValue({
+      enabled: true,
+      projectId: 'demo-baby-diary',
+      firebaseConfig: demoConfig,
+      authHost: '127.0.0.1',
+      authPort: 9099,
+      firestoreHost: '127.0.0.1',
+      firestorePort: 8080,
+    })
+    const engine = await import('../src/sync/syncEngine')
+
+    await engine.configure(config, '')
+
+    expect(firebase.preflightFirebasePersistence).toHaveBeenCalledWith(demoConfig)
+    expect(firebase.initFirebase).toHaveBeenCalledWith(
+      demoConfig,
+      expect.stringMatching(/^sync-/),
+      expect.objectContaining({ configIdentity: JSON.stringify(demoConfig) }),
+    )
+  })
+
+  it('rejects a malformed isolated bridge before persistence preflight or Firebase initialization', async () => {
+    ipcHarness.getFirebaseEmulator.mockResolvedValue({
+      enabled: false,
+      reason: 'emulator endpoint rejected',
+    })
+    const engine = await import('../src/sync/syncEngine')
+
+    await expect(engine.configure(config, '')).rejects.toThrow('emulator endpoint rejected')
+
+    expect(firebase.preflightFirebasePersistence).not.toHaveBeenCalled()
+    expect(firebase.initFirebase).not.toHaveBeenCalled()
   })
 
   it.each([true, false])('forwards keepLoggedIn=%s through signIn', async keepLoggedIn => {

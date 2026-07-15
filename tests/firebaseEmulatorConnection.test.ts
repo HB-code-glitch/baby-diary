@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FirebaseEmulatorBridge } from '../shared/types'
 import { getDigestFirebasePersistenceIdentity } from '../shared/firebasePersistence'
+import { readFirebaseEmulatorBridge } from '../electron/firebaseEmulatorConfig'
 
 const FIREBASE_REGISTRY = Symbol.for('baby-diary.firebase.service-registry.v1')
 
@@ -57,35 +58,49 @@ vi.mock('firebase/auth', () => ({
 const bridge: FirebaseEmulatorBridge = {
   enabled: true,
   projectId: 'demo-baby-diary',
+  firebaseConfig: {
+    apiKey: 'demo-api-key',
+    authDomain: 'demo-baby-diary.firebaseapp.com',
+    projectId: 'demo-baby-diary',
+    storageBucket: 'demo-baby-diary.appspot.com',
+    messagingSenderId: '123456789',
+    appId: '1:123456789:web:sync-e2e',
+  },
   authHost: '127.0.0.1',
   authPort: 9099,
   firestoreHost: '127.0.0.1',
   firestorePort: 8080,
 }
 
-const demoConfig = {
-  apiKey: 'demo-api-key',
-  authDomain: 'demo-baby-diary.firebaseapp.com',
-  projectId: 'demo-baby-diary',
-  storageBucket: 'demo-baby-diary.appspot.com',
-  messagingSenderId: '123456789',
-  appId: '1:123456789:web:sync-e2e',
+const demoConfig = bridge.enabled ? bridge.firebaseConfig : null
+if (!demoConfig) throw new Error('test emulator bridge must be enabled')
+
+const productionConfig = {
+  apiKey: 'production-api-key',
+  authDomain: 'baby-diary-jaei-2026.firebaseapp.com',
+  projectId: 'baby-diary-jaei-2026',
+  storageBucket: 'baby-diary-jaei-2026.firebasestorage.app',
+  messagingSenderId: '406531612461',
+  appId: '1:406531612461:web:aa43b832f0661feaccfda4',
 }
 
+let claimFirebasePersistence: ReturnType<typeof vi.fn>
+
 function exposeBridge(value: FirebaseEmulatorBridge | null) {
+  claimFirebasePersistence = vi.fn(async config => {
+    const identity = getDigestFirebasePersistenceIdentity(config)
+    return {
+      version: 1,
+      configIdentity: identity.configIdentity,
+      appName: identity.appName,
+    }
+  })
   Object.defineProperty(window, 'babyDiary', {
     configurable: true,
     writable: true,
     value: {
       getFirebaseEmulator: vi.fn(async () => value),
-      claimFirebasePersistence: vi.fn(async config => {
-        const identity = getDigestFirebasePersistenceIdentity(config)
-        return {
-          version: 1,
-          configIdentity: identity.configIdentity,
-          appName: identity.appName,
-        }
-      }),
+      claimFirebasePersistence,
     },
   })
 }
@@ -111,11 +126,13 @@ describe('Firebase emulator connection', () => {
     exposeBridge(bridge)
   })
 
-  it('connects Auth and Firestore emulators without changing restored auth persistence', async () => {
+  it('uses the main-owned demo config for persistence preflight and emulator initialization', async () => {
     const { initFirebase } = await import('../src/sync/firebase')
 
-    await expect(initFirebase(demoConfig)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
+    await expect(initFirebase(productionConfig)).resolves.toEqual({ db: firebase.db, auth: firebase.auth })
 
+    expect(claimFirebasePersistence).toHaveBeenCalledWith(demoConfig)
+    expect(firebase.initializeApp).toHaveBeenCalledWith(demoConfig, expect.any(String))
     expect(firebase.initializeFirestore).toHaveBeenCalledWith(
       firebase.app,
       expect.objectContaining({ experimentalForceLongPolling: true }),
@@ -136,8 +153,10 @@ describe('Firebase emulator connection', () => {
     exposeBridge(null)
     const { initFirebase } = await import('../src/sync/firebase')
 
-    await initFirebase({ ...demoConfig, projectId: 'production-project' })
+    await initFirebase(productionConfig)
 
+    expect(claimFirebasePersistence).toHaveBeenCalledWith(productionConfig)
+    expect(firebase.initializeApp).toHaveBeenCalledWith(productionConfig, expect.any(String))
     expect(firebase.initializeFirestore).toHaveBeenCalledWith(
       firebase.app,
       expect.not.objectContaining({ experimentalForceLongPolling: true }),
@@ -152,16 +171,21 @@ describe('Firebase emulator connection', () => {
     const { initFirebase } = await import('../src/sync/firebase')
 
     await expect(initFirebase(demoConfig)).rejects.toThrow('emulator endpoint rejected')
+    expect(claimFirebasePersistence).not.toHaveBeenCalled()
     expect(firebase.initializeApp).not.toHaveBeenCalled()
   })
 
-  it('rejects a non-demo Firebase config before creating a Firebase app', async () => {
+  it('rejects a test profile missing emulator bindings before production Firebase initialization', async () => {
+    exposeBridge(readFirebaseEmulatorBridge({
+      BABYDIARY_TEST_USERDATA: 'isolated-test-profile',
+    }))
     const { initFirebase } = await import('../src/sync/firebase')
 
-    await expect(initFirebase({ ...demoConfig, projectId: 'baby-diary-jaei-2026' })).rejects.toThrow(
-      'demo-baby-diary',
-    )
+    await expect(initFirebase({ ...demoConfig, projectId: 'baby-diary-jaei-2026' }))
+      .rejects.toThrow(/requires the Firebase emulator/i)
     expect(firebase.initializeApp).not.toHaveBeenCalled()
+    expect(firebase.initializeFirestore).not.toHaveBeenCalled()
+    expect(firebase.getAuth).not.toHaveBeenCalled()
   })
 
   it('cleans up a partially initialized app when an emulator connector fails and can retry', async () => {

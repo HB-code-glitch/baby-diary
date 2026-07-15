@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppSettings, DiaryEvent } from '../shared/types'
-import { createEventSyncMetadata, deriveUploadReadyEvent } from '../shared/cloudEventPayload'
+import {
+  createEventSyncMetadata,
+  deriveUploadReadyEvent,
+  makeCloudEventDocId,
+} from '../shared/cloudEventPayload'
 import { getEventStorageKey } from '../shared/eventResolver'
+import * as upgradeContract from '../scripts/upgrade-data-contract.mjs'
 
 type FakeDoc = {
   id: string
@@ -44,9 +49,16 @@ vi.mock('../src/sync/firebase', () => ({
 
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
+    getFirebaseEmulator: vi.fn(async () => null),
     listEvents: vi.fn(async () => [...harness.localEvents]),
-    listEventMutations: vi.fn(async () => [...harness.localMutations]),
-    appendEvent: vi.fn(async (event: DiaryEvent) => {
+    listEventMutations: vi.fn(async (expectedFamilyId?: string) => {
+      if (expectedFamilyId !== undefined && expectedFamilyId !== harness.settings.familyId) {
+        throw new Error('EVENT_FAMILY_MISMATCH')
+      }
+      return [...harness.localMutations]
+    }),
+    appendEvent: vi.fn(async (event: DiaryEvent, expectedFamilyId?: string) => {
+      if (expectedFamilyId !== undefined && expectedFamilyId !== harness.settings.familyId) return 'error'
       harness.appended.push(event)
       // Model the real EventLog: fsync-durable, content-addressed dedup — a
       // physical append (including an auth-bound upload derivative) is durably
@@ -56,6 +68,11 @@ vi.mock('../src/lib/ipc', () => ({
       harness.localMutations.push(event)
       return 'ok'
     }),
+    confirmEventFamily: vi.fn(async (familyId: string) => (
+      familyId === harness.settings.familyId
+        ? { status: 'ok' as const, adoptionFamilyId: familyId, adoptedCount: harness.localMutations.length }
+        : { status: 'error' as const, adoptedCount: 0 }
+    )),
     getSettings: vi.fn(async () => structuredClone(harness.settings)),
     saveSettings: vi.fn(async (settings: AppSettings) => {
       const { applyManagedSettingsSave } = await import('../shared/babyInfoSettingsCommit')
@@ -250,8 +267,23 @@ function makeMutation(mutationId: string, overrides: Partial<DiaryEvent> = {}): 
 async function connectEngine() {
   const engine = await import('../src/sync/syncEngine')
   await engine.configure(config, 'family-1')
-  engine.start()
-  await vi.waitFor(() => expect(engine.getStatus().status).toBe('online'))
+  const online = new Promise<void>((resolve, reject) => {
+    let unsubscribe: (() => void) | undefined
+    let settled = false
+    const settle = (result: 'online' | 'error', detail: string) => {
+      if (settled) return
+      settled = true
+      queueMicrotask(() => unsubscribe?.())
+      if (result === 'online') resolve()
+      else reject(new Error(`sync connection failed: ${detail}`))
+    }
+    unsubscribe = engine.subscribeStatus(state => {
+      if (state.status === 'online') settle('online', state.detail)
+      else if (state.status === 'error') settle('error', state.detail)
+    })
+  })
+  await engine.start()
+  await online
   expect(harness.snapshot).toBeTypeOf('function')
   return engine
 }
@@ -276,14 +308,92 @@ describe('sync mutation collision integration', () => {
     harness.blockWrites = false
   })
 
+  it('does not admit exact raw or auth-bound v0.3.8 fixture events into the pending queue', async () => {
+    const raw = (upgradeContract.buildV038Fixture().events as DiaryEvent[])
+      .find(item => item.id === 'legacy-temp')!
+    const derivative = deriveUploadReadyEvent(raw, harness.auth.currentUser.uid)
+    const engine = await import('../src/sync/syncEngine')
+
+    engine.enqueue(raw, 'family-1')
+    engine.enqueue(derivative, 'family-1')
+
+    expect(JSON.parse(localStorage.getItem('babydiary.pendingUploads') ?? '[]')).toEqual([])
+  })
+
+  it('drops exact v0.3.8 fixture events from a persisted pending cache while retaining real work', async () => {
+    const raw = (upgradeContract.buildV038Fixture().events as DiaryEvent[])
+      .find(item => item.id === 'legacy-temp')!
+    const derivative = deriveUploadReadyEvent(raw, harness.auth.currentUser.uid)
+    const legitimate = makeMutation('99999999-9999-4999-8999-999999999999', { id: 'legitimate-pending' })
+    localStorage.setItem('babydiary.pendingUploads', JSON.stringify([
+      { event: raw, familyId: 'family-1', attempts: 0, nextRetry: 0 },
+      { event: derivative, familyId: 'family-1', attempts: 0, nextRetry: 0 },
+      { event: legitimate, familyId: 'family-1', attempts: 0, nextRetry: 0 },
+    ]))
+
+    const engine = await import('../src/sync/syncEngine')
+    await engine.configure(config, 'family-1')
+
+    expect(engine.getStatus().pendingCount).toBe(1)
+    expect(JSON.parse(localStorage.getItem('babydiary.pendingUploads') ?? '[]'))
+      .toEqual([{ event: legitimate, familyId: 'family-1', attempts: 0, nextRetry: 0 }])
+    engine.stop()
+  })
+
+  it('does not upload exact local v0.3.8 fixture mutations during reconcile', async () => {
+    harness.localMutations = upgradeContract.buildV038Fixture().events as DiaryEvent[]
+
+    const engine = await connectEngine()
+
+    expect(harness.remote.size).toBe(0)
+    expect(harness.appended).toEqual([])
+    engine.stop()
+  })
+
+  it('does not download exact raw or auth-bound v0.3.8 fixture mutations during reconcile', async () => {
+    const raw = (upgradeContract.buildV038Fixture().events as DiaryEvent[])
+      .find(item => item.id === 'legacy-formula' && item.rev === 2)!
+    const derivative = deriveUploadReadyEvent(raw, harness.auth.currentUser.uid)
+    harness.remote.set(makeCloudEventDocId(raw), raw)
+    harness.remote.set(makeCloudEventDocId(derivative), derivative)
+
+    const engine = await connectEngine()
+
+    expect(harness.appended).toEqual([])
+    engine.stop()
+  })
+
+  it('ignores exact raw and auth-bound v0.3.8 fixture snapshot changes while accepting real events', async () => {
+    const raw = (upgradeContract.buildV038Fixture().events as DiaryEvent[])
+      .find(item => item.id === 'legacy-temp')!
+    const derivative = deriveUploadReadyEvent(raw, harness.auth.currentUser.uid)
+    const legitimate = makeMutation('88888888-8888-4888-8888-888888888888', {
+      id: 'legitimate-snapshot',
+    })
+    const engine = await connectEngine()
+
+    harness.snapshot!({
+      docChanges: () => [raw, derivative, legitimate].map(event => ({
+        type: 'added',
+        doc: { id: makeCloudEventDocId(event), data: () => ({ event }) },
+      })),
+    })
+    await vi.waitFor(() => {
+      expect(harness.appended.some(item => item.id === legitimate.id)).toBe(true)
+    })
+
+    expect(harness.appended).toEqual([legitimate])
+    engine.stop()
+  })
+
   it('persists both same-revision mutations in pending across a module restart', async () => {
     const first = makeMutation('11111111-1111-4111-8111-111111111111')
     const second = makeMutation('22222222-2222-4222-8222-222222222222', { data: { note: 'second' } })
     let engine = await import('../src/sync/syncEngine')
 
-    engine.enqueue(first)
-    engine.enqueue(second)
-    engine.enqueue(first)
+    engine.enqueue(first, 'family-1')
+    engine.enqueue(second, 'family-1')
+    engine.enqueue(first, 'family-1')
 
     let pending = JSON.parse(localStorage.getItem('babydiary.pendingUploads') ?? '[]')
     expect(pending.map((item: { event: DiaryEvent }) => item.event.mutationId)).toEqual([

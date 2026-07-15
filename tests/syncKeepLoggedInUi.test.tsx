@@ -30,6 +30,11 @@ const appStore = vi.hoisted(() => ({
   saveSettings: vi.fn(async () => undefined),
 }))
 
+const settingsIpc = vi.hoisted(() => ({
+  getSettings: vi.fn(),
+  mergeSettings: vi.fn(),
+}))
+
 vi.mock('../src/sync/useSync', () => ({
   useSyncStatus: () => sync.status,
   restartSync: sync.restartSync,
@@ -43,6 +48,10 @@ vi.mock('../src/sync/useSync', () => ({
 
 vi.mock('../src/store/useAppStore', () => ({
   useAppStore: () => appStore,
+}))
+
+vi.mock('../src/lib/ipc', () => ({
+  ipc: settingsIpc,
 }))
 
 import { SyncSettingsSlot } from '../src/components/SyncSettingsSlot'
@@ -72,6 +81,17 @@ describe('keep logged in UI', () => {
       familyId: '',
       language: 'ko',
     }
+    settingsIpc.getSettings.mockImplementation(async () => structuredClone(appStore.settings))
+    settingsIpc.mergeSettings.mockImplementation(async (partial: Partial<AppSettings>) => {
+      appStore.settings = {
+        ...appStore.settings,
+        ...partial,
+        profile: partial.profile
+          ? { ...appStore.settings.profile, ...partial.profile }
+          : appStore.settings.profile,
+      }
+      return structuredClone(appStore.settings)
+    })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -143,6 +163,70 @@ describe('keep logged in UI', () => {
 
     expect(sync.signIn).toHaveBeenCalledWith('parent@example.test', 'secret1', false)
     expect(sync.signUp).not.toHaveBeenCalled()
+  })
+
+  it('persists only the authenticated uid over settings that changed while sign-in was in flight', async () => {
+    const initialFirebase = {
+      apiKey: 'initial-key',
+      authDomain: 'initial.example.test',
+      projectId: 'initial-project',
+      storageBucket: 'initial-bucket',
+      messagingSenderId: 'initial-sender',
+      appId: 'initial-app',
+    }
+    const authoritativeFirebase = {
+      apiKey: 'authoritative-key',
+      authDomain: 'authoritative.example.test',
+      projectId: 'authoritative-project',
+      storageBucket: 'authoritative-bucket',
+      messagingSenderId: 'authoritative-sender',
+      appId: 'authoritative-app',
+    }
+    appStore.settings = {
+      baby: { name: 'Initial baby', birthdate: '2026-01-01' },
+      profile: { uid: 'local-placeholder', name: 'Initial parent', role: 'mom' },
+      firebase: initialFirebase,
+      familyId: 'family-A',
+      language: 'ko',
+      theme: 'light',
+    }
+    sync.signIn.mockImplementationOnce(async () => {
+      // onAuthStateChanged can publish the authoritative family/settings before
+      // this sign-in continuation persists the Firebase uid.
+      appStore.settings = {
+        baby: { name: 'Authoritative baby', birthdate: '2026-07-04', gender: 'girl' },
+        profile: { uid: 'local-placeholder', name: 'Latest parent', role: 'dad' },
+        firebase: authoritativeFirebase,
+        familyId: 'family-B',
+        language: 'ja',
+        theme: 'dark',
+      }
+      return { uid: 'firebase-user-B' }
+    })
+
+    await act(async () => root.render(<SyncSettingsSlot />))
+    const email = container.querySelector<HTMLInputElement>('input[type="email"]')!
+    const password = container.querySelector<HTMLInputElement>('input[type="password"]')!
+
+    await act(async () => {
+      enter(email, 'parent@example.test')
+      enter(password, 'secret1')
+      container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    expect(settingsIpc.getSettings).toHaveBeenCalledOnce()
+    expect(settingsIpc.mergeSettings).toHaveBeenCalledWith({
+      profile: { uid: 'firebase-user-B', name: 'Latest parent', role: 'dad' },
+    })
+    expect(appStore.saveSettings).not.toHaveBeenCalled()
+    expect(appStore.settings).toEqual({
+      baby: { name: 'Authoritative baby', birthdate: '2026-07-04', gender: 'girl' },
+      profile: { uid: 'firebase-user-B', name: 'Latest parent', role: 'dad' },
+      firebase: authoritativeFirebase,
+      familyId: 'family-B',
+      language: 'ja',
+      theme: 'dark',
+    })
   })
 
   it('keeps the default checked choice when switching to sign-up', async () => {

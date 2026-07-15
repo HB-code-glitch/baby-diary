@@ -4,7 +4,9 @@ import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 interface WorkflowStep {
+  id?: string
   name?: string
+  shell?: string
   uses?: string
   run?: unknown
   if?: string
@@ -107,6 +109,20 @@ const RELEASE_CRITICAL_JOBS = [
   'release-win',
   'release-mac',
   'publish-release',
+] as const
+const PERSONAL_MAC_SMOKE_SPECS = [
+  {
+    jobName: 'personal-smoke-mac-arm64',
+    runner: 'macos-latest',
+    hostArch: 'arm64',
+    evidenceArtifact: 'personal-unsigned-mac-arm64-evidence',
+  },
+  {
+    jobName: 'personal-smoke-mac-intel',
+    runner: 'macos-15-intel',
+    hostArch: 'x86_64',
+    evidenceArtifact: 'personal-unsigned-mac-intel-evidence',
+  },
 ] as const
 
 const PACKAGED_E2E_SPECS: PackagedE2ESpec[] = [
@@ -607,8 +623,8 @@ function immutableReleaseOrchestrationErrors(candidate: ReleaseWorkflow): string
 }
 
 describe('release workflow CI gates', () => {
-  it('binds delivery and release contracts to v0.3.10', () => {
-    expect(packageJson.version).toBe('0.3.10')
+  it('binds delivery and release contracts to v0.3.11', () => {
+    expect(packageJson.version).toBe('0.3.11')
   })
 
   it('is valid YAML 1.2 and rejects duplicate mapping keys at nested levels', () => {
@@ -643,6 +659,7 @@ describe('release workflow CI gates', () => {
       'build-mac',
       'e2e-mac',
       'e2e-win',
+      ...PERSONAL_MAC_SMOKE_SPECS.map(spec => spec.jobName),
       'release-context',
       'release-preflight',
       'baseline-v038',
@@ -668,7 +685,13 @@ describe('release workflow CI gates', () => {
       .filter(([, job]) => job.if === RELEASE_TAG_CONDITION)
       .map(([jobName]) => jobName)
 
-    expect(new Set(unconditionalJobs)).toEqual(new Set(['security-check', 'build-mac', 'e2e-mac', 'e2e-win']))
+    expect(new Set(unconditionalJobs)).toEqual(new Set([
+      'security-check',
+      'build-mac',
+      'e2e-mac',
+      'e2e-win',
+      ...PERSONAL_MAC_SMOKE_SPECS.map(spec => spec.jobName),
+    ]))
     expect(new Set(tagOnlyJobs)).toEqual(new Set(['release-preflight', 'release-win', 'release-mac', 'publish-release']))
   })
 
@@ -703,6 +726,99 @@ describe('release workflow CI gates', () => {
       normalizedRun(step)?.includes('scripts/windows-installed-release-smoke.ps1')
     ))
     expect(normalizedRun(signedSmoke ?? {})).toContain('-SignaturePolicy RequireTrusted')
+  })
+
+  it('uploads the exact unsigned Windows Setup only after its installed smoke succeeds', () => {
+    const job = workflow.jobs['e2e-win']
+    const smokeIndex = job.steps.findIndex(step => (
+      normalizedRun(step)?.includes('scripts/windows-installed-release-smoke.ps1')
+    ))
+    const uploads = job.steps.filter(step => (
+      step.uses === 'actions/upload-artifact@v4'
+      && step.with?.name === 'personal-unsigned-windows'
+    ))
+
+    const bindings = job.steps.filter(step => step.id === 'personal-unsigned-windows-candidate')
+    expect(bindings).toHaveLength(1)
+    const binding = bindings[0]
+    const bindingCommand = normalizedRun(binding) ?? ''
+    expect(binding.shell).toBe('powershell')
+    expect(bindingCommand).toContain('Get-Content -Raw package.json | ConvertFrom-Json')
+    expect(bindingCommand).toContain("Get-ChildItem -LiteralPath release -Filter 'Baby Diary Setup *.exe' -File")
+    expect(bindingCommand).toContain('$candidates.Count -ne 1')
+    expect(bindingCommand).toContain('Resolve-Path -LiteralPath $expected')
+    expect(bindingCommand).toContain('setup_path=$expected')
+    expect(binding.if).toBeUndefined()
+    expect(binding['continue-on-error']).toBeUndefined()
+
+    expect(uploads).toHaveLength(1)
+    const upload = uploads[0]
+    expect(job.steps.indexOf(binding)).toBeGreaterThan(smokeIndex)
+    expect(job.steps.indexOf(upload)).toBeGreaterThan(job.steps.indexOf(binding))
+    expect(upload.with?.path).toBe('${{ steps.personal-unsigned-windows-candidate.outputs.setup_path }}')
+    expect(upload.with?.['if-no-files-found']).toBe('error')
+    expect(upload.if).toBeUndefined()
+    expect(upload['continue-on-error']).toBeUndefined()
+  })
+
+  it.each(PERSONAL_MAC_SMOKE_SPECS)(
+    '$jobName installs and exercises the exact unsigned universal DMG on $hostArch',
+    spec => {
+      const job = workflow.jobs[spec.jobName]
+      expect(job).toBeDefined()
+      expect(job['runs-on']).toBe(spec.runner)
+      expect(new Set(normalizedNeeds(job))).toEqual(new Set(['security-check', 'build-mac']))
+      expect(job.if).toBeUndefined()
+      expect(job['continue-on-error']).toBeUndefined()
+
+      const checkout = job.steps.filter(step => step.uses === 'actions/checkout@v4')
+      const node = job.steps.filter(step => step.uses === 'actions/setup-node@v4')
+      const java = job.steps.filter(step => step.uses === 'actions/setup-java@v4')
+      const downloads = job.steps.filter(step => step.uses === 'actions/download-artifact@v4')
+      expect(checkout).toHaveLength(1)
+      expect(node).toHaveLength(1)
+      expect(node[0].with?.['node-version']).toBe(REQUIRED_NODE_VERSION)
+      expect(java).toHaveLength(1)
+      expect(java[0].with).toEqual({ distribution: 'temurin', 'java-version': 21 })
+      expect(downloads).toHaveLength(1)
+      expect(downloads[0].with).toMatchObject({ name: 'baby-diary-mac', path: 'release' })
+
+      const smokeSteps = job.steps.filter(step => (
+        normalizedRun(step)?.includes('scripts/mac-installed-release-smoke.sh')
+      ))
+      expect(smokeSteps).toHaveLength(1)
+      const smoke = smokeSteps[0]
+      const command = normalizedRun(smoke) ?? ''
+      expect(command).toContain('set -euo pipefail')
+      expect(command).toContain('Baby Diary-${version}-universal.dmg')
+      expect(command).toContain(`"$dmg" ${spec.hostArch} AllowUnsigned`)
+      expect(command).toContain('shasum -a 256 "$dmg"')
+      expect(command).toContain('smoke=pass')
+      expect(smoke.if).toBeUndefined()
+      expect(smoke['continue-on-error']).toBeUndefined()
+      expect(smoke['timeout-minutes']).toBe(20)
+
+      const evidenceUploads = job.steps.filter(step => (
+        step.uses === 'actions/upload-artifact@v4'
+        && step.with?.name === spec.evidenceArtifact
+      ))
+      expect(evidenceUploads).toHaveLength(1)
+      expect(evidenceUploads[0].if).toBe('always()')
+      expect(evidenceUploads[0].with?.path).toContain('.artifacts/personal-unsigned-mac-smoke/evidence.txt')
+      expect(evidenceUploads[0].with?.path).toContain('e2e-result.json')
+      expect(evidenceUploads[0].with?.path).toContain('screenshots/')
+      expect(evidenceUploads[0].with?.['if-no-files-found']).toBe('error')
+      expect(evidenceUploads[0].with?.['include-hidden-files']).toBe(true)
+    },
+  )
+
+  it('keeps both signed Mac release smoke jobs on the default strict policy', () => {
+    for (const jobName of ['smoke-mac-arm64', 'smoke-mac-intel']) {
+      const command = workflow.jobs[jobName].steps
+        .map(step => normalizedRun(step))
+        .find(run => run?.includes('scripts/mac-installed-release-smoke.sh')) ?? ''
+      expect(command).not.toContain('AllowUnsigned')
+    }
   })
 
   it('serializes same-ref workflow reruns without cancelling an in-flight draft upload', () => {

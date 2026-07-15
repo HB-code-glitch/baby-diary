@@ -37,6 +37,20 @@ describe('packaged sync E2E selector contract', () => {
     expect(firstWindow).toBeGreaterThan(diagnostics)
   })
 
+  it('uses a dedicated cold-launch budget and forwards a bounded Playwright CDP timeout', () => {
+    const runner = source('scripts/sync-e2e.mjs')
+    expect(runner).toContain('const PACKAGED_LAUNCH_TIMEOUT_MS = 60_000')
+    expect(runner).toContain('const CDP_CONNECT_ATTEMPT_TIMEOUT_MS = 2_000')
+
+    const launchStart = runner.indexOf('async function launchDevice')
+    const launchEnd = runner.indexOf('device.app = app', launchStart)
+    const launch = runner.slice(launchStart, launchEnd)
+    expect(launch).toContain('timeoutMs: PACKAGED_LAUNCH_TIMEOUT_MS')
+    expect(launch).toContain(
+      'connectOverCDP: (endpoint, options) => playwright.chromium.connectOverCDP(endpoint, options)',
+    )
+  })
+
   it('uses exact semantic event polling for every normal cross-device transfer', () => {
     const runner = source('scripts/sync-e2e.mjs')
     expect(runner).toContain('async function waitForSemanticEvent')
@@ -76,7 +90,9 @@ describe('packaged sync E2E selector contract', () => {
     expect(runner).toContain("BABYDIARY_SYNC_E2E_EARLY_GUARD: '1'")
     expect(runner).toContain('BABYDIARY_SYNC_E2E_GUARD_TOKEN: guardToken')
     expect(runner).toContain('BABYDIARY_SYNC_E2E_DIAGNOSTICS: diagnosticPath')
-    expect(runner).toContain('diagnosticFiles.push({ name, path: diagnosticPath })')
+    expect(runner).toContain('const diagnosticFile = { name, path: diagnosticPath, listenShutdownCandidates: [] }')
+    expect(runner).toContain('diagnosticFiles.push(diagnosticFile)')
+    expect(runner).toContain('listenShutdownCandidates: diagnosticFile.listenShutdownCandidates')
     const finalize = runner.indexOf('export async function finalizeRun')
     const collect = runner.indexOf('collectPersistentGuardDiagnostics(', finalize)
     const clean = runner.indexOf('assertCleanDiagnostics(', finalize)
@@ -88,7 +104,7 @@ describe('packaged sync E2E selector contract', () => {
 
   it('exposes the lossless physical mutation list through the sandboxed bridge', () => {
     expect(source('electron/main.ts')).toContain("ipcMain.handle('events:listMutations'")
-    expect(source('electron/preload.ts')).toContain("ipcRenderer.invoke('events:listMutations')")
+    expect(source('electron/preload.ts')).toContain("ipcRenderer.invoke('events:listMutations', expectedFamilyId)")
     expect(source('src/lib/ipc.ts')).toContain('listEventMutations')
     expect(source('scripts/sync-e2e.mjs')).toContain('window.babyDiary.listEventMutations()')
   })

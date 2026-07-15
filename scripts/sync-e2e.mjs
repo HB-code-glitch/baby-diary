@@ -11,7 +11,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import {
   closeSync,
@@ -45,9 +45,20 @@ const APP_PACKAGE_NAME = APP_PACKAGE.name
 const APP_VERSION = APP_PACKAGE.version
 const APP_PACKAGE_MAIN = APP_PACKAGE.main
 const E2E_TIMEOUT_MS = 30_000
+const PACKAGED_LAUNCH_TIMEOUT_MS = 60_000
+const CDP_CONNECT_ATTEMPT_TIMEOUT_MS = 2_000
+const PACKAGED_LAUNCH_DIAGNOSTIC_CHARS = 2_048
 const CLOSE_TIMEOUT_MS = 10_000
+// A packaged macOS quit must cross Electron's native application lifecycle
+// and finish the durable before-quit backup. Apple Silicon hosted runners can
+// exceed the generic process-only budget even though that shutdown is still
+// making progress, so keep a bounded platform-specific grace window.
+const MAC_CLOSE_TIMEOUT_MS = 30_000
 const CLOSE_CLEANUP_TIMEOUT_MS = 5_000
-const WINDOWS_PROCESS_POLL_MS = 75
+const OWNED_PROCESS_POLL_MS = 75
+const LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS = 30_000
+const LISTEN_SHUTDOWN_ERROR = 'net::ERR_NO_BUFFER_SPACE'
+const LISTEN_SHUTDOWN_TARGET = 'firestore-listen-channel'
 const CONTENT_ID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
 const BABY_INFO_JOURNAL_FILE = 'baby-info-journal-v1.jsonl'
 const DEFAULT_FILE_SYSTEM = { existsSync, lstatSync, realpathSync }
@@ -152,7 +163,19 @@ export function packagedResourcePath(executablePath, platform) {
 }
 
 function comparablePath(value, platform) {
-  const normalized = path.normalize(path.resolve(value))
+  const pathApi = platform === 'win32'
+    ? path.win32
+    : platform === 'darwin'
+      ? path.posix
+      : path
+  let normalized = pathApi.normalize(pathApi.resolve(value))
+  if (platform === 'darwin') {
+    if (normalized === '/var' || normalized.startsWith('/var/')) {
+      normalized = `/private${normalized}`
+    } else if (normalized === '/tmp' || normalized.startsWith('/tmp/')) {
+      normalized = `/private${normalized}`
+    }
+  }
   return platform === 'win32' ? normalized.toLowerCase() : normalized
 }
 
@@ -697,8 +720,7 @@ export function isAllowedNetworkUrl(rawUrl, { resourcePath } = {}) {
   return false
 }
 
-export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, method) {
-  if (method !== 'GET' || errorText !== 'net::ERR_ABORTED') return false
+function isExactFirestoreWebChannelUrl(rawUrl, channel) {
   let url
   try {
     url = new URL(rawUrl)
@@ -712,7 +734,7 @@ export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, m
     || url.protocol !== 'http:'
     || url.hostname !== '127.0.0.1'
     || url.port !== String(FIRESTORE_PORT)
-    || url.pathname !== '/google.firestore.v1.Firestore/Write/channel'
+    || url.pathname !== `/google.firestore.v1.Firestore/${channel}/channel`
   ) return false
 
   const expectedKeys = ['VER', 'database', 'RID', 'SID', 'AID', 'CI', 'TYPE', 'zx', 't']
@@ -740,6 +762,22 @@ export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, m
     && url.searchParams.get('TYPE') === 'xmlhttp'
     && /^[a-z0-9]{1,64}$/.test(zx)
     && canonicalPositiveInteger(attempt)
+}
+
+export function isExpectedFirestoreWriteChannelCancellation(rawUrl, errorText, method) {
+  return method === 'GET'
+    && errorText === 'net::ERR_ABORTED'
+    && isExactFirestoreWebChannelUrl(rawUrl, 'Write')
+}
+
+export function isExpectedFirestoreListenShutdownResourceExhaustion(
+  rawUrl,
+  errorText,
+  method,
+) {
+  return (method === 'GET' || method === 'POST')
+    && errorText === LISTEN_SHUTDOWN_ERROR
+    && isExactFirestoreWebChannelUrl(rawUrl, 'Listen')
 }
 
 export async function installNetworkGuards(context, {
@@ -780,6 +818,7 @@ export function attachRendererDiagnostics({
   blockedRequests,
   isClosing,
   resourcePath,
+  listenShutdownCandidates,
 }) {
   const attached = new WeakSet()
   const recordUnexpected = rawUrl => {
@@ -790,9 +829,32 @@ export function attachRendererDiagnostics({
   const attach = page => {
     if (!page || attached.has(page)) return
     attached.add(page)
+    const pendingListenRequests = []
+    const pendingListenConsoles = []
     page.on('console', message => {
       if (message.type() !== 'error') return
-      rendererErrors.push(`${name}: console ${message.text()}`)
+      const text = message.text()
+      const isListenShutdownConsole = text === `Failed to load resource: ${LISTEN_SHUTDOWN_ERROR}`
+      if (isListenShutdownConsole && Array.isArray(listenShutdownCandidates)) {
+        const observedAtMs = Date.now()
+        const candidate = pendingListenRequests.shift()
+        if (candidate) {
+          candidate.consoleObservedAtMs = observedAtMs
+        } else {
+          const consoleFirstCandidate = {
+            target: LISTEN_SHUTDOWN_TARGET,
+            method: null,
+            error: LISTEN_SHUTDOWN_ERROR,
+            urlSha256: null,
+            requestObservedAtMs: null,
+            consoleObservedAtMs: observedAtMs,
+          }
+          listenShutdownCandidates.push(consoleFirstCandidate)
+          pendingListenConsoles.push(consoleFirstCandidate)
+        }
+        return
+      }
+      rendererErrors.push(`${name}: console ${text}`)
     })
     page.on('pageerror', error => {
       rendererErrors.push(`${name}: pageerror ${error?.message ?? String(error)}`)
@@ -805,7 +867,34 @@ export function attachRendererDiagnostics({
         && isAllowedNetworkUrl(url, { resourcePath })
         && /ERR_ABORTED|ERR_CANCELED|ERR_CONNECTION_CLOSED/i.test(errorText)
       const expectedWriteChannelCancellation = isExpectedFirestoreWriteChannelCancellation(url, errorText, method)
-      if (!expectedCloseAbort && !expectedWriteChannelCancellation) {
+      const expectedListenShutdownResourceExhaustion = isExpectedFirestoreListenShutdownResourceExhaustion(
+        url,
+        errorText,
+        method,
+      )
+      if (expectedListenShutdownResourceExhaustion && Array.isArray(listenShutdownCandidates)) {
+        const requestObservedAtMs = Date.now()
+        const candidate = pendingListenConsoles.shift()
+        if (candidate) {
+          candidate.method = method
+          candidate.urlSha256 = createHash('sha256').update(url).digest('hex')
+          candidate.requestObservedAtMs = requestObservedAtMs
+        } else {
+          const requestFirstCandidate = {
+            target: LISTEN_SHUTDOWN_TARGET,
+            method,
+            error: errorText,
+            urlSha256: createHash('sha256').update(url).digest('hex'),
+            requestObservedAtMs,
+            consoleObservedAtMs: null,
+          }
+          listenShutdownCandidates.push(requestFirstCandidate)
+          pendingListenRequests.push(requestFirstCandidate)
+        }
+      }
+      if (!expectedCloseAbort
+        && !expectedWriteChannelCancellation
+        && !(expectedListenShutdownResourceExhaustion && Array.isArray(listenShutdownCandidates))) {
         rendererErrors.push(`${name}: requestfailed ${url} ${errorText}`)
       }
     })
@@ -860,6 +949,16 @@ export function collectPersistentGuardDiagnostics(
     if (summary.length > 240) summary = `${summary.slice(0, 239).trimEnd()}…`
     return summary || 'unavailable'
   }
+  const parseCanonicalTimestamp = (value, label) => {
+    invariant(typeof value === 'string', `${label}: timestamp is missing`)
+    const timestampMs = Date.parse(value)
+    invariant(
+      Number.isFinite(timestampMs) && new Date(timestampMs).toISOString() === value,
+      `${label}: timestamp is invalid`,
+    )
+    return timestampMs
+  }
+  const listenFingerprint = ({ method, error, urlSha256 }) => `${method}|${error}|${urlSha256}`
   for (const diagnosticFile of diagnosticFiles) {
     invariant(
       diagnosticFile
@@ -879,10 +978,41 @@ export function collectPersistentGuardDiagnostics(
       `${diagnosticFile.name}: persistent guard diagnostic path traversed a symbolic link`,
     )
 
+    const listenShutdownCandidates = diagnosticFile.listenShutdownCandidates ?? []
+    invariant(
+      Array.isArray(listenShutdownCandidates),
+      `${diagnosticFile.name}: pending Listen shutdown candidates are invalid`,
+    )
+    const candidateFingerprints = new Set()
+    const candidates = listenShutdownCandidates.map((candidate, index) => {
+      const label = `${diagnosticFile.name}: pending Listen shutdown candidate ${index + 1}`
+      invariant(candidate && typeof candidate === 'object' && !Array.isArray(candidate), `${label} is invalid`)
+      invariant(candidate.target === LISTEN_SHUTDOWN_TARGET, `${label} target is invalid`)
+      invariant(candidate.method === 'GET' || candidate.method === 'POST', `${label} method is invalid`)
+      invariant(candidate.error === LISTEN_SHUTDOWN_ERROR, `${label} error is invalid`)
+      invariant(/^[0-9a-f]{64}$/.test(candidate.urlSha256), `${label} URL digest is invalid`)
+      invariant(
+        Number.isSafeInteger(candidate.requestObservedAtMs) && candidate.requestObservedAtMs > 0,
+        `${label} request observation is missing`,
+      )
+      invariant(
+        Number.isSafeInteger(candidate.consoleObservedAtMs) && candidate.consoleObservedAtMs > 0,
+        `${label} console observation is missing`,
+      )
+      const fingerprint = listenFingerprint(candidate)
+      invariant(!candidateFingerprints.has(fingerprint), `${label} duplicates another candidate`)
+      candidateFingerprints.add(fingerprint)
+      return { ...candidate, fingerprint, index }
+    })
+
     const lines = readFileSync(diagnosticFile.path, 'utf8')
       .split(/\r?\n/)
       .filter(line => line.length > 0)
     let readyCount = 0
+    let previousTimestampMs = -Infinity
+    const teardownsByWebContents = new Map()
+    const networkErrors = []
+    const closingListenConsoles = []
     for (let index = 0; index < lines.length; index += 1) {
       let record
       try {
@@ -891,8 +1021,37 @@ export function collectPersistentGuardDiagnostics(
         throw new Error(`${diagnosticFile.name}: malformed persistent guard diagnostic at line ${index + 1}`)
       }
       invariant(record && typeof record === 'object' && !Array.isArray(record), `${diagnosticFile.name}: invalid persistent guard diagnostic at line ${index + 1}`)
+      const lineLabel = `${diagnosticFile.name}: persistent guard diagnostic at line ${index + 1}`
+      invariant(record.sequence === index + 1, `${lineLabel} sequence is not canonical`)
+      const timestampMs = parseCanonicalTimestamp(record.timestamp, lineLabel)
+      invariant(timestampMs >= previousTimestampMs, `${lineLabel} timestamp moved backwards`)
+      previousTimestampMs = timestampMs
       if (record.kind === 'guard-ready') {
         readyCount += 1
+        continue
+      }
+      if (record.kind === 'teardown-start' || record.kind === 'network-error') {
+        const label = `${diagnosticFile.name}: ${record.kind} at line ${index + 1}`
+        invariant(
+          Number.isSafeInteger(record.webContentsId) && record.webContentsId > 0,
+          `${label} webContents id is invalid`,
+        )
+        if (record.kind === 'teardown-start') {
+          invariant(record.phase === 'closing', `${label} phase is invalid`)
+          invariant(record.source === 'window-close', `${label} source is invalid`)
+          invariant(!teardownsByWebContents.has(record.webContentsId), `${label} is duplicated`)
+          teardownsByWebContents.set(record.webContentsId, { ...record, timestampMs })
+          continue
+        }
+        invariant(record.phase === 'active' || record.phase === 'closing', `${label} phase is invalid`)
+        invariant(typeof record.method === 'string' && /^[A-Z]{1,16}$/.test(record.method), `${label} method is invalid`)
+        invariant(
+          record.error === 'unknown' || (typeof record.error === 'string' && /^net::ERR_[A-Z0-9_]{1,48}$/.test(record.error)),
+          `${label} error is invalid`,
+        )
+        invariant(record.target === LISTEN_SHUTDOWN_TARGET || record.target === 'other', `${label} target is invalid`)
+        invariant(/^[0-9a-f]{64}$/.test(record.urlSha256), `${label} URL digest is invalid`)
+        networkErrors.push({ ...record, timestampMs, line: index + 1 })
         continue
       }
       if (record.kind === 'network-blocked' || record.kind === 'navigation-blocked') {
@@ -908,12 +1067,23 @@ export function collectPersistentGuardDiagnostics(
         continue
       }
       if (record.kind === 'console-error') {
-        if (record.phase === 'closing') continue
         const protocol = typeof record.protocol === 'string' ? record.protocol : 'unknown'
         const destination = typeof record.destination === 'string' ? record.destination : 'unknown'
         const port = typeof record.port === 'number' ? ` port=${record.port}` : ''
         const line = typeof record.line === 'number' ? ` line=${record.line}` : ''
         const summary = safeConsoleSummary(record.summary)
+        if (record.phase === 'closing' && summary === `Failed to load resource: ${LISTEN_SHUTDOWN_ERROR}`) {
+          invariant(
+            Number.isSafeInteger(record.webContentsId) && record.webContentsId > 0,
+            `${diagnosticFile.name}: closing Listen console at line ${index + 1} has invalid webContents id`,
+          )
+          closingListenConsoles.push({
+            ...record,
+            timestampMs,
+            diagnosticLine: index + 1,
+          })
+          continue
+        }
         rendererErrors.push(`${diagnosticFile.name}: early console-error ${protocol} ${destination}${port}${line} summary=${summary}`)
         continue
       }
@@ -924,6 +1094,54 @@ export function collectPersistentGuardDiagnostics(
       throw new Error(`${diagnosticFile.name}: unknown persistent guard diagnostic kind at line ${index + 1}`)
     }
     invariant(readyCount === 1, `${diagnosticFile.name}: expected exactly one guard-ready diagnostic, got ${readyCount}`)
+
+    const matchedCandidates = new Set()
+    const matchedClosingConsoles = new Set()
+    const durableFingerprints = new Set()
+    for (const networkError of networkErrors) {
+      const label = `${diagnosticFile.name}: network-error at line ${networkError.line}`
+      invariant(networkError.phase === 'closing', `${label} was observed before teardown`)
+      invariant(networkError.target === LISTEN_SHUTDOWN_TARGET, `${label} target was not an exact Listen channel`)
+      invariant(networkError.method === 'GET' || networkError.method === 'POST', `${label} method is not eligible`)
+      invariant(networkError.error === LISTEN_SHUTDOWN_ERROR, `${label} error is not eligible`)
+      const teardown = teardownsByWebContents.get(networkError.webContentsId)
+      invariant(teardown, `${label} has no same-window teardown evidence`)
+      invariant(teardown.sequence < networkError.sequence, `${label} did not follow teardown sequence`)
+      invariant(teardown.timestampMs <= networkError.timestampMs, `${label} predates teardown timestamp`)
+
+      const fingerprint = listenFingerprint(networkError)
+      invariant(!durableFingerprints.has(fingerprint), `${label} duplicates durable Listen evidence`)
+      durableFingerprints.add(fingerprint)
+      const candidate = candidates.find(item => item.fingerprint === fingerprint)
+      invariant(candidate, `${label} has no matching runner candidate`)
+      invariant(!matchedCandidates.has(candidate.index), `${label} reuses a runner candidate`)
+      const earliestObservation = Math.min(candidate.requestObservedAtMs, candidate.consoleObservedAtMs)
+      const latestObservation = Math.max(candidate.requestObservedAtMs, candidate.consoleObservedAtMs)
+      invariant(
+        networkError.timestampMs >= earliestObservation - LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS
+          && networkError.timestampMs <= latestObservation + LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS,
+        `${label} is outside the runner correlation window`,
+      )
+      const closingConsoleIndex = closingListenConsoles.findIndex((consoleRecord, index) => (
+        !matchedClosingConsoles.has(index)
+        && consoleRecord.webContentsId === networkError.webContentsId
+        && teardown.sequence < consoleRecord.sequence
+        && teardown.timestampMs <= consoleRecord.timestampMs
+        && Math.abs(consoleRecord.timestampMs - candidate.consoleObservedAtMs)
+          <= LISTEN_SHUTDOWN_CORRELATION_WINDOW_MS
+      ))
+      invariant(closingConsoleIndex >= 0, `${label} has no matching durable closing console`)
+      matchedClosingConsoles.add(closingConsoleIndex)
+      matchedCandidates.add(candidate.index)
+    }
+    invariant(
+      matchedCandidates.size === candidates.length,
+      `${diagnosticFile.name}: pending Listen shutdown evidence was not settled one-to-one`,
+    )
+    invariant(
+      matchedClosingConsoles.size === closingListenConsoles.length,
+      `${diagnosticFile.name}: durable closing Listen consoles were not settled one-to-one`,
+    )
   }
 }
 
@@ -935,6 +1153,29 @@ function aggregateErrors(primaryError, additionalErrors, message) {
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function sanitizePackagedLaunchDiagnosticText(value, maxChars = PACKAGED_LAUNCH_DIAGNOSTIC_CHARS) {
+  return String(value ?? '')
+    .replace(/\b(?:https?|wss?|file):\/\/[^\s"'<>]+/gi, '[redacted-url]')
+    .replace(/\b(?:127\.0\.0\.1|localhost):\d{1,5}\b/gi, '[redacted-endpoint]')
+    .replace(/[A-Za-z]:[\\/][^\r\n]*/g, '[redacted-path]')
+    .replace(/\\\\[^\r\n]*/g, '[redacted-path]')
+    .replace(/\/(?:Applications|Users|home|private|tmp|var)\/[^\r\n]*/g, '[redacted-path]')
+    .replace(/\b(?:token|secret|password|api[-_]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, '[redacted-secret]')
+    .replace(/\b[A-Za-z0-9+/_=-]{32,}\b/g, '[redacted-secret]')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .trim()
+    .slice(0, Math.max(0, maxChars))
+}
+
+function packagedLaunchDiagnosticSummary(child, stderr) {
+  const exited = childProcessExited(child)
+  const pid = Number.isInteger(child?.pid) ? child.pid : 'unavailable'
+  const exitCode = child?.exitCode ?? (exited ? 'none' : 'running')
+  const signal = child?.signalCode ?? 'none'
+  const safeStderr = sanitizePackagedLaunchDiagnosticText(stderr)
+  return `pid=${pid}, exitCode=${exitCode}, signal=${signal}${safeStderr ? `, stderr=${JSON.stringify(safeStderr)}` : ''}`
 }
 
 async function reserveLoopbackPort({ createServerImpl = createServer } = {}) {
@@ -969,16 +1210,29 @@ export async function launchCdpElectronApplication({
   executablePath,
   cwd,
   env,
-  timeoutMs = E2E_TIMEOUT_MS,
+  timeoutMs = PACKAGED_LAUNCH_TIMEOUT_MS,
   platform = process.platform,
   allocatePort = reserveLoopbackPort,
   spawnImpl = spawn,
+  onSpawn,
   connectOverCDP,
   sleep = delay,
   cleanupProcess = killOwnedProcessTree,
+  extraArgs = [],
 }) {
   invariant(typeof connectOverCDP === 'function', 'CDP connector is required')
+  invariant(onSpawn === undefined || typeof onSpawn === 'function', 'Packaged Electron spawn observer must be a function')
   invariant(platform === 'win32' || platform === 'darwin', `Unsupported CDP launch platform: ${platform}`)
+  invariant(
+    Array.isArray(extraArgs) && extraArgs.every(argument => typeof argument === 'string'),
+    'Packaged Electron extra arguments must be strings',
+  )
+  for (const argument of extraArgs) {
+    invariant(
+      !/^--(?:inspect(?:[-=]|$)|remote-debugging-(?:address|port)(?:=|$)|user-data-dir(?:=|$))/i.test(argument),
+      `Reserved packaged Electron argument cannot be overridden: ${argument}`,
+    )
+  }
   const port = await allocatePort()
   invariant(Number.isInteger(port) && port > 0 && port <= 65_535, `Invalid CDP port: ${port}`)
 
@@ -993,6 +1247,7 @@ export async function launchCdpElectronApplication({
   const child = spawnImpl(executablePath, [
     '--remote-debugging-address=127.0.0.1',
     `--remote-debugging-port=${port}`,
+    ...extraArgs,
   ], {
     cwd,
     env: childEnv,
@@ -1014,19 +1269,32 @@ export async function launchCdpElectronApplication({
   let browser
   let lastConnectError
   try {
+    if (onSpawn) {
+      const remaining = deadline - Date.now()
+      invariant(remaining > 0, 'Packaged Electron spawn observer exceeded the launch deadline')
+      await withTimeout(
+        Promise.resolve().then(() => onSpawn(child, { endpoint, port })),
+        remaining,
+        'Packaged Electron spawn observer',
+      )
+    }
     while (!browser) {
-      if (spawnError) throw new Error(`Packaged Electron process could not start: ${spawnError.message ?? String(spawnError)}`)
+      if (spawnError) {
+        const reason = sanitizePackagedLaunchDiagnosticText(spawnError.message ?? String(spawnError), 512)
+        throw new Error(`Packaged Electron process could not start: ${reason || 'unknown spawn error'} (${packagedLaunchDiagnosticSummary(child, stderr)})`)
+      }
       if (childProcessExited(child)) {
-        const details = stderr.trim()
-        throw new Error(`Packaged Electron process exited before CDP was ready${details ? `: ${details}` : ''}`)
+        throw new Error(`Packaged Electron process exited before CDP was ready (${packagedLaunchDiagnosticSummary(child, stderr)})`)
       }
       const remaining = deadline - Date.now()
       if (remaining <= 0) {
-        throw new Error(`Packaged Electron CDP endpoint was not ready: ${lastConnectError?.message ?? 'timeout'}`)
+        const reason = sanitizePackagedLaunchDiagnosticText(lastConnectError?.message ?? 'timeout', 512)
+        throw new Error(`Packaged Electron CDP endpoint was not ready: ${reason || 'timeout'} (${packagedLaunchDiagnosticSummary(child, stderr)})`)
       }
       try {
+        const connectTimeoutMs = Math.min(CDP_CONNECT_ATTEMPT_TIMEOUT_MS, remaining)
         browser = await withTimeout(
-          Promise.resolve().then(() => connectOverCDP(endpoint)),
+          Promise.resolve().then(() => connectOverCDP(endpoint, { timeout: connectTimeoutMs })),
           remaining,
           'Packaged Electron CDP connection',
         )
@@ -1034,11 +1302,7 @@ export async function launchCdpElectronApplication({
         lastConnectError = error
         const afterAttempt = deadline - Date.now()
         if (afterAttempt <= 0) continue
-        await withTimeout(
-          Promise.resolve().then(() => sleep(Math.min(50, afterAttempt))),
-          afterAttempt,
-          'Packaged Electron CDP retry',
-        )
+        await sleep(Math.min(50, afterAttempt))
       }
     }
 
@@ -1062,18 +1326,24 @@ export async function launchCdpElectronApplication({
         const pages = context.pages()
         invariant(pages.length > 0 || childProcessExited(child),
           'Packaged Electron CDP context had no window to close gracefully')
+        // On macOS the validated E2E signal maps to app.quit(). Electron emits
+        // before-quit before it starts closing windows, so the guard can mark
+        // teardown and the app can finish its durable backup before renderer
+        // destruction. Closing CDP pages first bypasses that ordering and can
+        // race Electron's sandboxed preload teardown.
+        if (platform === 'darwin') {
+          if (!childProcessExited(child)) {
+            invariant(typeof child.kill === 'function', 'Packaged macOS Electron process cannot be signaled')
+            const signaled = child.kill('SIGTERM')
+            invariant(signaled || childProcessExited(child), 'Packaged macOS Electron process rejected graceful quit')
+          }
+          context.off?.('page', forwardWindow)
+          return
+        }
         // Close auxiliary windows first and the main window last. On Windows,
         // window-all-closed triggers the app's durable backup + quit path.
         for (const page of [...pages].reverse()) {
           await page.close({ runBeforeUnload: true })
-        }
-        // Closing the last window exits the Windows app. macOS intentionally
-        // keeps an app alive with no windows, so the validated isolated E2E
-        // guard converts SIGTERM into app.quit() and the durable backup hook.
-        if (platform === 'darwin' && !childProcessExited(child)) {
-          invariant(typeof child.kill === 'function', 'Packaged macOS Electron process cannot be signaled')
-          const signaled = child.kill('SIGTERM')
-          invariant(signaled || childProcessExited(child), 'Packaged macOS Electron process rejected graceful quit')
         }
         context.off?.('page', forwardWindow)
       })()
@@ -1115,11 +1385,100 @@ export async function withTimeout(promise, timeoutMs, label) {
   }
 }
 
+export async function waitForClipboardText({
+  readText,
+  expectedText,
+  timeoutMs,
+  pollIntervalMs,
+  now = Date.now,
+  sleep = delay,
+}) {
+  invariant(typeof readText === 'function', 'Clipboard reader is required')
+  invariant(typeof expectedText === 'string' && expectedText.length > 0,
+    'Expected clipboard marker is required')
+  invariant(Number.isFinite(timeoutMs) && timeoutMs > 0,
+    'Clipboard propagation timeout must be positive')
+  invariant(Number.isFinite(pollIntervalMs) && pollIntervalMs > 0,
+    'Clipboard propagation poll interval must be positive')
+  invariant(typeof now === 'function', 'Clipboard propagation clock is required')
+  invariant(typeof sleep === 'function', 'Clipboard propagation sleep is required')
+
+  const deadline = now() + timeoutMs
+  const timeoutError = () => new Error(`Clipboard marker was not observed within ${timeoutMs}ms`)
+  const runWithinBudget = async (operation, label) => {
+    const remaining = deadline - now()
+    if (remaining <= 0) throw timeoutError()
+    try {
+      return await withTimeout(Promise.resolve().then(operation), remaining, label)
+    } catch (error) {
+      if (now() >= deadline || /timed out after \d+ms$/i.test(error?.message ?? '')) {
+        throw timeoutError()
+      }
+      throw error
+    }
+  }
+
+  while (true) {
+    const observedText = await runWithinBudget(readText, 'Clipboard marker read')
+    if (observedText === expectedText) return observedText
+
+    const remaining = deadline - now()
+    if (remaining <= 0) throw timeoutError()
+    await runWithinBudget(
+      () => sleep(Math.min(pollIntervalMs, remaining)),
+      'Clipboard propagation poll',
+    )
+  }
+}
+
 function parseProcessTable(output) {
   return String(output).split(/\r?\n/).flatMap(line => {
     const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
     return match ? [{ pid: Number(match[1]), parentPid: Number(match[2]) }] : []
   })
+}
+
+const DARWIN_PROCESS_START_PATTERN = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/
+
+function normalizeDarwinProcessRows(rows) {
+  invariant(Array.isArray(rows), 'macOS process snapshot must be an array')
+  const seen = new Set()
+  return rows.map(row => {
+    invariant(row && typeof row === 'object', 'macOS process snapshot row is invalid')
+    const pid = Number(row.pid)
+    const parentPid = Number(row.parentPid)
+    const startedAt = String(row.startedAt ?? '').trim().replace(/\s+/g, ' ')
+    invariant(Number.isInteger(pid) && pid >= 0, 'macOS process snapshot pid is invalid')
+    invariant(Number.isInteger(parentPid) && parentPid >= 0, 'macOS process snapshot parent pid is invalid')
+    invariant(DARWIN_PROCESS_START_PATTERN.test(startedAt),
+      `macOS process snapshot start identity is invalid for pid ${pid}`)
+    invariant(!seen.has(pid), `macOS process snapshot contains duplicate pid ${pid}`)
+    seen.add(pid)
+    return { pid, parentPid, startedAt }
+  })
+}
+
+function parseDarwinProcessTable(output) {
+  const rows = []
+  for (const line of String(output).split(/\r?\n/)) {
+    const normalized = line.trim().replace(/\s+/g, ' ')
+    if (!normalized) continue
+    const match = /^(\d+) (\d+) (.+)$/.exec(normalized)
+    invariant(match, 'macOS process snapshot returned an unrecognized row')
+    rows.push({ pid: Number(match[1]), parentPid: Number(match[2]), startedAt: match[3] })
+  }
+  return normalizeDarwinProcessRows(rows)
+}
+
+export function queryDarwinProcessTable({ spawnSyncImpl = spawnSync } = {}) {
+  const result = spawnSyncImpl('/bin/ps', ['-ax', '-o', 'pid=,ppid=,lstart='], {
+    encoding: 'utf8',
+    env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+    maxBuffer: 8 * 1024 * 1024,
+  })
+  invariant(!result.error, `macOS process snapshot query failed: ${result.error?.message ?? 'spawn failed'}`)
+  invariant(result.status === 0, 'macOS process snapshot query failed')
+  return parseDarwinProcessTable(result.stdout)
 }
 
 export function ownedProcessTreePids(rootPid, rows) {
@@ -1216,6 +1575,81 @@ function lingeringWindowsOwnedProcesses(snapshot, rows) {
     invariant(!actual || /^\d+$/.test(actual.startedAt),
       `Windows owned process start identity became unavailable for pid ${expected.pid}`)
     return actual && sameWindowsProcessIdentity(expected, actual)
+  })
+}
+
+function captureDarwinOwnedProcessSnapshot(rootPid, rows) {
+  const normalized = normalizeDarwinProcessRows(rows)
+  const byPid = new Map(normalized.map(row => [row.pid, row]))
+  invariant(byPid.has(rootPid), `macOS process snapshot did not contain owned root pid ${rootPid}`)
+  return ownedProcessTreePids(rootPid, normalized).map(pid => ({ ...byPid.get(pid) }))
+}
+
+function sameDarwinProcessIdentity(expected, actual) {
+  return expected.pid === actual.pid && expected.startedAt === actual.startedAt
+}
+
+function lingeringDarwinOwnedProcesses(snapshot, rows) {
+  const currentByPid = new Map(normalizeDarwinProcessRows(rows).map(row => [row.pid, row]))
+  return snapshot.filter(expected => {
+    const actual = currentByPid.get(expected.pid)
+    return actual && sameDarwinProcessIdentity(expected, actual)
+  })
+}
+
+async function waitForDarwinOwnedProcessExit(snapshot, {
+  queryProcessTable,
+  timeoutMs,
+  pollIntervalMs,
+  sleep,
+  label,
+}) {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    let rows
+    try {
+      rows = queryProcessTable()
+    } catch (error) {
+      throw new Error(`macOS owned process snapshot query failed during ${label}: ${error?.message ?? String(error)}`)
+    }
+    const lingering = lingeringDarwinOwnedProcesses(snapshot, rows)
+    if (lingering.length === 0) return
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      throw new Error(`${label} timed out with owned macOS process identities still live: ${lingering.map(row => row.pid).join(', ')}`)
+    }
+    await withTimeout(
+      Promise.resolve().then(() => sleep(Math.min(pollIntervalMs, remaining))),
+      remaining,
+      `${label} process poll`,
+    )
+  }
+}
+
+async function killAndConfirmDarwinOwnedSnapshot(snapshot, {
+  queryProcessTable,
+  killTree,
+  timeoutMs,
+  pollIntervalMs,
+  sleep,
+  label,
+}) {
+  for (const expected of snapshot) {
+    const lingering = lingeringDarwinOwnedProcesses(snapshot, queryProcessTable())
+    if (!lingering.some(current => sameDarwinProcessIdentity(expected, current))) continue
+    try {
+      await killTree(expected.pid)
+    } catch (error) {
+      const afterFailure = lingeringDarwinOwnedProcesses(snapshot, queryProcessTable())
+      if (afterFailure.some(current => sameDarwinProcessIdentity(expected, current))) throw error
+    }
+  }
+  await waitForDarwinOwnedProcessExit(snapshot, {
+    queryProcessTable,
+    timeoutMs,
+    pollIntervalMs,
+    sleep,
+    label: `${label} forced cleanup`,
   })
 }
 
@@ -1329,16 +1763,26 @@ function remainingCloseBudget(deadline, label) {
   return remaining
 }
 
+export function createPlaywrightElectronCloseAdapter(app) {
+  return {
+    process: () => app.process(),
+    close: () => app.evaluate(({ app: electronApp }) => {
+      setImmediate(() => electronApp.quit())
+    }),
+  }
+}
+
 export async function closeDevice(
   device,
   {
-    timeoutMs = CLOSE_TIMEOUT_MS,
+    platform = process.platform,
+    timeoutMs = platform === 'darwin' ? MAC_CLOSE_TIMEOUT_MS : CLOSE_TIMEOUT_MS,
     cleanupTimeoutMs = CLOSE_CLEANUP_TIMEOUT_MS,
     killTree = killOwnedProcessTree,
-    platform = process.platform,
     queryWindowsProcessTable: queryProcessTable = queryWindowsProcessTable,
+    queryDarwinProcessTable: queryDarwinTable = queryDarwinProcessTable,
     processPollSleep = delay,
-    processPollIntervalMs = WINDOWS_PROCESS_POLL_MS,
+    processPollIntervalMs = OWNED_PROCESS_POLL_MS,
   } = {},
 ) {
   if (!device?.app) return
@@ -1356,11 +1800,16 @@ export async function closeDevice(
   const label = `${device.name ?? 'device'} close`
   const deadline = Date.now() + timeoutMs
   let windowsSnapshot
+  let darwinSnapshot
   try {
     if (platform === 'win32') {
       invariant(Number.isInteger(pid) && pid > 1 && pid !== process.pid,
         `${device.name ?? 'device'} did not expose a safe owned pid`)
       windowsSnapshot = captureWindowsOwnedProcessSnapshot(pid, queryProcessTable())
+    } else if (platform === 'darwin') {
+      invariant(Number.isInteger(pid) && pid > 1 && pid !== process.pid,
+        `${device.name ?? 'device'} did not expose a safe owned pid`)
+      darwinSnapshot = captureDarwinOwnedProcessSnapshot(pid, queryDarwinTable())
     }
     await withTimeout(
       Promise.resolve().then(() => app.close()),
@@ -1380,6 +1829,14 @@ export async function closeDevice(
         sleep: processPollSleep,
         label,
       })
+    } else if (darwinSnapshot) {
+      await waitForDarwinOwnedProcessExit(darwinSnapshot, {
+        queryProcessTable: queryDarwinTable,
+        timeoutMs: remainingCloseBudget(deadline, label),
+        pollIntervalMs: processPollIntervalMs,
+        sleep: processPollSleep,
+        label,
+      })
     }
   } catch (error) {
     closeErrors.push(error)
@@ -1388,6 +1845,19 @@ export async function closeDevice(
       try {
         await killAndConfirmWindowsOwnedSnapshot(windowsSnapshot, {
           queryProcessTable,
+          killTree,
+          timeoutMs: cleanupTimeoutMs,
+          pollIntervalMs: processPollIntervalMs,
+          sleep: processPollSleep,
+          label,
+        })
+      } catch (killError) {
+        closeErrors.push(killError)
+      }
+    } else if (darwinSnapshot) {
+      try {
+        await killAndConfirmDarwinOwnedSnapshot(darwinSnapshot, {
+          queryProcessTable: queryDarwinTable,
           killTree,
           timeoutMs: cleanupTimeoutMs,
           pollIntervalMs: processPollIntervalMs,
@@ -1498,7 +1968,8 @@ async function launchDevice({
     )
   }
   const diagnosticPath = path.join(selectedUserData, `sync-e2e-diagnostics-${guardToken}.jsonl`)
-  diagnosticFiles.push({ name, path: diagnosticPath })
+  const diagnosticFile = { name, path: diagnosticPath, listenShutdownCandidates: [] }
+  diagnosticFiles.push(diagnosticFile)
   const device = { app: null, page: null, userData: selectedUserData, name, closing: false }
   try {
     const launchEnvironment = {
@@ -1518,8 +1989,9 @@ async function launchDevice({
       executablePath,
       cwd: ROOT,
       env: launchEnvironment,
+      timeoutMs: PACKAGED_LAUNCH_TIMEOUT_MS,
       platform: process.platform,
-      connectOverCDP: endpoint => playwright.chromium.connectOverCDP(endpoint),
+      connectOverCDP: (endpoint, options) => playwright.chromium.connectOverCDP(endpoint, options),
     })
     device.app = app
     const attestation = await readPackagedArtifactAttestation({ executablePath, resourcePath })
@@ -1539,6 +2011,7 @@ async function launchDevice({
       blockedRequests,
       isClosing: () => device.closing,
       resourcePath,
+      listenShutdownCandidates: diagnosticFile.listenShutdownCandidates,
     })
     const page = await app.firstWindow({ timeout: E2E_TIMEOUT_MS })
     device.page = page

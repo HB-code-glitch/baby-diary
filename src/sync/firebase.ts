@@ -569,14 +569,26 @@ async function acquireLeaseService(
  * is fetched only when this function is first called (after first paint).
  */
 export async function initFirebase(
-  config: FirebaseConfig | null,
+  requestedConfig: FirebaseConfig | null,
   ownerToken = 'default',
   preflightClaim?: FirebasePersistenceClaim,
 ): Promise<FirebaseService | null> {
-  if (!config) return null
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(ownerToken)) {
     throw new Error('invalid Firebase owner token')
   }
+
+  // The main process creates this bridge once at startup after validating an
+  // isolated OS-temp profile and exact loopback endpoints. Resolve it before
+  // persistence preflight so a malformed test request cannot claim or create
+  // a production Firebase namespace.
+  const emulator = await ipc.getFirebaseEmulator()
+  if (emulator && !emulator.enabled) {
+    throw new Error(`Firebase emulator configuration rejected: ${emulator.reason}`)
+  }
+  const config = emulator?.enabled
+    ? { ...emulator.firebaseConfig }
+    : requestedConfig
+  if (!config) return null
 
   const configIdentity = canonicalFirebaseConfig(config)
   const requestVersion = ++_localRequestVersion
@@ -587,21 +599,9 @@ export async function initFirebase(
     return { db: current.db, auth: current.auth }
   }
 
-  // Validate the renderer-provided emulator profile before releasing a working lease.
-  const [emulator, rawPersistenceClaim] = await Promise.all([
-    ipc.getFirebaseEmulator(),
-    preflightClaim ?? preflightFirebasePersistence(config),
-  ])
+  const rawPersistenceClaim = preflightClaim ?? await preflightFirebasePersistence(config)
   const persistenceClaim = parseFirebasePersistenceClaim(rawPersistenceClaim, config)
   if (requestVersion !== _localRequestVersion && _pendingConfigIdentity !== configIdentity) return null
-  if (emulator && !emulator.enabled) {
-    throw new Error(`Firebase emulator configuration rejected: ${emulator.reason}`)
-  }
-  if (emulator?.enabled && config.projectId !== emulator.projectId) {
-    throw new Error(
-      `Firebase emulator requires project ${emulator.projectId}; received ${config.projectId}`,
-    )
-  }
 
   const registry = getServiceRegistry()
   const prepared = await prepareRegistryLease(

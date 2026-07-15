@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$SetupPath,
+  [Parameter(Mandatory = $true)]
+  [string]$ReferenceExecutablePath,
   [ValidateSet('AllowUnsigned', 'RequireTrusted')]
   [string]$SignaturePolicy = 'AllowUnsigned',
   [string]$ExpectedPublisher = $env:WIN_EXPECTED_PUBLISHER,
@@ -78,6 +80,26 @@ function Invoke-NodeInline {
   }
 }
 
+function New-IsolatedSmokePaths {
+  param([string]$RunId)
+  $source = @'
+import { mkdtempSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+
+const [runId] = process.argv.slice(1)
+if (!/^[0-9a-f]{32}$/i.test(runId)) throw new Error('run id must be a 32-character hexadecimal nonce')
+const tempRoot = await realpath(tmpdir())
+const runRoot = await realpath(mkdtempSync(path.join(tempRoot, `baby-diary-installed-smoke-${runId}-`)))
+const referenceProfileRoot = await realpath(mkdtempSync(path.join(runRoot, 'reference-profile-')))
+const installedProfileRoot = await realpath(mkdtempSync(path.join(runRoot, 'installed-profile-')))
+process.stdout.write(JSON.stringify({ tempRoot, runRoot, referenceProfileRoot, installedProfileRoot }))
+'@
+  $json = Invoke-NodeInline -Label 'installed smoke temp path allocation' -Source $source -Arguments @($RunId)
+  return ($json | ConvertFrom-Json)
+}
+
 function Get-UninstallerPath {
   param([string]$UninstallString)
   if ($UninstallString -match '^"([^"]+\.exe)"') {
@@ -87,6 +109,27 @@ function Get-UninstallerPath {
     return $Matches[1]
   }
   throw 'Could not parse the Baby Diary UninstallString'
+}
+
+function Get-ExactInstalledApplicationProcesses {
+  param([string]$ExecutablePath)
+
+  $expectedPath = [IO.Path]::GetFullPath($ExecutablePath)
+  $matches = foreach ($candidate in @(Get-Process -Name 'Baby Diary' -ErrorAction SilentlyContinue)) {
+    $candidatePath = $candidate.Path
+    if ([string]::IsNullOrWhiteSpace($candidatePath)) {
+      throw "Could not attest Baby Diary process path for pid $($candidate.Id)"
+    }
+    if ([string]::Equals(
+        [IO.Path]::GetFullPath($candidatePath),
+        $expectedPath,
+        [StringComparison]::OrdinalIgnoreCase
+      )) {
+      $candidate
+    }
+  }
+
+  return @($matches)
 }
 
 function New-FalsePositivePrePublicationEvidence {
@@ -196,24 +239,34 @@ function Invoke-PackagedRecoveryProbe {
   param(
     [string]$ExecutablePath,
     [string]$ProfileRoot,
-    [string]$RuntimeEvidencePath
+    [string]$RuntimeEvidencePath,
+    [string]$ProcessLogPath
   )
   $source = @'
 import { execFile } from 'node:child_process'
-import { writeFile } from 'node:fs/promises'
+import { open, writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { _electron as electron } from 'playwright'
+import { chromium } from 'playwright'
+import { closeDevice, launchCdpElectronApplication } from './scripts/sync-e2e.mjs'
 
-const [executablePath, profileRoot, runtimeEvidencePath] = process.argv.slice(1)
+const [executablePath, profileRoot, runtimeEvidencePath, processLogPath] = process.argv.slice(1)
 const execFileAsync = promisify(execFile)
+const MAX_CAPTURED_STDERR_CHARS = 2_048
+const MAX_PROCESS_LOG_BYTES = 4_096
+const MAX_RECORDED_WINDOW_TITLES = 8
+const MAX_RECORDED_TITLE_CHARS = 160
+const MAX_RECORDED_ERROR_CHARS = 512
 const observedTopLevelWindowTitles = new Set()
+const observedRecoveryDialogTitles = new Set()
 const observedBrowserWindows = new Set()
-const recoveryDialogTitle = /^Baby Diary (?:recovery required|startup failed)$/i
+const recoveryDialogTitle = /^(?:Baby Diary (?:recovery required|startup failed)|Error|\uC624\uB958|\u30A8\u30E9\u30FC)$/i
 let application
 let launchedProcess
 let observeWindowTitles = false
 let titleMonitor
+let processStderr = ''
+let titleHelperError = null
 let rendererReady = false
 let publicState = null
 let browserWindowCount = 0
@@ -222,6 +275,57 @@ let processExitObserved = false
 let processExitCode = null
 let processExitSignal = null
 let probeFailure
+const probeDevice = {
+  app: null,
+  name: 'installed packaged recovery probe',
+  closing: false,
+}
+
+function sanitizeDiagnosticText(value, maxChars) {
+  let sanitized = String(value ?? '')
+  for (const sensitivePath of [executablePath, profileRoot, process.cwd()]) {
+    if (sensitivePath) sanitized = sanitized.split(String(sensitivePath)).join('[redacted-path]')
+  }
+  sanitized = sanitized
+    .replace(/\b(?:https?|wss?|file):\/\/[^\s\x22'<>]+/gi, '[redacted-url]')
+    .replace(/\b(?:127\.0\.0\.1|localhost):\d{1,5}\b/gi, '[redacted-endpoint]')
+    .replace(/[A-Za-z]:[\\/][^\r\n]*/g, '[redacted-path]')
+    .replace(/\\\\[^\r\n]*/g, '[redacted-path]')
+    .replace(/\b(?:token|secret|password|api[-_]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, '[redacted-secret]')
+    .replace(/\b[A-Za-z0-9+/_=-]{32,}\b/g, '[redacted-secret]')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .trim()
+  return sanitized.slice(0, Math.max(0, maxChars))
+}
+
+function recordTopLevelWindowTitle(value) {
+  const title = sanitizeDiagnosticText(value, MAX_RECORDED_TITLE_CHARS)
+  if (!title) return
+  if (recoveryDialogTitle.test(title)
+    && observedRecoveryDialogTitles.size < MAX_RECORDED_WINDOW_TITLES) {
+    observedRecoveryDialogTitles.add(title)
+  }
+  if (observedTopLevelWindowTitles.size < MAX_RECORDED_WINDOW_TITLES) {
+    observedTopLevelWindowTitles.add(title)
+  }
+}
+
+async function readSanitizedProcessLog() {
+  let handle
+  try {
+    handle = await open(processLogPath, 'r')
+    const buffer = Buffer.alloc(MAX_PROCESS_LOG_BYTES)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    return sanitizeDiagnosticText(
+      buffer.subarray(0, bytesRead).toString('utf8'),
+      MAX_PROCESS_LOG_BYTES,
+    ) || null
+  } catch {
+    return null
+  } finally {
+    await handle?.close().catch(() => {})
+  }
+}
 
 async function readMainProcessWindowTitle(pid) {
   try {
@@ -238,55 +342,81 @@ async function readMainProcessWindowTitle(pid) {
       windowsHide: true,
     })
     return stdout.trim()
-  } catch {
+  } catch (error) {
+    titleHelperError ??= sanitizeDiagnosticText(
+      error instanceof Error ? error.message : String(error),
+      MAX_RECORDED_ERROR_CHARS,
+    )
     return ''
   }
 }
 
-try {
-  application = await electron.launch({
-    executablePath,
-    env: {
-      ...process.env,
-      BABYDIARY_TEST_USERDATA: profileRoot,
-      NODE_ENV: 'production',
-    },
-    args: [
-      '--proxy-server=127.0.0.1:9',
-      '--proxy-bypass-list=<-loopback>',
-      '--disable-background-networking',
-    ],
-  })
-  launchedProcess = application.process()
+function startProcessObservation(child) {
+  launchedProcess = child
+  if (!Number.isInteger(launchedProcess.pid) || launchedProcess.pid <= 1) {
+    throw new Error('spawn observer did not receive a safe child pid')
+  }
   launchedProcess.once('exit', (code, signal) => {
     processExitObserved = true
     processExitCode = code
     processExitSignal = signal
   })
-  application.on('window', window => observedBrowserWindows.add(window))
-  for (const window of application.windows()) observedBrowserWindows.add(window)
+  launchedProcess.stderr?.on?.('data', chunk => {
+    if (processStderr.length < MAX_CAPTURED_STDERR_CHARS) {
+      processStderr += String(chunk).slice(0, MAX_CAPTURED_STDERR_CHARS - processStderr.length)
+    }
+  })
   observeWindowTitles = true
   titleMonitor = (async () => {
     while (observeWindowTitles && !processExitObserved) {
-      const title = await readMainProcessWindowTitle(launchedProcess.pid)
-      if (title) observedTopLevelWindowTitles.add(title)
-      await delay(100)
+      recordTopLevelWindowTitle(await readMainProcessWindowTitle(launchedProcess.pid))
+      await delay(500)
     }
   })()
+}
+
+try {
+  application = await launchCdpElectronApplication({
+    executablePath,
+    cwd: process.cwd(),
+    platform: 'win32',
+    timeoutMs: 60_000,
+    onSpawn: child => {
+      startProcessObservation(child)
+    },
+    connectOverCDP: (endpoint, options) => chromium.connectOverCDP(endpoint, options),
+    env: {
+      ...process.env,
+      BABYDIARY_TEST_USERDATA: profileRoot,
+      BABYDIARY_FIREBASE_EMULATOR: '1',
+      BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID: 'demo-baby-diary',
+      FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099',
+      FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+      NODE_ENV: 'production',
+    },
+    extraArgs: [
+      '--enable-logging=file',
+      `--log-file=${processLogPath}`,
+      '--proxy-server=127.0.0.1:9',
+      '--proxy-bypass-list=<-loopback>',
+      '--disable-background-networking',
+    ],
+  })
+  probeDevice.app = application
+  application.on('window', window => observedBrowserWindows.add(window))
+  for (const window of application.context().pages()) observedBrowserWindows.add(window)
 
   const page = await application.firstWindow({ timeout: 30_000 })
   await page.waitForFunction(() => Boolean(window.babyDiary), undefined, { timeout: 30_000 })
   publicState = await page.evaluate(async () => {
-    const [settings, events, dataInfo] = await Promise.all([
+    const [settings, events] = await Promise.all([
       window.babyDiary.getSettings(),
       window.babyDiary.listEvents(),
-      window.babyDiary.getDataInfo(),
     ])
     return {
-      profileUid: settings.profile.uid,
-      familyId: settings.familyId,
+      profileUidPresent: Boolean(settings.profile.uid),
+      familyIdPresent: Boolean(settings.familyId),
       eventCount: events.length,
-      dataDir: dataInfo.dataDir,
     }
   })
   await page.waitForTimeout(1_000)
@@ -299,41 +429,73 @@ try {
   if (titleMonitor) await titleMonitor.catch(() => {})
   if (application) {
     try {
-      for (const window of application.windows()) observedBrowserWindows.add(window)
+      for (const window of application.context().pages()) observedBrowserWindows.add(window)
       browserWindowCount = observedBrowserWindows.size
     } catch {
       browserWindowCount = 0
     }
   }
   additionalWindowCount = Math.max(0, browserWindowCount - (rendererReady ? 1 : 0))
-  const recoveryDialogTitles = Array.from(observedTopLevelWindowTitles)
-    .filter(title => recoveryDialogTitle.test(title))
+  const boundedTopLevelWindowTitles = Array.from(observedTopLevelWindowTitles)
+    .slice(0, MAX_RECORDED_WINDOW_TITLES)
+  const recoveryDialogTitles = Array.from(observedRecoveryDialogTitles)
+    .slice(0, MAX_RECORDED_WINDOW_TITLES)
   const recoveryDialogCount = recoveryDialogTitles.length
+  const processExitCodeBeforeClose = processExitCode ?? launchedProcess?.exitCode ?? null
+  const processExitSignalBeforeClose = processExitSignal ?? launchedProcess?.signalCode ?? null
   const processExitObservedBeforeClose = Boolean(
-    processExitObserved || (launchedProcess && launchedProcess.exitCode !== null),
+    processExitObserved
+      || processExitCodeBeforeClose !== null
+      || processExitSignalBeforeClose !== null,
   )
+  const childPid = Number.isInteger(launchedProcess?.pid) ? Number(launchedProcess.pid) : null
+  const sanitizedProcessStderr = sanitizeDiagnosticText(processStderr, MAX_CAPTURED_STDERR_CHARS) || null
+  const processLog = await readSanitizedProcessLog()
+  const sanitizedProbeFailure = probeFailure
+    ? sanitizeDiagnosticText(
+        probeFailure instanceof Error ? probeFailure.message : String(probeFailure),
+        MAX_RECORDED_ERROR_CHARS,
+      ) || 'packaged probe failed without a safe diagnostic message'
+    : null
   await writeFile(runtimeEvidencePath, `${JSON.stringify({
     rendererReady,
-    observedTopLevelWindowTitles: Array.from(observedTopLevelWindowTitles),
+    childPid,
+    observedTopLevelWindowTitles: boundedTopLevelWindowTitles,
     recoveryDialogTitles,
     recoveryDialogCount: recoveryDialogTitles.length,
     browserWindowCount,
     additionalWindowCount: Number(additionalWindowCount),
     processExitObserved: Boolean(processExitObservedBeforeClose),
-    processExitCode,
-    processExitSignal,
+    processExitCode: processExitCodeBeforeClose,
+    processExitSignal: processExitSignalBeforeClose,
+    processStderr: sanitizedProcessStderr,
+    processLog,
+    titleHelperError: titleHelperError
+      ? sanitizeDiagnosticText(titleHelperError, MAX_RECORDED_ERROR_CHARS)
+      : null,
     publicState,
-    probeFailure: probeFailure instanceof Error ? probeFailure.message : probeFailure ? String(probeFailure) : null,
+    probeFailure: sanitizedProbeFailure,
   }, null, 2)}\n`, 'utf8')
-  if (application) await application.close().catch(() => {})
+  if (application) {
+    try {
+      await closeDevice(probeDevice)
+    } catch (error) {
+      probeFailure = probeFailure
+        ? new AggregateError([probeFailure, error], 'installed packaged recovery probe and cleanup failed')
+        : error
+    }
+  }
   if (recoveryDialogCount > 0) {
     throw new Error(`packaged application displayed a recovery/startup dialog: ${recoveryDialogTitles.join(', ')}`)
   }
   if (additionalWindowCount > 0) {
     throw new Error(`packaged application opened ${additionalWindowCount} unexpected additional window(s)`)
   }
-  if (processExitObservedBeforeClose) {
-    throw new Error(`packaged application exited during readiness probe: code=${processExitCode}, signal=${processExitSignal}`)
+  if (titleHelperError && !probeFailure) {
+    throw new Error(`packaged application window observation failed: ${titleHelperError}`)
+  }
+  if (processExitObservedBeforeClose && !probeFailure) {
+    throw new Error(`packaged application exited during readiness probe: code=${processExitCodeBeforeClose}, signal=${processExitSignalBeforeClose}`)
   }
 }
 if (probeFailure) throw probeFailure
@@ -341,7 +503,8 @@ if (probeFailure) throw probeFailure
   Invoke-NodeInline -Label 'installed packaged recovery probe' -Source $source -Arguments @(
     $ExecutablePath,
     $ProfileRoot,
-    $RuntimeEvidencePath
+    $RuntimeEvidencePath,
+    $ProcessLogPath
   )
 }
 
@@ -400,39 +563,73 @@ if ($SignaturePolicy -eq 'RequireTrusted') {
 }
 
 $SetupPath = (Resolve-Path -LiteralPath $SetupPath).Path
+$ReferenceExecutablePath = (Resolve-Path -LiteralPath $ReferenceExecutablePath).Path
+$referenceAppAsarPath = Join-Path (Split-Path -Parent $ReferenceExecutablePath) 'resources\app.asar'
+if (-not (Test-Path -LiteralPath $ReferenceExecutablePath -PathType Leaf)) {
+  throw 'Co-built unpacked reference executable was not found'
+}
+if (-not (Test-Path -LiteralPath $referenceAppAsarPath -PathType Leaf)) {
+  throw 'Co-built unpacked reference app.asar was not found'
+}
 $packageSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $SetupPath).Hash.ToLowerInvariant()
+$referenceExecutableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ReferenceExecutablePath).Hash.ToLowerInvariant()
+$referenceAppAsarSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $referenceAppAsarPath).Hash.ToLowerInvariant()
 $existing = @(Get-BabyDiaryInstall)
 if ($existing.Count -ne 0) {
   throw 'Refusing to overwrite a pre-existing Baby Diary installation on the clean smoke runner'
 }
 
 $runId = [Guid]::NewGuid().ToString('N')
-$runRoot = Join-Path ([IO.Path]::GetTempPath()) "baby-diary-installed-smoke-$runId"
-$profileRoot = Join-Path $runRoot 'user-data\baby-diary'
+$smokePaths = New-IsolatedSmokePaths -RunId $runId
+$tempRoot = [string]$smokePaths.tempRoot
+$runRoot = [string]$smokePaths.runRoot
+$referenceProfileRoot = [string]$smokePaths.referenceProfileRoot
+$profileRoot = [string]$smokePaths.installedProfileRoot
+$referenceBeforeManifestPath = Join-Path $runRoot 'reference-before-manifest.json'
+$referenceBeforeProjectionPath = Join-Path $runRoot 'reference-before-projection.json'
+$referenceRuntimeEvidencePath = Join-Path $runRoot 'reference-renderer-readiness.json'
+$referenceProcessLogPath = Join-Path $runRoot 'reference-electron-startup.log'
 $beforeManifestPath = Join-Path $runRoot 'before-manifest.json'
 $afterManifestPath = Join-Path $runRoot 'after-manifest.json'
 $beforeProjectionPath = Join-Path $runRoot 'before-projection.json'
 $afterProjectionPath = Join-Path $runRoot 'after-projection.json'
 $runtimeEvidencePath = Join-Path $runRoot 'renderer-readiness.json'
+$processLogPath = Join-Path $runRoot 'electron-startup.log'
 $comparisonPath = Join-Path $runRoot 'preservation-comparison.json'
 $evidencePath = Join-Path $runRoot 'installed-release-smoke-evidence.json'
 $installLocation = $null
 $installedExecutable = $null
+$originalTemp = $env:TEMP
+$originalTmp = $env:TMP
 $originalTestUserData = $env:BABYDIARY_TEST_USERDATA
 $originalE2eExecutable = $env:BABYDIARY_E2E_EXECUTABLE
 $originalSyncE2eExecutable = $env:BABYDIARY_SYNC_E2E_EXECUTABLE
 $originalExpectedE2eArch = $env:BABYDIARY_EXPECTED_E2E_ARCH
-New-Item -ItemType Directory -Path $profileRoot -Force | Out-Null
 
 try {
+  $env:TEMP = $tempRoot
+  $env:TMP = $tempRoot
+
+  if ($SignaturePolicy -eq 'RequireTrusted') {
+    Assert-TrustedSignature -Path $SetupPath
+    Assert-TrustedSignature -Path $ReferenceExecutablePath
+  }
+
+  New-FalsePositivePrePublicationEvidence `
+    -ProfileRoot $referenceProfileRoot `
+    -BeforeManifestPath $referenceBeforeManifestPath `
+    -BeforeProjectionPath $referenceBeforeProjectionPath
+  Invoke-PackagedRecoveryProbe `
+    -ExecutablePath $ReferenceExecutablePath `
+    -ProfileRoot $referenceProfileRoot `
+    -RuntimeEvidencePath $referenceRuntimeEvidencePath `
+    -ProcessLogPath $referenceProcessLogPath
+
   New-FalsePositivePrePublicationEvidence `
     -ProfileRoot $profileRoot `
     -BeforeManifestPath $beforeManifestPath `
     -BeforeProjectionPath $beforeProjectionPath
 
-  if ($SignaturePolicy -eq 'RequireTrusted') {
-    Assert-TrustedSignature -Path $SetupPath
-  }
   $setupProcess = Start-Process -FilePath $SetupPath -ArgumentList '/S' -Wait -PassThru
   if ($setupProcess.ExitCode -ne 0) {
     throw "Silent Setup failed with exit code $($setupProcess.ExitCode)"
@@ -458,6 +655,33 @@ try {
   if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
     throw "Installed executable not found: $installedExecutable"
   }
+  $installedAppAsarPath = Join-Path $installLocation 'resources\app.asar'
+  if (-not (Test-Path -LiteralPath $installedAppAsarPath -PathType Leaf)) {
+    throw 'Installed app.asar was not found'
+  }
+
+  $installedExecutableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedExecutable).Hash.ToLowerInvariant()
+  $installedAppAsarSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedAppAsarPath).Hash.ToLowerInvariant()
+  $executableSha256Match = [string]::Equals(
+    $referenceExecutableSha256,
+    $installedExecutableSha256,
+    [StringComparison]::OrdinalIgnoreCase
+  )
+  $appAsarSha256Match = [string]::Equals(
+    $referenceAppAsarSha256,
+    $installedAppAsarSha256,
+    [StringComparison]::OrdinalIgnoreCase
+  )
+  if (-not $executableSha256Match -or -not $appAsarSha256Match) {
+    throw 'Installed payload hashes do not match the co-built unpacked reference'
+  }
+
+  $unexpectedInstalledProcesses = @(
+    Get-ExactInstalledApplicationProcesses -ExecutablePath $installedExecutable
+  )
+  if ($unexpectedInstalledProcesses.Count -ne 0) {
+    throw "Silent Setup unexpectedly launched the installed application (pid: $($unexpectedInstalledProcesses.Id -join ', '))"
+  }
 
   if ($SignaturePolicy -eq 'RequireTrusted') {
     Assert-TrustedSignature -Path $installedExecutable
@@ -475,7 +699,8 @@ try {
   Invoke-PackagedRecoveryProbe `
     -ExecutablePath $installedExecutable `
     -ProfileRoot $profileRoot `
-    -RuntimeEvidencePath $runtimeEvidencePath
+    -RuntimeEvidencePath $runtimeEvidencePath `
+    -ProcessLogPath $processLogPath
   Complete-PreservationEvidence `
     -ProfileRoot $profileRoot `
     -BeforeProjectionPath $beforeProjectionPath `
@@ -489,16 +714,23 @@ try {
   Invoke-NpmScript -Name 'test:e2e'
   Invoke-NpmScript -Name 'test:e2e:sync'
 
+  $referenceRuntimeEvidence = Get-Content -Raw -Encoding utf8 -LiteralPath $referenceRuntimeEvidencePath | ConvertFrom-Json
   $runtimeEvidence = Get-Content -Raw -Encoding utf8 -LiteralPath $runtimeEvidencePath | ConvertFrom-Json
   $comparison = Get-Content -Raw -Encoding utf8 -LiteralPath $comparisonPath | ConvertFrom-Json
   $evidence = [ordered]@{
     schemaVersion = 1
     runId = $runId
     signaturePolicy = $SignaturePolicy
-    setupPath = $SetupPath
     packageSha256 = $packageSha256
-    installedExecutable = $installedExecutable
-    profileRoot = $profileRoot
+    referenceExecutableSha256 = $referenceExecutableSha256
+    installedExecutableSha256 = $installedExecutableSha256
+    executableSha256Match = [bool]$executableSha256Match
+    referenceAppAsarSha256 = $referenceAppAsarSha256
+    installedAppAsarSha256 = $installedAppAsarSha256
+    appAsarSha256Match = [bool]$appAsarSha256Match
+    referenceBeforeManifest = 'reference-before-manifest.json'
+    referenceBeforeProjection = 'reference-before-projection.json'
+    referenceRendererReady = [bool]$referenceRuntimeEvidence.rendererReady
     beforeManifest = 'before-manifest.json'
     afterManifest = 'after-manifest.json'
     beforeProjection = 'before-projection.json'
@@ -514,6 +746,9 @@ try {
   New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
   foreach ($artifact in @(
       $evidencePath,
+      $referenceBeforeManifestPath,
+      $referenceBeforeProjectionPath,
+      $referenceRuntimeEvidencePath,
       $beforeManifestPath,
       $afterManifestPath,
       $beforeProjectionPath,
@@ -525,6 +760,7 @@ try {
   }
 }
 finally {
+  try {
   if ($null -eq $originalTestUserData) { Remove-Item Env:BABYDIARY_TEST_USERDATA -ErrorAction SilentlyContinue }
   else { $env:BABYDIARY_TEST_USERDATA = $originalTestUserData }
   if ($null -eq $originalE2eExecutable) { Remove-Item Env:BABYDIARY_E2E_EXECUTABLE -ErrorAction SilentlyContinue }
@@ -536,10 +772,11 @@ finally {
 
   # Preserve observable failure evidence before nonce cleanup. This stays
   # best-effort so evidence publication cannot hide the original smoke error.
-  if (Test-Path -LiteralPath $runtimeEvidencePath -PathType Leaf) {
+  foreach ($failureEvidencePath in @($referenceRuntimeEvidencePath, $runtimeEvidencePath)) {
+    if (-not (Test-Path -LiteralPath $failureEvidencePath -PathType Leaf)) { continue }
     try {
       New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
-      Copy-Item -LiteralPath $runtimeEvidencePath -Destination $EvidenceDirectory -Force
+      Copy-Item -LiteralPath $failureEvidencePath -Destination $EvidenceDirectory -Force
     }
     catch {
       Write-Warning "Could not preserve packaged recovery probe evidence: $($_.Exception.Message)"
@@ -568,11 +805,27 @@ finally {
 
   if (Test-Path -LiteralPath $runRoot) {
     $resolvedRunRoot = [IO.Path]::GetFullPath($runRoot)
-    $resolvedTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-    if (-not $resolvedRunRoot.StartsWith($resolvedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Leaf $resolvedRunRoot) -ne "baby-diary-installed-smoke-$runId") {
+    $resolvedTempRoot = [IO.Path]::GetFullPath($tempRoot)
+    $resolvedRunParent = [IO.Path]::GetFullPath((Split-Path -Parent $resolvedRunRoot))
+    $expectedRunLeafPrefix = "baby-diary-installed-smoke-$runId-"
+    if (-not [string]::Equals(
+          $resolvedRunParent,
+          $resolvedTempRoot,
+          [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not (Split-Path -Leaf $resolvedRunRoot).StartsWith(
+          $expectedRunLeafPrefix,
+          [StringComparison]::Ordinal
+        )) {
       throw 'Refusing to clean a non-nonce installed smoke directory'
     }
     Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force
+  }
+  }
+  finally {
+    if ($null -eq $originalTemp) { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
+    else { $env:TEMP = $originalTemp }
+    if ($null -eq $originalTmp) { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
+    else { $env:TMP = $originalTmp }
   }
 }

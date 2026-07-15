@@ -16,6 +16,11 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 import { fileURLToPath } from 'url'
+import {
+  closeDevice,
+  createPlaywrightElectronCloseAdapter,
+  waitForClipboardText,
+} from './sync-e2e.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
@@ -182,6 +187,10 @@ async function main() {
         ...process.env,
         NODE_ENV: 'production',          // load dist/index.html, not dev server
         BABYDIARY_TEST_USERDATA: tmpDir, // isolated data dir
+        BABYDIARY_FIREBASE_EMULATOR: '1',
+        BABYDIARY_FIREBASE_EMULATOR_PROJECT_ID: 'demo-baby-diary',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099',
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
         ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
       },
       // Playwright's _electron doesn't need a browser download
@@ -227,11 +236,18 @@ async function main() {
         }
       }
     }, clipboardMarker)
-    const mainClipboard = await app.evaluate(({ clipboard }) => clipboard.readText())
     assert(
       clipboardWrite.ok,
       `renderer navigator.clipboard.writeText succeeds${clipboardWrite.ok ? '' : ` (${clipboardWrite.name}: ${clipboardWrite.message})`}`,
     )
+    const mainClipboard = clipboardWrite.ok
+      ? await waitForClipboardText({
+        readText: () => app.evaluate(({ clipboard }) => clipboard.readText()),
+        expectedText: clipboardMarker,
+        timeoutMs: 2_000,
+        pollIntervalMs: 25,
+      })
+      : null
     assert(mainClipboard === clipboardMarker, 'main process reads the renderer clipboard marker')
 
     // ---------------------------------------------------------------------------
@@ -1368,7 +1384,15 @@ async function main() {
       }
     }
     if (app) {
-      try { await app.close() } catch { /* ignore */ }
+      try {
+        await closeDevice({
+          name: 'packaged-ui-e2e',
+          app: createPlaywrightElectronCloseAdapter(app),
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        failures.push(`Failed to close the packaged UI E2E process tree: ${message}`)
+      }
     }
 
     // Clean temp dir

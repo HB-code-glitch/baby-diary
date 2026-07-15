@@ -15,6 +15,7 @@ import { useAppStore } from '../store/useAppStore'
 import { AppSettings } from '../../shared/types'
 import { v4 as uuidv4 } from 'uuid'
 import { useTranslation } from 'react-i18next'
+import { ipc } from '../lib/ipc'
 
 // ────────────────────────────────────────────────────────────
 // Sub-views
@@ -124,7 +125,6 @@ function SignedOutView() {
   const [keepLoggedIn, setKeepLoggedIn] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { settings, saveSettings } = useAppStore()
   const { t } = useTranslation()
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -136,18 +136,17 @@ function SignedOutView() {
         ? await signIn(email, password, keepLoggedIn)
         : await signUp(email, password, keepLoggedIn)
 
-      // Persist the real Firebase uid into settings.profile so that future
-      // events and family membership use the authoritative uid, not the
-      // locally-generated placeholder that may be empty on a fresh install.
-      if (user?.uid && settings?.profile?.uid !== user.uid) {
-        const updated: AppSettings = {
-          ...(settings ?? { baby: { name: '', birthdate: '' }, firebase: null, familyId: '' }),
-          profile: {
-            ...(settings?.profile ?? { name: '', role: 'mom' as const }),
-            uid: user.uid,
-          },
-        }
-        await saveSettings(updated).catch(() => { /* best-effort */ })
+      // Authentication can publish a newer authoritative family/settings
+      // snapshot before this continuation runs. Merge only the profile field
+      // from a fresh main-process read so a stale render can never restore an
+      // old familyId, baby, Firebase config, language, or theme.
+      if (user?.uid) {
+        await ipc.getSettings().then(latest => {
+          if (latest.profile.uid === user.uid) return latest
+          return ipc.mergeSettings({
+            profile: { ...latest.profile, uid: user.uid },
+          })
+        }).catch(() => { /* best-effort */ })
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

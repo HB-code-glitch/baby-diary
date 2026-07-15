@@ -10,6 +10,7 @@ import { isEventAtOrBefore, sortEventsNewestFirst } from '../lib/eventTime'
 import { mergeResolvedEvent } from '../../shared/eventResolver'
 import { createEventSyncMetadata } from '../../shared/cloudEventPayload'
 import { nextHybridLogicalClock } from '../../shared/hybridLogicalClock'
+import { isKnownV038UpgradeFixtureEvent } from '../../shared/knownV038UpgradeFixtureEvent'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -22,7 +23,21 @@ let settingsBridgeGeneration = 0
 let lastSettingsSequence = 0
 let settingsBroadcastEpoch = 0
 let eventBridgeUnsubscribe: (() => void) | undefined
+let eventScopeBridgeUnsubscribe: (() => void) | undefined
 let eventBridgeGeneration = 0
+let eventViewReloadEpoch = 0
+let activeEventViewReload: Promise<void> | undefined
+let familyEventViewEpoch = 0
+const eventViewOwnership = new WeakMap<DiaryEvent, { familyId: string; epoch: number }>()
+
+function markEventsForFamilyView(
+  events: DiaryEvent[],
+  familyId: string,
+  epoch: number,
+): DiaryEvent[] {
+  for (const event of events) eventViewOwnership.set(event, { familyId, epoch })
+  return events
+}
 
 export function disposeAppStoreSettingsBridge(): void {
   settingsBridgeGeneration += 1
@@ -33,8 +48,42 @@ export function disposeAppStoreSettingsBridge(): void {
 
 export function disposeAppStoreEventBridge(): void {
   eventBridgeGeneration += 1
+  eventViewReloadEpoch += 1
+  familyEventViewEpoch += 1
   eventBridgeUnsubscribe?.()
   eventBridgeUnsubscribe = undefined
+  eventScopeBridgeUnsubscribe?.()
+  eventScopeBridgeUnsubscribe = undefined
+}
+
+async function reloadCurrentFamilyEvents(expectedFamilyId: string, clearFirst: boolean): Promise<void> {
+  const epoch = ++eventViewReloadEpoch
+  const familyEpoch = familyEventViewEpoch
+  if (clearFirst) useAppStore.setState({ events: [] })
+  try {
+    const listed = await ipc.listEvents(expectedFamilyId)
+    const state = useAppStore.getState()
+    if (epoch !== eventViewReloadEpoch
+      || familyEpoch !== familyEventViewEpoch
+      || state.settings?.familyId !== expectedFamilyId) return
+    useAppStore.setState(current => {
+      const events = [...listed, ...current.events].reduce<DiaryEvent[]>(mergeEventIntoList, [])
+      return { events: markEventsForFamilyView(events, expectedFamilyId, familyEpoch) }
+    })
+  } catch (error) {
+    if (epoch === eventViewReloadEpoch
+      && useAppStore.getState().settings?.familyId === expectedFamilyId) {
+      useAppStore.setState({ error: String(error) })
+    }
+  }
+}
+
+function requestCurrentFamilyEventReload(expectedFamilyId: string, clearFirst: boolean): void {
+  const operation = reloadCurrentFamilyEvents(expectedFamilyId, clearFirst)
+  activeEventViewReload = operation
+  void operation.finally(() => {
+    if (activeEventViewReload === operation) activeEventViewReload = undefined
+  })
 }
 
 function installAppStoreSettingsBridge(): void {
@@ -45,7 +94,14 @@ function installAppStoreSettingsBridge(): void {
     if (!Number.isSafeInteger(payload.sequence) || payload.sequence <= lastSettingsSequence) return
     lastSettingsSequence = payload.sequence
     settingsBroadcastEpoch += 1
-    useAppStore.setState({ settings: payload.settings })
+    const previousFamilyId = useAppStore.getState().settings?.familyId
+    const familyChanged = previousFamilyId !== payload.settings.familyId
+    if (familyChanged) familyEventViewEpoch += 1
+    useAppStore.setState({
+      settings: payload.settings,
+      ...(familyChanged ? { events: [] } : {}),
+    })
+    if (familyChanged) requestCurrentFamilyEventReload(payload.settings.familyId, false)
   })
 }
 
@@ -141,13 +197,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   loadEvents: async () => {
-    try {
-      set({ isLoading: true, error: null })
-      const events = await ipc.listEvents()
-      set({ events, isLoading: false })
-    } catch (err) {
-      set({ error: String(err), isLoading: false })
-    }
+    const expectedFamilyId = get().settings?.familyId ?? ''
+    set({ isLoading: true, error: null })
+    await reloadCurrentFamilyEvents(expectedFamilyId, false)
+    if (get().settings?.familyId === expectedFamilyId) set({ isLoading: false })
   },
 
   loadSettings: async () => {
@@ -173,33 +226,90 @@ export const useAppStore = create<AppState>((set, get) => ({
     installAppStoreSettingsBridge()
     disposeAppStoreEventBridge()
     const generation = eventBridgeGeneration
-    const bufferedEvents: DiaryEvent[] = []
+    const bufferedEvents: Array<{ event: DiaryEvent; familyId: string }> = []
     let initializationCommitted = false
+    let scopeReloadRequested = false
 
     // Subscribe first. Every append that races the initial disk read is held
     // until the list result and the other startup state can commit atomically.
-    eventBridgeUnsubscribe = ipc.onEventAppended(event => {
+    eventBridgeUnsubscribe = ipc.onEventAppended((event, familyId) => {
       if (generation !== eventBridgeGeneration) return
       if (!initializationCommitted) {
-        bufferedEvents.push(event)
+        bufferedEvents.push({ event, familyId })
         return
       }
+      if (familyId !== (get().settings?.familyId ?? '')) return
       get().mergeExternalEvent(event)
+    })
+    eventScopeBridgeUnsubscribe = ipc.onEventScopeChanged(() => {
+      if (generation !== eventBridgeGeneration) return
+      if (!initializationCommitted) {
+        scopeReloadRequested = true
+        return
+      }
+      requestCurrentFamilyEventReload(get().settings?.familyId ?? '', false)
     })
 
     const startingSettingsEpoch = settingsBroadcastEpoch
     set({ isLoading: true, isReady: false, error: null })
-    const [eventsResult, settingsResult, dataInfoResult] = await Promise.allSettled([
-      ipc.listEvents(),
-      ipc.getSettings(),
-      ipc.getDataInfo(),
-    ])
+    const settingsOperation = ipc.getSettings().then(
+      value => ({ status: 'fulfilled' as const, value }),
+      reason => ({ status: 'rejected' as const, reason }),
+    )
+    const dataInfoOperation = ipc.getDataInfo().then(
+      value => ({ status: 'fulfilled' as const, value }),
+      reason => ({ status: 'rejected' as const, reason }),
+    )
+    const settingsResult = await settingsOperation
     if (generation !== eventBridgeGeneration) return
 
-    let events = eventsResult.status === 'fulfilled'
-      ? eventsResult.value.reduce<DiaryEvent[]>(mergeEventIntoList, [])
-      : get().events
-    for (const event of bufferedEvents) events = mergeEventIntoList(events, event)
+    let initialFamilyId = get().settings?.familyId ?? ''
+    let initialListSettingsEpoch = settingsBroadcastEpoch
+    let initialListReloadEpoch = eventViewReloadEpoch
+    let initialListStarted = false
+    let eventsResult: PromiseSettledResult<DiaryEvent[]>
+    if (settingsResult.status === 'fulfilled' && startingSettingsEpoch === settingsBroadcastEpoch) {
+      initialFamilyId = settingsResult.value.familyId
+      initialListSettingsEpoch = settingsBroadcastEpoch
+      initialListReloadEpoch = eventViewReloadEpoch
+      initialListStarted = true
+      eventsResult = await ipc.listEvents(initialFamilyId).then(
+        value => ({ status: 'fulfilled' as const, value }),
+        reason => ({ status: 'rejected' as const, reason }),
+      )
+    } else if (startingSettingsEpoch !== settingsBroadcastEpoch) {
+      if (activeEventViewReload) await activeEventViewReload
+      eventsResult = { status: 'fulfilled', value: get().events }
+    } else {
+      const reason = settingsResult.status === 'rejected'
+        ? settingsResult.reason
+        : new Error('settings initialization state is inconsistent')
+      eventsResult = { status: 'rejected', reason }
+    }
+    const dataInfoResult = await dataInfoOperation
+    if (generation !== eventBridgeGeneration) return
+
+    const initialEventViewIsStale = !initialListStarted
+      || initialListSettingsEpoch !== settingsBroadcastEpoch
+      || initialListReloadEpoch !== eventViewReloadEpoch
+    if (initialEventViewIsStale && activeEventViewReload) await activeEventViewReload
+    if (generation !== eventBridgeGeneration) return
+
+    let events = initialEventViewIsStale
+      ? get().events
+      : eventsResult.status === 'fulfilled'
+        ? eventsResult.value.reduce<DiaryEvent[]>(mergeEventIntoList, [])
+        : get().events
+    const committedFamilyId = settingsResult.status === 'fulfilled'
+      && startingSettingsEpoch === settingsBroadcastEpoch
+      ? settingsResult.value.familyId
+      : get().settings?.familyId ?? initialFamilyId
+    for (const buffered of bufferedEvents) {
+      if (buffered.familyId === committedFamilyId) {
+        events = mergeEventIntoList(events, buffered.event)
+      }
+    }
+    events = markEventsForFamilyView(events, committedFamilyId, familyEventViewEpoch)
     bufferedEvents.length = 0
     initializationCommitted = true
 
@@ -219,6 +329,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     if (dataInfoResult.status === 'fulfilled') nextState.dataInfo = dataInfoResult.value
     set(nextState)
+    if (scopeReloadRequested) requestCurrentFamilyEventReload(get().settings?.familyId ?? '', false)
   },
 
   // -----------------------------------------------------------------------
@@ -290,7 +401,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       ...baseMutation,
       sync: createEventSyncMetadata(baseMutation),
     }
-    const result = await ipc.appendEvent(mutation)
+    const familyId = get().settings?.familyId ?? ''
+    const familyEpoch = familyEventViewEpoch
+    const result = await ipc.appendEvent(mutation, familyId)
     if (result === 'error') {
       throw new Error('append_failed')
     }
@@ -298,19 +411,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     // via _seenFromRemote — no re-upload loop.
     // 'duplicate' means the event is already on disk; still merge into UI state
     // and enqueue so a previous sync gap can be filled.
-    enqueue(mutation)
-    set(state => ({
-      events: mergeEventIntoList(state.events, mutation),
-    }))
+    enqueue(mutation, familyId)
+    if ((get().settings?.familyId ?? '') === familyId
+      && familyEventViewEpoch === familyEpoch) {
+      eventViewOwnership.set(mutation, { familyId, epoch: familyEpoch })
+      set(state => ({
+        events: markEventsForFamilyView(
+          mergeEventIntoList(state.events, mutation),
+          familyId,
+          familyEpoch,
+        ),
+      }))
+    }
     return mutation
   },
 
   editEvent: async (original: DiaryEvent, patch) => {
+    const familyId = get().settings?.familyId ?? ''
+    const familyEpoch = familyEventViewEpoch
+    const liveEvent = get().events.find(event => event.id === original.id)
+    const sourceView = eventViewOwnership.get(original)
+    const liveView = liveEvent ? eventViewOwnership.get(liveEvent) : undefined
+    const sourceIsCurrent = sourceView
+      ? sourceView.familyId === familyId
+        && sourceView.epoch === familyEpoch
+        && liveView?.familyId === familyId
+        && liveView.epoch === familyEpoch
+      : liveEvent === original
+    if (!liveEvent || liveEvent.deleted || !sourceIsCurrent) {
+      throw new Error('stale_family_view')
+    }
     const t = now()
     // MF-11: re-read the live rev from the store in case a remote sync raised it
     // while the modal was open — prevents the edit being silently dropped by
     // mergeEventIntoList (incoming.rev not > existing.rev).
-    const liveRev = get().events.find(e => e.id === original.id)?.rev ?? original.rev
+    const liveRev = liveEvent.rev
     const { migration: _priorMigration, ...freshSource } = original
     const baseUpdated: DiaryEvent = {
       ...freshSource,
@@ -323,14 +458,22 @@ export const useAppStore = create<AppState>((set, get) => ({
       ...baseUpdated,
       sync: createEventSyncMetadata(baseUpdated),
     }
-    const result = await ipc.appendEvent(updated)
+    const result = await ipc.appendEvent(updated, familyId)
     if (result === 'error') {
       throw new Error('append_failed')
     }
-    enqueue(updated)
-    set(state => ({
-      events: mergeEventIntoList(state.events, updated),
-    }))
+    enqueue(updated, familyId)
+    if ((get().settings?.familyId ?? '') === familyId
+      && familyEventViewEpoch === familyEpoch) {
+      eventViewOwnership.set(updated, { familyId, epoch: familyEpoch })
+      set(state => ({
+        events: markEventsForFamilyView(
+          mergeEventIntoList(state.events, updated),
+          familyId,
+          familyEpoch,
+        ),
+      }))
+    }
     return updated
   },
 
@@ -343,7 +486,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const targets = get().events.filter(e => !e.deleted)
     let count = 0
     let partial = false
+    const familyId = get().settings?.familyId ?? ''
+    const familyEpoch = familyEventViewEpoch
     for (const event of targets) {
+      if ((get().settings?.familyId ?? '') !== familyId
+        || familyEventViewEpoch !== familyEpoch) {
+        partial = true
+        break
+      }
       const updatedAt = now()
       const { migration: _priorMigration, ...freshSource } = event
       const baseTombstone: DiaryEvent = {
@@ -357,22 +507,38 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...baseTombstone,
         sync: createEventSyncMetadata(baseTombstone),
       }
-      const result = await ipc.appendEvent(tombstone)
+      let result: 'ok' | 'duplicate' | 'error'
+      try {
+        result = await ipc.appendEvent(tombstone, familyId)
+      } catch {
+        result = 'error'
+      }
       if (result === 'error') {
         // P12(a): abort on first error; record partial state flag
         partial = true
         break
       }
-      enqueue(tombstone)
-      set(state => ({
-        events: mergeEventIntoList(state.events, tombstone),
-      }))
+      enqueue(tombstone, familyId)
       count++
+      if ((get().settings?.familyId ?? '') !== familyId
+        || familyEventViewEpoch !== familyEpoch) {
+        partial = true
+        break
+      }
+      eventViewOwnership.set(tombstone, { familyId, epoch: familyEpoch })
+      set(state => ({
+        events: markEventsForFamilyView(
+          mergeEventIntoList(state.events, tombstone),
+          familyId,
+          familyEpoch,
+        ),
+      }))
     }
     if (partial) {
       // P12(b): resync UI to true disk state after partial failure so store
       // matches what's actually on disk (avoids ghost-deleted entries in memory).
-      await get().loadEvents()
+      const currentFamilyId = get().settings?.familyId ?? ''
+      await reloadCurrentFamilyEvents(currentFamilyId, true)
     }
     // MF-12: return both count and partial flag so caller can show the correct toast
     return { count, partial }
@@ -460,8 +626,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   mergeExternalEvent: (event: DiaryEvent) => {
+    const familyId = get().settings?.familyId ?? ''
+    const familyEpoch = familyEventViewEpoch
+    eventViewOwnership.set(event, { familyId, epoch: familyEpoch })
     set(state => ({
-      events: mergeEventIntoList(state.events, event),
+      events: markEventsForFamilyView(
+        mergeEventIntoList(state.events, event),
+        familyId,
+        familyEpoch,
+      ),
     }))
   },
 }))
@@ -470,6 +643,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 // Merge helper (shared deterministic mutation conflict resolution)
 // ---------------------------------------------------------------------------
 function mergeEventIntoList(list: DiaryEvent[], incoming: DiaryEvent): DiaryEvent[] {
+  if (isKnownV038UpgradeFixtureEvent(incoming)) return list
   return mergeResolvedEvent(list, incoming)
 }
 

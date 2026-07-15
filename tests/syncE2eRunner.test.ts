@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
   mkdirSync,
@@ -33,6 +34,7 @@ import {
   classifyFirstLaunchState,
   cleanupPartialDevice,
   closeDevice,
+  createPlaywrightElectronCloseAdapter,
   collectPersistentGuardDiagnostics,
   decodeFirestoreEventDocument,
   finalizeRun,
@@ -57,7 +59,122 @@ import {
   semanticEventsEqual,
   selectMutationWinner,
   writeSeed,
+  waitForClipboardText,
 } from '../scripts/sync-e2e.mjs'
+
+describe('packaged macOS clipboard propagation boundary', () => {
+  it('adapts Playwright Electron close to a scheduled main-process quit without losing process identity', async () => {
+    const childProcess = { pid: 4343, exitCode: null, signalCode: null }
+    const order: string[] = []
+    const app = {
+      process: vi.fn(() => childProcess),
+      evaluate: vi.fn(async (requestQuit: (electron: { app: { quit: () => void } }) => void) => {
+        order.push('evaluate-start')
+        requestQuit({ app: { quit: () => order.push('quit') } })
+        order.push('evaluate-return')
+      }),
+    }
+
+    const adapter = createPlaywrightElectronCloseAdapter(app)
+
+    expect(adapter.process()).toBe(childProcess)
+    await adapter.close()
+    expect(order).toEqual(['evaluate-start', 'evaluate-return'])
+    await new Promise(resolve => setImmediate(resolve))
+    expect(order).toEqual(['evaluate-start', 'evaluate-return', 'quit'])
+  })
+
+  it('propagates a Playwright Electron quit-request failure', async () => {
+    const failure = new Error('injected evaluate failure')
+    const app = {
+      process: vi.fn(() => ({ pid: 4343 })),
+      evaluate: vi.fn(async () => { throw failure }),
+    }
+
+    await expect(createPlaywrightElectronCloseAdapter(app).close()).rejects.toBe(failure)
+  })
+
+  it.each([
+    ['missing reader', { readText: null }, 'Clipboard reader is required'],
+    ['non-string marker', { expectedText: 42 }, 'Expected clipboard marker is required'],
+    ['empty marker', { expectedText: '' }, 'Expected clipboard marker is required'],
+    ['zero timeout', { timeoutMs: 0 }, 'Clipboard propagation timeout must be positive'],
+    ['infinite timeout', { timeoutMs: Number.POSITIVE_INFINITY }, 'Clipboard propagation timeout must be positive'],
+    ['zero poll interval', { pollIntervalMs: 0 }, 'Clipboard propagation poll interval must be positive'],
+    ['non-finite poll interval', { pollIntervalMs: Number.NaN }, 'Clipboard propagation poll interval must be positive'],
+  ])('fails closed for %s', async (_label, overrides, expectedError) => {
+    const readText = vi.fn(async () => 'renderer marker')
+    await expect(waitForClipboardText({
+      readText,
+      expectedText: 'renderer marker',
+      timeoutMs: 20,
+      pollIntervalMs: 5,
+      now: () => 0,
+      sleep: async () => undefined,
+      ...overrides,
+    })).rejects.toThrow(expectedError)
+  })
+
+  it('polls until the main process actually observes the renderer marker', async () => {
+    const observations = ['previous clipboard', 'previous clipboard', 'renderer marker']
+    let elapsedMs = 0
+    const readText = vi.fn(async () => observations.shift() ?? 'renderer marker')
+    const sleep = vi.fn(async (milliseconds: number) => {
+      elapsedMs += milliseconds
+    })
+
+    await expect(waitForClipboardText({
+      readText,
+      expectedText: 'renderer marker',
+      timeoutMs: 20,
+      pollIntervalMs: 5,
+      now: () => elapsedMs,
+      sleep,
+    })).resolves.toBe('renderer marker')
+
+    expect(readText).toHaveBeenCalledTimes(3)
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([5, 5])
+  })
+
+  it('fails at the bounded deadline when the marker never propagates', async () => {
+    let elapsedMs = 0
+    const readText = vi.fn(async () => 'previous clipboard')
+    const sleep = vi.fn(async (milliseconds: number) => {
+      elapsedMs += milliseconds
+    })
+
+    await expect(waitForClipboardText({
+      readText,
+      expectedText: 'renderer marker',
+      timeoutMs: 12,
+      pollIntervalMs: 5,
+      now: () => elapsedMs,
+      sleep,
+    })).rejects.toThrow('Clipboard marker was not observed within 12ms')
+
+    expect(readText).toHaveBeenCalledTimes(3)
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([5, 5, 2])
+    expect(elapsedMs).toBe(12)
+  })
+
+  it('keeps original clipboard restoration in teardown after propagation verification', () => {
+    const runner = readFileSync(path.resolve(import.meta.dirname, '../scripts/mac-e2e.mjs'), 'utf8')
+    const finallyStart = runner.lastIndexOf('} finally {')
+    const cleanupStart = runner.indexOf('    // Clean temp dir', finallyStart)
+    const teardown = runner.slice(finallyStart, cleanupStart)
+
+    expect(runner).toContain('await waitForClipboardText({')
+    expect(runner).not.toContain('const mainClipboard = await app.evaluate(({ clipboard }) => clipboard.readText())')
+    expect(finallyStart).toBeGreaterThan(-1)
+    expect(cleanupStart).toBeGreaterThan(finallyStart)
+    expect(teardown).toContain('if (app && clipboardCaptured)')
+    expect(teardown).toContain('clipboard.writeText(value), originalClipboard')
+    expect(teardown.indexOf('clipboard.writeText(value), originalClipboard'))
+      .toBeLessThan(teardown.indexOf('await closeDevice({'))
+    expect(teardown).toContain('createPlaywrightElectronCloseAdapter(app)')
+    expect(teardown).toContain('failures.push(`Failed to close the packaged UI E2E process tree: ${message}`)')
+  })
+})
 
 describe('packaged cross-platform sync E2E runner contract', () => {
   it('launches packaged Windows Electron through CDP without the Node inspector injection', async () => {
@@ -98,6 +215,11 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       spawnImpl,
       connectOverCDP,
       sleep,
+      extraArgs: [
+        '--proxy-server=127.0.0.1:9',
+        '--proxy-bypass-list=<-loopback>',
+        '--disable-background-networking',
+      ],
     })
 
     expect(spawnImpl).toHaveBeenCalledOnce()
@@ -106,6 +228,9 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(args).toEqual([
       '--remote-debugging-address=127.0.0.1',
       '--remote-debugging-port=49211',
+      '--proxy-server=127.0.0.1:9',
+      '--proxy-bypass-list=<-loopback>',
+      '--disable-background-networking',
     ])
     expect(args.join(' ')).not.toMatch(/--inspect|--require|loader/i)
     expect(options).toMatchObject({
@@ -116,7 +241,12 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(Object.keys(options.env).map(key => key.toUpperCase())).not.toContain('NODE_OPTIONS')
     expect(Object.keys(options.env).map(key => key.toUpperCase())).not.toContain('ELECTRON_RUN_AS_NODE')
     expect(connectOverCDP).toHaveBeenCalledTimes(2)
-    expect(connectOverCDP).toHaveBeenLastCalledWith('http://127.0.0.1:49211')
+    for (const [endpoint, connectOptions] of connectOverCDP.mock.calls) {
+      expect(endpoint).toBe('http://127.0.0.1:49211')
+      expect(connectOptions).toEqual({ timeout: expect.any(Number) })
+      expect(connectOptions.timeout).toBeGreaterThan(0)
+      expect(connectOptions.timeout).toBeLessThanOrEqual(2_000)
+    }
     expect(sleep).toHaveBeenCalledOnce()
     expect(app.process()).toBe(child)
     expect(app.context()).toBe(context)
@@ -133,8 +263,105 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(browser.close).not.toHaveBeenCalled()
   })
 
-  it('requests a guarded graceful packaged macOS quit after closing its windows', async () => {
+  it.each([
+    '--inspect=0',
+    '--remote-debugging-port=9222',
+    '--user-data-dir=C:\\unsafe-profile',
+  ])('rejects the reserved packaged Electron argument %s before spawn', async reservedArg => {
+    const spawnImpl = vi.fn()
+    await expect(launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: { TEST_SENTINEL: 'yes' },
+      platform: 'win32',
+      allocatePort: async () => 49214,
+      spawnImpl,
+      connectOverCDP: vi.fn(),
+      extraArgs: [reservedArg],
+    })).rejects.toThrow(/reserved packaged Electron argument/i)
+    expect(spawnImpl).not.toHaveBeenCalled()
+  })
+
+  it('awaits the packaged spawn observer before the first CDP connection attempt', async () => {
     const page = { close: vi.fn(async () => undefined) }
+    const context = Object.assign(new EventEmitter(), {
+      pages: vi.fn(() => [page]),
+      waitForEvent: vi.fn(),
+    })
+    const browser = {
+      contexts: vi.fn(() => [context]),
+      close: vi.fn(async () => undefined),
+    }
+    const child = Object.assign(new EventEmitter(), {
+      pid: 8140,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      stderr: new EventEmitter(),
+    })
+    let releaseObserver!: () => void
+    const observerBlocked = new Promise<void>(resolve => { releaseObserver = resolve })
+    const onSpawn = vi.fn(async () => observerBlocked)
+    const connectOverCDP = vi.fn(async () => browser)
+
+    const launch = launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: { TEST_SENTINEL: 'yes' },
+      timeoutMs: 1_000,
+      platform: 'win32',
+      allocatePort: async () => 49215,
+      spawnImpl: vi.fn(() => child),
+      connectOverCDP,
+      onSpawn,
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    expect(onSpawn).toHaveBeenCalledWith(child, {
+      endpoint: 'http://127.0.0.1:49215',
+      port: 49215,
+    })
+    expect(connectOverCDP).not.toHaveBeenCalled()
+
+    releaseObserver()
+    const app = await launch
+    expect(connectOverCDP).toHaveBeenCalledOnce()
+    await app.close()
+  })
+
+  it('cleans up the owned child when the packaged spawn observer rejects', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 8141,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      stderr: new EventEmitter(),
+    })
+    const cleanupProcess = vi.fn(async () => { child.exitCode = 1 })
+    const connectOverCDP = vi.fn()
+
+    await expect(launchCdpElectronApplication({
+      executablePath: 'C:\\Baby Diary\\Baby Diary.exe',
+      cwd: 'C:\\Baby Diary',
+      env: { TEST_SENTINEL: 'yes' },
+      timeoutMs: 1_000,
+      platform: 'win32',
+      allocatePort: async () => 49216,
+      spawnImpl: vi.fn(() => child),
+      connectOverCDP,
+      cleanupProcess,
+      onSpawn: async () => { throw new Error('spawn observation failed') },
+    })).rejects.toThrow('spawn observation failed')
+
+    expect(connectOverCDP).not.toHaveBeenCalled()
+    expect(cleanupProcess).toHaveBeenCalledWith(8141)
+  })
+
+  it('requests a guarded graceful packaged macOS quit before renderer teardown and waits for exit', async () => {
+    const closeOrder: string[] = []
+    const page = {
+      close: vi.fn(async () => {
+        closeOrder.push('page-close')
+      }),
+    }
     const context = Object.assign(new EventEmitter(), {
       pages: vi.fn(() => [page]),
       waitForEvent: vi.fn(),
@@ -148,7 +375,10 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       exitCode: null as number | null,
       signalCode: null as NodeJS.Signals | null,
       stderr: new EventEmitter(),
-      kill: vi.fn(() => true),
+      kill: vi.fn(() => {
+        closeOrder.push('guarded-sigterm')
+        return true
+      }),
     })
 
     const app = await launchCdpElectronApplication({
@@ -162,10 +392,132 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       connectOverCDP: vi.fn(async () => browser),
     })
 
-    await app.close()
-    expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: true })
+    const device = { name: 'mac-device', app, closing: false }
+    let closeResolved = false
+    const closing = closeDevice(device, {
+      platform: 'darwin',
+      timeoutMs: 1_000,
+      killTree: vi.fn(async () => undefined),
+      queryDarwinProcessTable: () => child.exitCode == null && child.signalCode == null
+        ? [{ pid: 8124, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' }]
+        : [],
+    }).then(() => { closeResolved = true })
+
+    await new Promise(resolve => setImmediate(resolve))
     expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(page.close).not.toHaveBeenCalled()
+    expect(closeOrder).toEqual(['guarded-sigterm'])
+    expect(closeResolved).toBe(false)
+
+    child.signalCode = 'SIGTERM'
+    child.emit('exit', null, 'SIGTERM')
+    await closing
+    expect(closeResolved).toBe(true)
+    expect(device.app).toBeNull()
     expect(browser.close).not.toHaveBeenCalled()
+  })
+
+  it('keeps the default macOS graceful-close window open beyond the shared 10 second budget', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 8126,
+        exitCode: null as number | null,
+        signalCode: null as NodeJS.Signals | null,
+      })
+      const killTree = vi.fn(async () => undefined)
+      const device = {
+        name: 'mac-arm64-device',
+        app: {
+          close: vi.fn(async () => undefined),
+          process: () => child,
+        },
+      }
+      let closeError: unknown
+      let closeResolved = false
+      const closing = closeDevice(device, {
+        platform: 'darwin',
+        killTree,
+        queryDarwinProcessTable: () => child.exitCode == null && child.signalCode == null
+          ? [{ pid: 8126, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' }]
+          : [],
+      }).then(
+        () => { closeResolved = true },
+        error => { closeError = error },
+      )
+
+      await vi.advanceTimersByTimeAsync(10_001)
+      expect(closeError).toBeUndefined()
+      expect(closeResolved).toBe(false)
+      expect(killTree).not.toHaveBeenCalled()
+
+      child.exitCode = 0
+      child.emit('exit', 0, null)
+      await closing
+      expect(closeResolved).toBe(true)
+      expect(device.app).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports the CDP endpoint deadline instead of racing the final retry delay', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 8125,
+        exitCode: null as number | null,
+        signalCode: null as NodeJS.Signals | null,
+        stderr: new EventEmitter(),
+      })
+      const cleanupProcess = vi.fn(async () => {
+        child.exitCode = 0
+      })
+      let launchError: unknown
+      const spawnImpl = vi.fn(() => {
+        queueMicrotask(() => child.stderr.emit('data', [
+          'startup failed at C:\\Users\\ci-owner\\private-profile',
+          'token=abcdefghijklmnopqrstuvwxyz0123456789',
+          'https://private.example.test/launch',
+        ].join('\n')))
+        return child
+      })
+      const launch = launchCdpElectronApplication({
+        executablePath: '/Applications/Baby Diary.app/Contents/MacOS/Baby Diary',
+        cwd: '/Applications/Baby Diary.app',
+        env: { TEST_SENTINEL: 'yes' },
+        timeoutMs: 24,
+        platform: 'darwin',
+        allocatePort: async () => 49213,
+        spawnImpl,
+        connectOverCDP: vi.fn(async () => {
+          throw new Error('endpoint is not ready')
+        }),
+        sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+        cleanupProcess,
+      }).catch(error => {
+        launchError = error
+      })
+
+      await vi.runAllTimersAsync()
+      await launch
+      expect(launchError).toBeInstanceOf(Error)
+      const message = (launchError as Error).message
+      expect(message).toContain('Packaged Electron CDP endpoint was not ready: endpoint is not ready')
+      expect(message).toContain('pid=8125')
+      expect(message).toContain('exitCode=running')
+      expect(message).toContain('signal=none')
+      expect(message).toContain('stderr=')
+      expect(message).toContain('[redacted-path]')
+      expect(message).toContain('[redacted-secret]')
+      expect(message).toContain('[redacted-url]')
+      expect(message).not.toContain('ci-owner')
+      expect(message).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789')
+      expect(message).not.toContain('private.example.test')
+      expect(cleanupProcess).toHaveBeenCalledWith(8125)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('attests the exact packaged app.asar metadata used by a CDP launch', async () => {
@@ -196,6 +548,53 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       'C:\\Baby Diary\\resources\\app.asar',
       'package.json',
     )
+  })
+
+  it('accepts only the canonical macOS /var and /tmp aliases for packaged files', async () => {
+    const metadata = Buffer.from(JSON.stringify({
+      name: 'baby-diary',
+      version: '0.3.11',
+      main: 'dist-electron/electron/main.js',
+    }))
+    const regularFile = { isFile: () => true, isSymbolicLink: () => false }
+
+    for (const [visibleRoot, canonicalRoot] of [
+      ['/var', '/private/var'],
+      ['/tmp', '/private/tmp'],
+    ]) {
+      const executablePath = `${visibleRoot}/baby-diary-smoke/Baby Diary.app/Contents/MacOS/Baby Diary`
+      const resourcePath = `${visibleRoot}/baby-diary-smoke/Baby Diary.app/Contents/Resources/app.asar`
+      await expect(readPackagedArtifactAttestation({
+        executablePath,
+        resourcePath,
+        platform: 'darwin',
+        extractFile: vi.fn(() => metadata),
+        fileSystem: {
+          existsSync: vi.fn(() => true),
+          lstatSync: vi.fn(() => regularFile),
+          realpathSync: vi.fn((candidate: string) => candidate.replace(visibleRoot, canonicalRoot)),
+        },
+      })).resolves.toMatchObject({
+        executablePath: executablePath.replace(visibleRoot, canonicalRoot),
+        appPath: resourcePath.replace(visibleRoot, canonicalRoot),
+      })
+    }
+
+    const executablePath = '/var/baby-diary-smoke/Baby Diary.app/Contents/MacOS/Baby Diary'
+    const resourcePath = '/var/baby-diary-smoke/Baby Diary.app/Contents/Resources/app.asar'
+    await expect(readPackagedArtifactAttestation({
+      executablePath,
+      resourcePath,
+      platform: 'darwin',
+      extractFile: vi.fn(() => metadata),
+      fileSystem: {
+        existsSync: vi.fn(() => true),
+        lstatSync: vi.fn(() => regularFile),
+        realpathSync: vi.fn((candidate: string) => candidate === executablePath
+          ? '/private/var/escaped/Baby Diary'
+          : candidate.replace('/var', '/private/var')),
+      },
+    })).rejects.toThrow(/real path must not escape/i)
   })
 
   it('uses a real Auth emulator ID token for Firestore REST reads without exposing secrets in failures', async () => {
@@ -447,6 +846,88 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     })
     expect(rendererErrors).toEqual([
       'A: requestfailed https://example.test/data net::ERR_ABORTED',
+    ])
+  })
+
+  it('holds exact Firestore Listen buffer exhaustion candidates across both event orders', () => {
+    const page = new EventEmitter() as EventEmitter & { url(): string }
+    page.url = () => 'file:///packaged/index.html'
+    const rendererErrors: string[] = []
+    const listenShutdownCandidates: Array<Record<string, unknown>> = []
+    let closing = false
+    attachRendererDiagnostics({
+      app: new EventEmitter(),
+      context: { pages: () => [page] },
+      name: 'B-conflict',
+      rendererErrors,
+      isClosing: () => closing,
+      listenShutdownCandidates,
+    })
+    const params = new URLSearchParams({
+      VER: '8',
+      database: 'projects/demo-baby-diary/databases/(default)',
+      RID: 'rpc',
+      SID: 'UFXnPhvNwaSuYxv6trvQ3w==',
+      AID: '66',
+      CI: '1',
+      TYPE: 'xmlhttp',
+      zx: '8vuv3kzhejg9',
+      t: '1',
+    })
+    const listenUrl = `http://127.0.0.1:${FIRESTORE_PORT}/google.firestore.v1.Firestore/Listen/channel?${params}`
+    const emitRequestFailed = (url: string, errorText: string, method = 'GET') => {
+      page.emit('requestfailed', {
+        url: () => url,
+        method: () => method,
+        failure: () => ({ errorText }),
+      })
+    }
+    const emitBufferConsoleError = () => page.emit('console', {
+      type: () => 'error',
+      text: () => 'Failed to load resource: net::ERR_NO_BUFFER_SPACE',
+    })
+
+    emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE')
+    emitBufferConsoleError()
+    closing = true
+    emitBufferConsoleError()
+    emitRequestFailed(listenUrl, 'net::ERR_NO_BUFFER_SPACE', 'POST')
+    expect(rendererErrors).toEqual([])
+    expect(listenShutdownCandidates).toEqual([
+      expect.objectContaining({
+        target: 'firestore-listen-channel',
+        method: 'GET',
+        error: 'net::ERR_NO_BUFFER_SPACE',
+        urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        requestObservedAtMs: expect.any(Number),
+        consoleObservedAtMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        target: 'firestore-listen-channel',
+        method: 'POST',
+        error: 'net::ERR_NO_BUFFER_SPACE',
+        urlSha256: createHash('sha256').update(listenUrl).digest('hex'),
+        requestObservedAtMs: expect.any(Number),
+        consoleObservedAtMs: expect.any(Number),
+      }),
+    ])
+    expect(JSON.stringify(listenShutdownCandidates)).not.toContain(listenUrl)
+    expect(JSON.stringify(listenShutdownCandidates)).not.toContain('UFXnPhvNwaSuYxv6trvQ3w')
+
+    const extraParam = new URL(listenUrl)
+    extraParam.searchParams.set('unexpected', '1')
+    const rejected: Array<[string, string, string]> = [
+      [listenUrl, 'net::ERR_NO_BUFFER_SPACE', 'PUT'],
+      [listenUrl, 'ERR_NO_BUFFER_SPACE', 'GET'],
+      [listenUrl.replace('/Listen/channel', '/Write/channel'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+      [listenUrl.replace('127.0.0.1', 'localhost'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+      [listenUrl.replace('demo-baby-diary', 'other-project'), 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+      [extraParam.href, 'net::ERR_NO_BUFFER_SPACE', 'GET'],
+    ]
+    for (const [url, errorText, method] of rejected) emitRequestFailed(url, errorText, method)
+
+    expect(rendererErrors).toEqual([
+      ...rejected.map(([url, errorText]) => `B-conflict: requestfailed ${url} ${errorText}`),
     ])
   })
 
@@ -1044,6 +1525,89 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     expect(device.app).toBeNull()
   })
 
+  it('does not release a macOS profile while a snapshotted renderer descendant still exists', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4343,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+    })
+    const order: string[] = []
+    let rows = [
+      { pid: 4343, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' },
+      { pid: 4344, parentPid: 4343, startedAt: 'Wed Jul 15 09:00:01 2026' },
+    ]
+    let releasePoll: (() => void) | undefined
+    const poll = new Promise<void>(resolve => { releasePoll = resolve })
+    const device = {
+      name: 'A-conflict',
+      app: {
+        close: async () => {
+          order.push('app-close-resolved')
+          child.exitCode = 0
+          child.emit('exit', 0, null)
+        },
+        process: () => child,
+      },
+    }
+
+    let closeResolved = false
+    const closing = closeDevice(device, {
+      timeoutMs: 1_000,
+      platform: 'darwin',
+      queryDarwinProcessTable: () => rows,
+      processPollSleep: async () => {
+        order.push('descendant-poll-wait')
+        await poll
+      },
+      killTree: async () => undefined,
+    }).then(() => { closeResolved = true })
+
+    await new Promise(resolve => setImmediate(resolve))
+    expect(order).toEqual(['app-close-resolved', 'descendant-poll-wait'])
+    expect(closeResolved).toBe(false)
+
+    // Reuse of a PID with a different process start identity is not the
+    // snapshotted renderer and must not hold the isolated profile open.
+    rows = [
+      { pid: 4344, parentPid: 1, startedAt: 'Wed Jul 15 09:01:00 2026' },
+    ]
+    releasePoll?.()
+    await closing
+    expect(device.app).toBeNull()
+  })
+
+  it('reads stable macOS process start identities without command-line data', async () => {
+    const runner = await import('../scripts/sync-e2e.mjs')
+    const queryDarwinProcessTable = Reflect.get(runner, 'queryDarwinProcessTable')
+    expect(queryDarwinProcessTable).toBeTypeOf('function')
+    const calls: Array<{ command: string, args: string[], locale: string | undefined }> = []
+
+    const rows = queryDarwinProcessTable({
+      spawnSyncImpl: (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        calls.push({ command, args, locale: options.env?.LC_ALL })
+        return {
+          status: 0,
+          stdout: [
+            ' 4343     1 Wed Jul 15 09:00:00 2026',
+            ' 4344  4343 Wed Jul 15 09:00:01 2026',
+            '',
+          ].join('\n'),
+          stderr: '',
+        }
+      },
+    })
+
+    expect(calls).toEqual([{
+      command: '/bin/ps',
+      args: ['-ax', '-o', 'pid=,ppid=,lstart='],
+      locale: 'C',
+    }])
+    expect(rows).toEqual([
+      { pid: 4343, parentPid: 1, startedAt: 'Wed Jul 15 09:00:00 2026' },
+      { pid: 4344, parentPid: 4343, startedAt: 'Wed Jul 15 09:00:01 2026' },
+    ])
+  })
+
   it('fails closed when a Windows owned-process snapshot query errors', async () => {
     const child = Object.assign(new EventEmitter(), {
       pid: 4245,
@@ -1146,9 +1710,9 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     try {
       const diagnosticPath = path.join(root, 'guard.jsonl')
       writeFileSync(diagnosticPath, [
-        JSON.stringify({ kind: 'guard-ready', timestamp: '2026-07-13T08:00:00.000Z' }),
-        JSON.stringify({ kind: 'network-blocked', protocol: 'https:', destination: 'external' }),
-        JSON.stringify({ kind: 'renderer-gone', reason: 'crashed', exitCode: 9 }),
+        JSON.stringify({ kind: 'guard-ready', sequence: 1, timestamp: '2026-07-13T08:00:00.000Z' }),
+        JSON.stringify({ kind: 'network-blocked', sequence: 2, timestamp: '2026-07-13T08:00:01.000Z', protocol: 'https:', destination: 'external' }),
+        JSON.stringify({ kind: 'renderer-gone', sequence: 3, timestamp: '2026-07-13T08:00:02.000Z', reason: 'crashed', exitCode: 9 }),
       ].join('\n') + '\n')
       const blockedRequests: string[] = []
       const rendererErrors: string[] = []
@@ -1160,7 +1724,11 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       expect(blockedRequests).toEqual(['A: early network-blocked https: external'])
       expect(rendererErrors).toEqual(['A: early renderer-gone crashed (9)'])
 
-      writeFileSync(diagnosticPath, `${JSON.stringify({ kind: 'network-blocked' })}\n`)
+      writeFileSync(diagnosticPath, `${JSON.stringify({
+        kind: 'network-blocked',
+        sequence: 1,
+        timestamp: '2026-07-13T08:00:00.000Z',
+      })}\n`)
       expect(() => collectPersistentGuardDiagnostics(
         [{ name: 'A', path: diagnosticPath }],
         [],
@@ -1171,14 +1739,84 @@ describe('packaged cross-platform sync E2E runner contract', () => {
     }
   })
 
-  it('fails active and legacy console diagnostics with safe locations but ignores closing noise', () => {
+  it('settles one pending Listen shutdown only with one later durable closing record', () => {
+    const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-persistent-guard-')))
+    try {
+      const diagnosticPath = path.join(root, 'guard.jsonl')
+      const listenUrl = `http://127.0.0.1:${FIRESTORE_PORT}/google.firestore.v1.Firestore/Listen/channel?private-token-must-not-leak`
+      const urlSha256 = createHash('sha256').update(listenUrl).digest('hex')
+      const observedAtMs = Date.parse('2026-07-13T08:00:05.000Z')
+      writeFileSync(diagnosticPath, [
+        { kind: 'guard-ready', sequence: 1, timestamp: '2026-07-13T08:00:00.000Z' },
+        {
+          kind: 'teardown-start',
+          sequence: 2,
+          timestamp: '2026-07-13T08:00:04.000Z',
+          phase: 'closing',
+          source: 'window-close',
+          webContentsId: 101,
+        },
+        {
+          kind: 'network-error',
+          sequence: 3,
+          timestamp: '2026-07-13T08:00:05.000Z',
+          phase: 'closing',
+          webContentsId: 101,
+          method: 'GET',
+          error: 'net::ERR_NO_BUFFER_SPACE',
+          target: 'firestore-listen-channel',
+          urlSha256,
+        },
+        {
+          kind: 'console-error',
+          sequence: 4,
+          timestamp: '2026-07-13T08:00:05.001Z',
+          phase: 'closing',
+          webContentsId: 101,
+          protocol: 'http:',
+          destination: 'loopback',
+          port: FIRESTORE_PORT,
+          summary: 'Failed to load resource: net::ERR_NO_BUFFER_SPACE',
+        },
+      ].map(record => JSON.stringify(record)).join('\n') + '\n')
+      const blockedRequests: string[] = []
+      const rendererErrors: string[] = []
+
+      expect(() => collectPersistentGuardDiagnostics(
+        [{
+          name: 'B',
+          path: diagnosticPath,
+          listenShutdownCandidates: [{
+            target: 'firestore-listen-channel',
+            method: 'GET',
+            error: 'net::ERR_NO_BUFFER_SPACE',
+            urlSha256,
+            requestObservedAtMs: observedAtMs,
+            consoleObservedAtMs: observedAtMs,
+          }],
+        }],
+        blockedRequests,
+        rendererErrors,
+      )).not.toThrow()
+      expect(blockedRequests).toEqual([])
+      expect(rendererErrors).toEqual([])
+      expect(readFileSync(diagnosticPath, 'utf8')).not.toContain(listenUrl)
+      expect(readFileSync(diagnosticPath, 'utf8')).not.toContain('private-token-must-not-leak')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails active, legacy, and unrelated closing console diagnostics with safe locations', () => {
     const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'baby-diary-persistent-guard-')))
     try {
       const diagnosticPath = path.join(root, 'guard.jsonl')
       writeFileSync(diagnosticPath, [
-        JSON.stringify({ kind: 'guard-ready', timestamp: '2026-07-13T08:00:00.000Z' }),
+        JSON.stringify({ kind: 'guard-ready', sequence: 1, timestamp: '2026-07-13T08:00:00.000Z' }),
         JSON.stringify({
           kind: 'console-error',
+          sequence: 2,
+          timestamp: '2026-07-13T08:00:01.000Z',
           phase: 'active',
           protocol: 'file:',
           destination: 'packaged',
@@ -1187,6 +1825,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         }),
         JSON.stringify({
           kind: 'console-error',
+          sequence: 3,
+          timestamp: '2026-07-13T08:00:02.000Z',
           protocol: 'http:',
           destination: 'loopback',
           port: 8080,
@@ -1195,6 +1835,8 @@ describe('packaged cross-platform sync E2E runner contract', () => {
         }),
         JSON.stringify({
           kind: 'console-error',
+          sequence: 4,
+          timestamp: '2026-07-13T08:00:03.000Z',
           phase: 'closing',
           protocol: 'file:',
           destination: 'packaged',
@@ -1213,6 +1855,7 @@ describe('packaged cross-platform sync E2E runner contract', () => {
       expect(rendererErrors).toEqual([
         'B-relaunch: early console-error file: packaged line=17 summary=Auth restore failed for [email] password=[redacted] [path] [uuid]',
         'B-relaunch: early console-error http: loopback port=8080 line=23 summary=Firestore write rejected token=[redacted]',
+        'B-relaunch: early console-error file: packaged line=99 summary=Teardown [email] password=[redacted]',
       ])
       expect(rendererErrors.join(' ')).not.toContain('private-account')
       expect(rendererErrors.join(' ')).not.toContain('wife-private-password')

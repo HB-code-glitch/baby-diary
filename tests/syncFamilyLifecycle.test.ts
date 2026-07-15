@@ -161,9 +161,15 @@ vi.mock('../src/sync/firebase', () => ({
 
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
+    getFirebaseEmulator: vi.fn(async () => null),
     listEvents: vi.fn(async () => []),
     listEventMutations: vi.fn(async () => []),
     appendEvent: vi.fn(async () => 'ok'),
+    confirmEventFamily: vi.fn(async (familyId: string) => ({
+      status: 'ok' as const,
+      adoptionFamilyId: familyId,
+      adoptedCount: 0,
+    })),
     getSettings: vi.fn(async () => structuredClone(harness.settings)),
     mergeSettings: (...args: unknown[]) => harness.mergeSettings(...args),
     saveSettings: vi.fn(async (settings: AppSettings) => settings),

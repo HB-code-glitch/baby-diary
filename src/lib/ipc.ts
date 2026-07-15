@@ -11,6 +11,7 @@ import type {
   BabyInfoUnlinkedArchive,
   DataInfo,
   DiaryEvent,
+  EventFamilyConfirmationResult,
   ExportFormat,
   FirebaseEmulatorBridge,
   SavePdfResult,
@@ -61,9 +62,10 @@ declare global {
       getFirebaseEmulator: () => Promise<FirebaseEmulatorBridge | null>
       claimFirebasePersistence: (config: FirebaseConfig) => Promise<FirebasePersistenceClaim>
       openEvidenceSource: (sourceId: HealthEvidenceSourceId) => Promise<void>
-      listEvents: () => Promise<DiaryEvent[]>
-      listEventMutations: () => Promise<DiaryEvent[]>
-      appendEvent: (event: DiaryEvent) => Promise<'ok' | 'duplicate' | 'error'>
+      listEvents: (expectedFamilyId?: string) => Promise<DiaryEvent[]>
+      listEventMutations: (expectedFamilyId?: string) => Promise<DiaryEvent[]>
+      appendEvent: (event: DiaryEvent, expectedFamilyId?: string) => Promise<'ok' | 'duplicate' | 'error'>
+      confirmEventFamily: (familyId: string, allowLegacyAdoption?: boolean) => Promise<EventFamilyConfirmationResult>
       getSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<AppSettings>
       mergeSettings: (partial: Partial<AppSettings>) => Promise<AppSettings>
@@ -75,7 +77,8 @@ declare global {
       exportData: (format: ExportFormat) => Promise<void>
       openBackupFolder: () => Promise<void>
       getDataInfo: () => Promise<DataInfo>
-      onEventAppended: (callback: (event: DiaryEvent) => void) => () => void
+      onEventAppended: (callback: (event: DiaryEvent, familyId: string) => void) => () => void
+      onEventScopeChanged: (callback: () => void) => () => void
       onSettingsChanged: (callback: (payload: SettingsChangedPayload) => void) => () => void
       onUpdateReady: (callback: (payload: { version: string }) => void) => () => void
       onUpdateAvailable: (callback: (payload: { version: string; url: string }) => void) => () => void
@@ -92,7 +95,7 @@ const MOCK_EVENTS_KEY = 'babydiary.mock.events'
 const MOCK_SETTINGS_KEY = 'babydiary.mock.settings'
 const MOCK_BABY_INFO_JOURNAL_KEY = 'babydiary.mock.babyInfoJournal.v1'
 
-type EventCallback = (event: DiaryEvent) => void
+type EventCallback = (event: DiaryEvent, familyId: string) => void
 type SettingsCallback = (payload: SettingsChangedPayload) => void
 const mockEventListeners: EventCallback[] = []
 const mockSettingsListeners: SettingsCallback[] = []
@@ -392,7 +395,11 @@ const mockBabyDiary: Window['babyDiary'] = {
     if (!getEvidenceSourceById(sourceId)) throw new Error('Unknown health evidence source')
     throw new Error('EVIDENCE_LINK_UNAVAILABLE')
   },
-  listEvents: async () => {
+  listEvents: async (expectedFamilyId?: string) => {
+    const currentFamilyId = mockGetSettings().familyId
+    if (expectedFamilyId !== undefined && expectedFamilyId !== currentFamilyId) {
+      throw new Error('EVENT_FAMILY_MISMATCH')
+    }
     const grouped = new Map<string, DiaryEvent[]>()
     for (const event of mockGetEvents()) {
       const group = grouped.get(event.id) ?? []
@@ -401,17 +408,30 @@ const mockBabyDiary: Window['babyDiary'] = {
     }
     return Array.from(grouped.values()).map(events => resolveLatestEvent(events)!).filter(Boolean)
   },
-  listEventMutations: async () => mockGetEvents(),
-  appendEvent: async (event: DiaryEvent): Promise<'ok' | 'duplicate' | 'error'> => {
+  listEventMutations: async (expectedFamilyId?: string) => {
+    const currentFamilyId = mockGetSettings().familyId
+    if (expectedFamilyId !== undefined && expectedFamilyId !== currentFamilyId) {
+      throw new Error('EVENT_FAMILY_MISMATCH')
+    }
+    return mockGetEvents()
+  },
+  appendEvent: async (event: DiaryEvent, expectedFamilyId?: string): Promise<'ok' | 'duplicate' | 'error'> => {
+    const currentFamilyId = mockGetSettings().familyId
+    if (expectedFamilyId !== undefined && expectedFamilyId !== currentFamilyId) return 'error'
     const all = mockGetEvents()
     const key = getEventStorageKey(event)
     if (all.some(existing => getEventStorageKey(existing) === key)) return 'duplicate'
     mockSaveEvents([...all, event])
     setTimeout(() => mockEventListeners.forEach(callback => {
-      try { callback(event) } catch { /* isolate listeners */ }
+      try { callback(event, currentFamilyId) } catch { /* isolate listeners */ }
     }), 0)
     return 'ok'
   },
+  confirmEventFamily: async (familyId: string, _allowLegacyAdoption = true): Promise<EventFamilyConfirmationResult> => ({
+    status: familyId ? 'ok' : 'error',
+    ...(familyId ? { adoptionFamilyId: familyId } : {}),
+    adoptedCount: 0,
+  }),
   getSettings: async () => mockGetSettings(),
   saveSettings: async settings => {
     const journal = mockGetJournal()
@@ -515,6 +535,7 @@ const mockBabyDiary: Window['babyDiary'] = {
       if (index >= 0) mockEventListeners.splice(index, 1)
     }
   },
+  onEventScopeChanged: () => () => undefined,
   onSettingsChanged: callback => {
     mockSettingsListeners.push(callback)
     return () => {
@@ -556,9 +577,13 @@ export const ipc = {
   claimFirebasePersistence: (config: FirebaseConfig): Promise<FirebasePersistenceClaim> =>
     getApi().claimFirebasePersistence(config),
   openEvidenceSource: (sourceId: HealthEvidenceSourceId): Promise<void> => getApi().openEvidenceSource(sourceId),
-  listEvents: (): Promise<DiaryEvent[]> => getApi().listEvents(),
-  listEventMutations: (): Promise<DiaryEvent[]> => getApi().listEventMutations(),
-  appendEvent: (event: DiaryEvent) => getApi().appendEvent(event),
+  listEvents: (expectedFamilyId?: string): Promise<DiaryEvent[]> => getApi().listEvents(expectedFamilyId),
+  listEventMutations: (expectedFamilyId?: string): Promise<DiaryEvent[]> =>
+    getApi().listEventMutations(expectedFamilyId),
+  appendEvent: (event: DiaryEvent, expectedFamilyId?: string) =>
+    getApi().appendEvent(event, expectedFamilyId),
+  confirmEventFamily: (familyId: string, allowLegacyAdoption = true): Promise<EventFamilyConfirmationResult> =>
+    getApi().confirmEventFamily(familyId, allowLegacyAdoption),
   getSettings: (): Promise<AppSettings> => getApi().getSettings(),
   saveSettings: (settings: AppSettings): Promise<AppSettings> => getApi().saveSettings(settings),
   mergeSettings: (partial: Partial<AppSettings>): Promise<AppSettings> => getApi().mergeSettings(partial),
@@ -584,8 +609,14 @@ export const ipc = {
   exportData: (format: ExportFormat) => getApi().exportData(format),
   openBackupFolder: (): Promise<void> => getApi().openBackupFolder(),
   getDataInfo: (): Promise<DataInfo> => getApi().getDataInfo(),
-  onEventAppended: (callback: (event: DiaryEvent) => void): (() => void) =>
+  onEventAppended: (callback: (event: DiaryEvent, familyId: string) => void): (() => void) =>
     getApi().onEventAppended(callback),
+  onEventScopeChanged: (callback: () => void): (() => void) => {
+    const api = getApi()
+    return typeof api.onEventScopeChanged === 'function'
+      ? api.onEventScopeChanged(callback)
+      : () => undefined
+  },
   onSettingsChanged: (callback: (payload: SettingsChangedPayload) => void): (() => void) =>
     getApi().onSettingsChanged(callback),
   onUpdateReady: (callback: (payload: { version: string }) => void): (() => void) =>

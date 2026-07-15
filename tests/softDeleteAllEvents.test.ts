@@ -17,10 +17,11 @@ import { v4 as uuidv4 } from 'uuid'
 
 const mockAppendEvent = vi.fn()
 const mockEnqueue = vi.fn()
+const mockListEvents = vi.fn()
 
 vi.mock('../src/lib/ipc', () => ({
   ipc: {
-    listEvents:       vi.fn(async () => []),
+    listEvents:       (...args: unknown[]) => mockListEvents(...args),
     appendEvent:      (...args: unknown[]) => mockAppendEvent(...args),
     getSettings:      vi.fn(async () => ({
       baby: { name: '', birthdate: '' },
@@ -75,6 +76,8 @@ describe('softDeleteAllEvents', () => {
   beforeEach(() => {
     mockAppendEvent.mockReset()
     mockEnqueue.mockReset()
+    mockListEvents.mockReset()
+    mockListEvents.mockResolvedValue([])
     mockAppendEvent.mockResolvedValue('ok')
   })
 
@@ -208,6 +211,38 @@ describe('softDeleteAllEvents', () => {
     expect(persisted.mutationId).not.toBe(event.mutationId)
     expect(persisted.migration).toBeUndefined()
     expect(enqueued).toBe(persisted)
+  })
+
+  it('ends partially and reloads only the current family when family changes during a durable append', async () => {
+    let resolveAppend!: (value: 'ok') => void
+    const append = new Promise<'ok'>(resolve => { resolveAppend = resolve })
+    mockAppendEvent.mockReturnValueOnce(append)
+    const familyAEvent = makeEvent({ id: 'family-a-delete' })
+    const familyBEvent = makeEvent({ id: 'family-b-current' })
+    mockListEvents.mockResolvedValueOnce([familyBEvent])
+    const { useAppStore } = await import('../src/store/useAppStore')
+    const baseSettings = {
+      baby: { name: '', birthdate: '' },
+      profile: { uid: 'test', name: '', role: 'mom' as const },
+      familyId: 'family-A',
+      firebase: null,
+    }
+    useAppStore.setState({ settings: baseSettings, events: [familyAEvent] })
+
+    const deletion = useAppStore.getState().softDeleteAllEvents()
+    await vi.waitFor(() => expect(mockAppendEvent).toHaveBeenCalledTimes(1))
+    useAppStore.setState({
+      settings: { ...baseSettings, familyId: 'family-B' },
+      events: [],
+    })
+    resolveAppend('ok')
+    const result = await deletion
+
+    expect(result).toEqual({ count: 1, partial: true })
+    expect(mockAppendEvent.mock.calls[0][1]).toBe('family-A')
+    expect(mockEnqueue).toHaveBeenCalledWith(expect.anything(), 'family-A')
+    expect(mockListEvents).toHaveBeenCalledWith('family-B')
+    expect(useAppStore.getState().events).toEqual([familyBEvent])
   })
 
   it('assigns a mutation identity to every newly added event path', async () => {
